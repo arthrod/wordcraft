@@ -84,31 +84,39 @@ fn issue_json(s: &Session, a: &Pos, b: &Pos, i: &wordcraft_proof::Issue) -> Valu
 
 /// F7: select the next issue after the caret and return it with suggestions.
 pub(super) fn next_issue(s: &mut Session, v: &Value) -> CmdResult {
-    let caret = s.sel.ordered().1;
-    let story = caret.story;
-    let paths = s.doc.para_paths(story);
-    let start = paths.iter().position(|p| *p == caret.path).unwrap_or(0);
-    let wrap = p::bool(v, "wrap").unwrap_or(true);
-    // Scan forward first, including the rest of the caret's paragraph. A second pass
-    // optionally visits the earlier part; never select the first typo repeatedly in
-    // a single-paragraph story. Dialogs disable wrapping so Ignore Once can finish.
-    for (path, before) in paths
-        .iter()
-        .skip(start)
-        .map(|path| (path, false))
-        .chain(paths.iter().take(if wrap { start.saturating_add(1) } else { 0 }).map(|path| (path, true)))
+    #[cfg(not(feature = "inline-proof"))]
     {
-        for (a, b, i) in para_issues(s, story, path) {
-            if *path == caret.path && (a.off < caret.off) != before {
-                continue;
-            }
-            let r = issue_json(s, &a, &b, &i);
-            s.sel = Selection { anchor: a, focus: b };
-            return Ok(r);
-        }
+        let _ = (s, v);
+        Err(CmdError::Failed("the spelling and grammar check is not included in this build".into()))
     }
-    s.status = "The spelling and grammar check is complete.".into();
-    Ok(json!({"done": true}))
+    #[cfg(feature = "inline-proof")]
+    {
+        let caret = s.sel.ordered().1;
+        let story = caret.story;
+        let paths = s.doc.para_paths(story);
+        let start = paths.iter().position(|p| *p == caret.path).unwrap_or(0);
+        let wrap = p::bool(v, "wrap").unwrap_or(true);
+        // Scan forward first, including the rest of the caret's paragraph. A second pass
+        // optionally visits the earlier part; never select the first typo repeatedly in
+        // a single-paragraph story. Dialogs disable wrapping so Ignore Once can finish.
+        for (path, before) in paths
+            .iter()
+            .skip(start)
+            .map(|path| (path, false))
+            .chain(paths.iter().take(if wrap { start.saturating_add(1) } else { 0 }).map(|path| (path, true)))
+        {
+            for (a, b, i) in para_issues(s, story, path) {
+                if *path == caret.path && (a.off < caret.off) != before {
+                    continue;
+                }
+                let r = issue_json(s, &a, &b, &i);
+                s.sel = Selection { anchor: a, focus: b };
+                return Ok(r);
+            }
+        }
+        s.status = "The spelling and grammar check is complete.".into();
+        Ok(json!({"done": true}))
+    }
 }
 
 pub(super) fn all_issues(s: &mut Session, _: &Value) -> CmdResult {

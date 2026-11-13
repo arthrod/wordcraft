@@ -72,7 +72,10 @@ impl Bridge {
                 }
                 Ok(Self::detect(canvas))
             }
-            Some("parent") => Ok(Self::detect(canvas)),
+            Some("parent") => {
+                supply_parent_query();
+                Ok(Self::detect(canvas))
+            }
             Some(other) => Err(format!("invalid host mode `{other}` (expected \"none\", \"parent\", or \"page\")")),
         }
     }
@@ -122,6 +125,34 @@ impl Bridge {
                 deliver_open(&inbox, &ctx, &name, &data);
             }
         });
+    }
+}
+
+/// The `craft_web_host` transport reads the parent mode only from `?host=parent` on the page
+/// URL (its `data-host` attribute carries `page` mode), so an explicit `host: "parent"` start
+/// option supplies the same signal: add it to the query without reloading. `Host::connect`
+/// still refuses an unframed or cross-origin parent itself.
+fn supply_parent_query() {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let location = window.location();
+    let Ok(search) = location.search() else {
+        return;
+    };
+    if search.trim_start_matches('?').split('&').any(|p| p == "host=parent") {
+        return;
+    }
+    let (Ok(pathname), Ok(hash)) = (location.pathname(), location.hash()) else {
+        return;
+    };
+    let query = if search.is_empty() { "?host=parent".to_string() } else { format!("{search}&host=parent") };
+    let url = format!("{pathname}{query}{hash}");
+    let Ok(history) = window.history() else {
+        return;
+    };
+    if let Err(e) = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&url)) {
+        log::warn!("host=parent: could not update the page URL ({e:?}); not hosted");
     }
 }
 

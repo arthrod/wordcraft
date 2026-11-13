@@ -15,7 +15,13 @@ thread_local! {
 }
 
 fn default_asset_base(document: &web_sys::Document) -> String {
-    document.base_uri().ok().flatten().filter(|s| !s.is_empty()).map_or_else(|| "./".to_string(), |s| normalize_asset_base(&s))
+    document
+        .base_uri()
+        .ok()
+        .flatten()
+        .filter(|s| !s.is_empty())
+        .and_then(|base| web_sys::Url::new_with_base("./", &base).ok().map(|u| u.href()))
+        .map_or_else(|| "./".to_string(), |resolved| normalize_asset_base(&resolved))
 }
 
 pub(crate) fn normalize_asset_base(base: &str) -> String {
@@ -325,9 +331,7 @@ fn launch_with_config(config: StartConfig) -> js_sys::Promise {
                     }
                     // The host's name for the user signs this visit's work, but isn't stored as the
                     // browser's own preference, which a visit outside the host would restore.
-                    if (app_bridge.is_some() || force_sample.is_none())
-                        && let Some(author) = author_override
-                    {
+                    if let Some(author) = author_override {
                         let own = app.session.author.clone();
                         crate::host::Bridge::set_author(&mut app, &author);
                         prefs.keep_own_author(&app.session.author, &own);

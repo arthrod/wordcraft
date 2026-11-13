@@ -61,22 +61,38 @@ pub fn mount_if_enabled(document: &web_sys::Document, canvas: &web_sys::HtmlCanv
 
     add_badge(document, &bar, "WordCraftWeb Demo");
 
+    // A sample's fetch can land after a later click started its own; only the newest
+    // selection may touch the document and the status line.
+    let sample_generation = Rc::new(Cell::new(0u64));
     for (label, file) in [("Welcome", "samples/welcome.md"), ("Tech Spec", "samples/spec.md"), ("Letter", "samples/letter.md")] {
         let doc_c = document.clone();
         let api_c = api.clone();
         let base_c = asset_base.to_string();
+        let generation_c = sample_generation.clone();
         add_button(document, &bar, label, false, move || {
             let doc_c = doc_c.clone();
             let api_c = api_c.clone();
             let url = format!("{base_c}{file}");
+            let generation = generation_c.get() + 1;
+            generation_c.set(generation);
+            let generation_c = generation_c.clone();
             wasm_bindgen_futures::spawn_local(async move {
+                let current = || generation_c.get() == generation;
                 set_status(&doc_c, &format!("Loading {file}..."));
                 match fetch_text(&url).await {
-                    Ok(md) => match call_api_str(&api_c, "applyMarkdown", &md).await {
-                        Ok(_) => set_status(&doc_c, &format!("Loaded {label} ({file})")),
-                        Err(err) => set_status(&doc_c, &format!("Sample failed: {err}")),
-                    },
-                    Err(err) => set_status(&doc_c, &format!("Fetch {file} failed: {err}")),
+                    Ok(md) => {
+                        if !current() {
+                            return;
+                        }
+                        match call_api_str(&api_c, "applyMarkdown", &md).await {
+                            Ok(_) if current() => set_status(&doc_c, &format!("Loaded {label} ({file})")),
+                            Ok(_) => {}
+                            Err(err) if current() => set_status(&doc_c, &format!("Sample failed: {err}")),
+                            Err(_) => {}
+                        }
+                    }
+                    Err(err) if current() => set_status(&doc_c, &format!("Fetch {file} failed: {err}")),
+                    Err(_) => {}
                 }
             });
         });
