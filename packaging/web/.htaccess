@@ -32,6 +32,13 @@ AddType text/javascript .js
   <FilesMatch "^index\.html$">
     Header set Cache-Control "no-cache"
   </FilesMatch>
+  # Trunk keeps dedicated-worker names un-hashed (wordcraft-worker-proof{,_loader}.js,
+  # _bg.wasm) because they must be named at runtime, so the generic rule above must not pin
+  # them for a year — same exception as in packaging/web/_headers. FilesMatch blocks apply in
+  # order, so this later `Header set` overrides the generic Cache-Control for worker names.
+  <FilesMatch "^wordcraft-worker-.*\.(wasm|js)$">
+    Header set Cache-Control "public, max-age=3600, must-revalidate"
+  </FilesMatch>
 </IfModule>
 
 <IfModule mod_headers.c>

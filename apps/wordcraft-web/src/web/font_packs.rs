@@ -10,7 +10,7 @@
 //! never touched (Q1), so a reload re-requests the face and the HTTP cache answers.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use wasm_bindgen::JsCast as _;
@@ -41,18 +41,18 @@ thread_local! {
     /// The manifest fetch failed this session: automatic installs stay off (a manual ask retries).
     static MANIFEST_FAILED: Cell<bool> = const { Cell::new(false) };
     /// Manifest file names being fetched right now (one fetch per file at a time).
-    static IN_FLIGHT: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    static IN_FLIGHT: RefCell<BTreeSet<String>> = const { RefCell::new(BTreeSet::new()) };
     /// Manifest file names already tried this session, whatever the result: never retried.
-    static ATTEMPTED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    static ATTEMPTED: RefCell<BTreeSet<String>> = const { RefCell::new(BTreeSet::new()) };
     /// Manual installs asked for before the manifest arrived, honoured once it loads.
-    static PENDING_FAMILIES: RefCell<Vec<(Vec<String>, egui::Context)>> = RefCell::new(Vec::new());
+    static PENDING_FAMILIES: RefCell<Vec<(Vec<String>, egui::Context)>> = const { RefCell::new(Vec::new()) };
     /// Wanted faces drained while the manifest was still loading (the record drains on read, so
     /// they're kept here rather than lost).
-    static PENDING_WANTED: RefCell<Vec<wordcraft_fonts::WantedPackFace>> = RefCell::new(Vec::new());
+    static PENDING_WANTED: RefCell<Vec<wordcraft_fonts::WantedPackFace>> = const { RefCell::new(Vec::new()) };
     /// `assetBase`, set once when the shell starts.
     static ASSET_BASE: RefCell<String> = const { RefCell::new(String::new()) };
     /// Resolves of `installFonts` promises still waiting on their last in-flight fetch.
-    static WAITERS: RefCell<Vec<Waiter>> = RefCell::new(Vec::new());
+    static WAITERS: RefCell<Vec<Waiter>> = const { RefCell::new(Vec::new()) };
     /// Status-line messages from background fetches (surfaced by the shell's message queue).
     static STATUS: RefCell<Option<Rc<RefCell<Vec<String>>>>> = const { RefCell::new(None) };
 }
@@ -161,7 +161,7 @@ fn is_installed(entry: &ManifestEntry) -> bool {
 /// Fetch, decode and install `entries` in one task turn: one repaint per batch, not per face
 /// (`WordApp::watch_fonts` lays out once on the generation bump the installs cause).
 fn fetch_and_install(entries: Vec<ManifestEntry>, ctx: egui::Context) {
-    let files: HashSet<String> = entries.iter().map(|e| e.file.clone()).collect();
+    let files: BTreeSet<String> = entries.iter().map(|e| e.file.clone()).collect();
     IN_FLIGHT.with(|s| s.borrow_mut().extend(files.clone()));
     ATTEMPTED.with(|s| s.borrow_mut().extend(files));
     let base = asset_base();
