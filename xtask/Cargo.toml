@@ -13,6 +13,9 @@ base64 = { workspace = true }
 # Pack fonts ship Brotli-compressed (web-assets staging); `brotli` already compresses the
 # bundled minimal-WASM faces in crates/fonts/build.rs.
 brotli = "8"
+# `cargo xtask wasm-attr`: demangle function names for the code-section attribution
+# (MIT OR Apache-2.0, both on the house-rule allowlist).
+rustc-demangle = "0.1"
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 

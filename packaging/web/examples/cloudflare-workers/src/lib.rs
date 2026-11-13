@@ -232,7 +232,7 @@ mod tests {
     /// through the same `import`/`export`/`read`/`write` calls `/api/convert` dispatches to.
     #[test]
     fn every_advertised_format_converts() {
-        // The lists the API dispatch and health advertisement agree.
+        // The lists the API dispatch uses and the health advertisement agree.
         assert_eq!(ADVERTISED_FORMATS, ["md", "txt", "html", "docx"]);
         assert_eq!(CONVERT_TEXT_SOURCES, ["md", "html", "txt"]);
         assert_eq!(CONVERT_TEXT_TARGETS, ["md", "html", "txt"]);
