@@ -49,10 +49,14 @@ pub const TABLE: &[(&str, Class)] = &[
     ("zotero", Class::Layer(5)),
     ("ui-egui", Class::Layer(6)),
     ("testkit", Class::Testkit),
+    // The worker wire protocol: pure Rust + serde, no workspace crates (plan §3.1).
+    ("worker-proto", Class::Standalone),
     // apps and tooling
     ("wordcraft", Class::Exempt),
     ("cli", Class::Exempt),
     ("web", Class::Exempt),
+    // Dedicated web workers use wasm-bindgen, which is forbidden below L6: they are apps (§3.1).
+    ("worker-proof", Class::Exempt),
     ("xtask", Class::Exempt),
 ];
 

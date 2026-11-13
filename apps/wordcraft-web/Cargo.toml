@@ -34,9 +34,10 @@ egui = { workspace = true }
 wordcraft-doc = { workspace = true }
 wordcraft-fonts = { workspace = true, default-features = false, features = ["minimal-wasm-fonts"] }
 wordcraft-geom = { workspace = true }
+wordcraft-worker-proto = { workspace = true }
 eframe = { workspace = true, features = ["accesskit"] }
 rfd = { workspace = true }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlCollection", "HtmlElement", "HtmlCanvasElement", "HtmlAnchorElement", "HtmlIFrameElement", "HtmlInputElement", "HtmlTextAreaElement", "Blob", "BlobPropertyBag", "Url", "Location", "History", "CssStyleDeclaration", "Event", "EventTarget", "BeforeUnloadEvent", "ClipboardEvent", "DataTransfer", "FileList", "File", "DomStringList", "IdbFactory", "IdbOpenDbRequest", "IdbRequest", "IdbDatabase", "IdbObjectStore", "IdbTransaction", "IdbTransactionMode", "MediaQueryList", "Storage", "MessageEvent", "UrlSearchParams", "CustomEvent", "CustomEventInit", "Response", "Request", "RequestInit", "Headers"] }
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlCollection", "HtmlElement", "HtmlCanvasElement", "HtmlAnchorElement", "HtmlIFrameElement", "HtmlInputElement", "HtmlTextAreaElement", "Blob", "BlobPropertyBag", "Url", "Location", "History", "CssStyleDeclaration", "Event", "EventTarget", "BeforeUnloadEvent", "ClipboardEvent", "DataTransfer", "FileList", "File", "DomStringList", "IdbFactory", "IdbOpenDbRequest", "IdbRequest", "IdbDatabase", "IdbObjectStore", "IdbTransaction", "IdbTransactionMode", "MediaQueryList", "Storage", "MessageEvent", "UrlSearchParams", "CustomEvent", "CustomEventInit", "Response", "Request", "RequestInit", "Headers", "Worker", "WorkerOptions", "WorkerType", "ErrorEvent"] }

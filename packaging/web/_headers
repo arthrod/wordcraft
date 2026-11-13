@@ -23,6 +23,17 @@
 /wordcraft-web-*.js
   Cache-Control: public, max-age=31536000, immutable
 
+# Dedicated worker artifacts (wordcraft-worker-proof{,_bg.wasm,_loader.js}): Trunk keeps
+# worker names un-hashed because they must be named at runtime, so — unlike the content-hashed
+# wordcraft-web-* files — they get a short revalidate window, not `immutable` (the plan's own
+# ground rule: immutable caching only on content-hashed file names). A short window still lets
+# repeat visits reuse the cache while a new deploy can't be shadowed for a year.
+/wordcraft-worker-*.js
+  Cache-Control: public, max-age=3600, must-revalidate
+
+/wordcraft-worker-*.wasm
+  Cache-Control: public, max-age=3600, must-revalidate
+
 /wordcraft-*.ico
   Cache-Control: public, max-age=31536000, immutable
 

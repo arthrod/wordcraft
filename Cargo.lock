@@ -7136,6 +7136,29 @@ dependencies = [
  "wordcraft-fonts",
  "wordcraft-geom",
  "wordcraft-ui-egui",
+ "wordcraft-worker-proto",
+]
+
+[[package]]
+name = "wordcraft-worker-proof"
+version = "0.18.1"
+dependencies = [
+ "craft-proof",
+ "getrandom 0.3.4",
+ "js-sys",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "web-sys",
+ "wordcraft-worker-proto",
+]
+
+[[package]]
+name = "wordcraft-worker-proto"
+version = "0.18.1"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

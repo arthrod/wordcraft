@@ -50,3 +50,19 @@ export async function start(options = {}) {
     installGlobal,
   });
 }
+
+/**
+ * Construct the proofing dedicated worker bundled with this package, as a module
+ * worker resolved against the package's own files (the same-origin Trunk loader
+ * shim — no `blob:` URL, so `worker-src 'self'` suffices).
+ *
+ * The worker speaks the `wordcraft-worker-proto` wire contract
+ * (`[headerJson, payloadArrayBuffer]` messages). Consumers that embed WordCraft
+ * normally let the app spawn its own worker; this export exists for hosts that
+ * need the worker under their own control or CSP.
+ *
+ * @returns {Worker}
+ */
+export function createProofWorker() {
+  return new Worker(new URL("./wordcraft-worker-proof_loader.js", import.meta.url), { type: "module" });
+}

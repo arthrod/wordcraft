@@ -84,3 +84,10 @@ export function initSync(
  * element resolves to its existing instance.
  */
 export function start(options?: StartOptions): Promise<WordCraftApi>;
+
+/**
+ * Construct the proofing dedicated worker bundled with this package as a module
+ * worker (`new Worker(new URL('./wordcraft-worker-proof_loader.js', import.meta.url),
+ * { type: 'module' })`). It speaks the `wordcraft-worker-proto` wire contract.
+ */
+export function createProofWorker(): Worker;

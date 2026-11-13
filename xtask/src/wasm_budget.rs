@@ -12,6 +12,13 @@ pub const MAX_GZIPPED_BYTES: usize = 7_100_000;
 pub const MAX_DATA_SECTION_BYTES: usize = 2_750_000;
 pub const CLOUDFLARE_MAX_FILE_BYTES: usize = 25 * 1024 * 1024;
 
+/// Per-dedicated-worker ceilings (plan §3.5), shared by every `apps/wordcraft-worker-*`
+/// artifact until each is measured on a real build — provisional, so each worker's limit
+/// ratchets down to its measured size plus headroom once numbers exist. The 25 MiB per-file
+/// platform ceiling applies to every dist file regardless ([`check_static_file_sizes`]).
+pub const MAX_WORKER_UNCOMPRESSED_BYTES: usize = 12_000_000;
+pub const MAX_WORKER_GZIPPED_BYTES: usize = 4_000_000;
+
 pub const FORBIDDEN_SYMBOLS: &[&str] = &["krilla::", "wordcraft_docbin::"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,6 +132,46 @@ pub fn find_core_wasm(dist_web: &Path) -> Result<PathBuf, String> {
             ))
         }
     }
+}
+
+/// Every `data-type="worker"` artifact in `dist_web` (`wordcraft-worker-*_bg.wasm`; Trunk
+/// keeps worker names un-hashed). The main module's `wordcraft-web*_bg.wasm` is matched by
+/// [`find_core_wasm`] and never returned here.
+pub fn find_worker_wasms(dist_web: &Path) -> Vec<PathBuf> {
+    let mut matches: Vec<PathBuf> = std::fs::read_dir(dist_web)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("wordcraft-worker-") && n.ends_with("_bg.wasm")))
+        .collect();
+    matches.sort();
+    matches
+}
+
+/// One row of the worker section of the budget report (plan §3.5's per-artifact table:
+/// raw + gzip, with the per-file platform ceiling enforced by [`check_static_file_sizes`]).
+fn worker_report_line(r: &WasmReport) -> String {
+    let name = r.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    format!(
+        "  worker {name}: uncompressed {:>10} bytes (budget {:>10}), gzip -9 {:>10} bytes (budget {:>10})",
+        r.total_bytes, MAX_WORKER_UNCOMPRESSED_BYTES, r.gzip_bytes, MAX_WORKER_GZIPPED_BYTES
+    )
+}
+
+fn check_worker_budget(r: &WasmReport) -> Vec<String> {
+    let name = r.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let mut errs = Vec::new();
+    if r.total_bytes > MAX_WORKER_UNCOMPRESSED_BYTES {
+        errs.push(format!("worker {name} uncompressed {} bytes > ceiling {} bytes", r.total_bytes, MAX_WORKER_UNCOMPRESSED_BYTES));
+    }
+    if r.gzip_bytes > MAX_WORKER_GZIPPED_BYTES {
+        errs.push(format!("worker {name} gzipped {} bytes > ceiling {} bytes", r.gzip_bytes, MAX_WORKER_GZIPPED_BYTES));
+    }
+    if !r.found_forbidden.is_empty() {
+        errs.push(format!("forbidden offloaded symbols found in worker {name}: {}", r.found_forbidden.join(", ")));
+    }
+    errs
 }
 
 /// Crates that must not be in the web target's dependency graph. The byte scan for
@@ -312,6 +359,23 @@ pub fn run(root: &Path, report_only: bool) -> Result<(), String> {
     if !report.found_forbidden.is_empty() {
         println!("  forbidden symbols: {}", report.found_forbidden.join(", "));
     }
+
+    // Per-artifact rows for the dedicated workers (plan §3.5). A dist built without the
+    // worker link simply reports none.
+    let worker_wasms = find_worker_wasms(&dist_web);
+    let mut worker_reports = Vec::new();
+    for path in &worker_wasms {
+        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let gz = gzip_size(path, &bytes)?;
+        worker_reports.push(analyze_wasm_bytes(path.clone(), &bytes, gz)?);
+    }
+    if worker_reports.is_empty() {
+        println!("  workers: no wordcraft-worker-*_bg.wasm in {}", dist_web.display());
+    }
+    for r in &worker_reports {
+        println!("{}", worker_report_line(r));
+    }
+
     let sri_res = verify_sri_digests(&dist_web);
     match &sri_res {
         Ok(n) => println!("  SRI digests:  {n} verified cleanly in index.html"),
@@ -334,6 +398,9 @@ pub fn run(root: &Path, report_only: bool) -> Result<(), String> {
         return Ok(());
     }
     let mut errs = check_budget(&report);
+    for r in &worker_reports {
+        errs.extend(check_worker_budget(r));
+    }
     if let Err(e) = sri_res {
         errs.push(e);
     }
@@ -414,6 +481,31 @@ mod tests {
         std::fs::write(dir.join("wordcraft-web-bbb_bg.wasm"), b"b").unwrap();
         assert!(find_core_wasm(&dir).unwrap_err().contains("ambiguous"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_worker_wasms_picks_only_worker_artifacts() {
+        let dir = std::env::temp_dir().join(format!("wc_wasm_workers_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("wordcraft-web-abc_bg.wasm"), b"a").unwrap();
+        std::fs::write(dir.join("wordcraft-worker-proof_bg.wasm"), b"b").unwrap();
+        std::fs::write(dir.join("wordcraft-worker-codecs_bg.wasm"), b"c").unwrap();
+        std::fs::write(dir.join("wordcraft-worker-proof.js"), b"d").unwrap();
+        let found = find_worker_wasms(&dir);
+        let names: Vec<String> = found.iter().filter_map(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).collect();
+        assert_eq!(names, vec!["wordcraft-worker-codecs_bg.wasm", "wordcraft-worker-proof_bg.wasm"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn worker_budget_flags_over_limit_and_forbidden() {
+        let bytes = minimal_wasm(1024, 512, b"krilla::Page");
+        let rep = analyze_wasm_bytes(PathBuf::from("wordcraft-worker-proof_bg.wasm"), &bytes, MAX_WORKER_GZIPPED_BYTES + 1).unwrap();
+        let errs = check_worker_budget(&rep);
+        assert!(errs.iter().any(|e| e.contains("gzipped")) && errs.iter().any(|e| e.contains("forbidden")), "{errs:?}");
+        let ok = analyze_wasm_bytes(PathBuf::from("wordcraft-worker-proof_bg.wasm"), &minimal_wasm(1024, 512, b"safe_symbol"), 400).unwrap();
+        assert!(check_worker_budget(&ok).is_empty());
     }
 
     #[test]

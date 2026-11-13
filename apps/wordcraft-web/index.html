@@ -12,6 +12,11 @@
   <link data-trunk rel="copy-file" href="target-assets/robots.txt" />
   <link data-trunk rel="copy-file" href="target-assets/404.html" />
   <link data-trunk rel="rust" data-bin="wordcraft-web" data-cargo-profile="wasm-release" data-typescript data-wasm-opt="z" data-wasm-opt-params="--enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals" data-weak-refs />
+  <!-- §3.2: the proofing dedicated worker. `data-loader-shim` makes Trunk emit a same-origin
+       `wordcraft-worker-proof_loader.js` (no `blob:` URL — `worker-src 'self'`); the shell
+       lazily `new Worker(assetBase + file, {type: "module"})`s it on the ?proof-worker flag.
+       Trunk keeps worker names un-hashed (they must be named at runtime). -->
+  <link data-trunk rel="rust" href="../wordcraft-worker-proof/Cargo.toml" data-bin="wordcraft-worker-proof" data-type="worker" data-bindgen-target="web" data-cargo-profile="wasm-release" data-wasm-opt="z" data-wasm-opt-params="--enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals" data-weak-refs data-loader-shim />
   <style>
     html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #e6e6e6; font-family: system-ui, -apple-system, sans-serif; }
     #wordcraft_canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }

@@ -87,6 +87,7 @@ const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "wmf",
 const RECIPIENT_EXTS: &[&str] = wordcraft_engine::cmd::mailings::RECIPIENT_EXTENSIONS;
 pub(crate) mod font_packs;
 mod font_store;
+mod proof_worker;
 const CANVAS_ID: &str = "wordcraft_canvas";
 const LOADING_ID: &str = "wordcraft_loading";
 
@@ -319,6 +320,31 @@ fn launch_with_config(config: StartConfig) -> js_sys::Promise {
                     crate::prefs::restore(&mut app, stored.as_deref());
                     let asset_base = initial_asset_base;
                     font_packs::init(&asset_base, messages.clone());
+                    // §3.2: squiggles aren't wired to the UI yet, so the proofing worker is
+                    // opt-in (`?proof-worker`): it starts lazily and runs one smoke check so
+                    // the contract is exercised end to end without costing a page load.
+                    if query().contains("proof-worker") && proof_worker::ensure(&asset_base) {
+                        proof_worker::with(|w| {
+                            if let Err(e) = w.ping() {
+                                log::warn!("proofing worker ping failed to send: {e}");
+                            }
+                            let req = wordcraft_worker_proto::CheckRequest {
+                                para_id: 0,
+                                text: "Ths is a tst.".to_string(),
+                                spans: Vec::new(),
+                                skip: Vec::new(),
+                                options: None,
+                                typing: None,
+                                list_item: false,
+                            };
+                            if let Err(e) = w.check(&req, |res| match res {
+                                Ok(reply) => log::info!("proofing worker: {} issue(s) in the smoke check", reply.issues.len()),
+                                Err(e) => log::warn!("proofing worker smoke check: {} ({:?})", e.message, e.code),
+                            }) {
+                                log::warn!("proofing worker check failed to send: {e}");
+                            }
+                        });
+                    }
                     let initial_lang = app.ui.language.clone();
                     ensure_locale_loaded(&initial_lang, &asset_base, cc.egui_ctx.clone());
                     // A region chosen in File › Options replaces the browser's for the first blank
