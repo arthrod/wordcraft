@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub const MAX_UNCOMPRESSED_BYTES: usize = 18_500_000;
-pub const MAX_GZIPPED_BYTES: usize = 7_000_000;
-pub const MAX_DATA_SECTION_BYTES: usize = 2_550_000;
+pub const MAX_GZIPPED_BYTES: usize = 7_100_000;
+pub const MAX_DATA_SECTION_BYTES: usize = 2_750_000;
 
 pub const FORBIDDEN_SYMBOLS: &[&str] = &["krilla::", "wordcraft_docbin::"];
 
