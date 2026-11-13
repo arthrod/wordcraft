@@ -16,6 +16,7 @@ impl Session {
             pending: self.pending.clone(),
             column: self.column.clone(),
             md_source: None,
+            md_latest: self.md_file.latest.clone(),
         }));
         if self.history.len() > MAX_UNDO {
             self.history.remove(0);
@@ -35,7 +36,15 @@ impl Session {
     /// Record `doc`/`sel` as their own undo step after the fact and close the typing group, so
     /// Undo right after an automatic change (AutoFormat, AutoCorrect) reverts only that change.
     pub fn push_undo(&mut self, label: &str, doc: Document, sel: Selection) {
-        self.history.push(Arc::new(Undo { label: label.to_string(), doc, sel, pending: self.pending.clone(), column: None, md_source: None }));
+        self.history.push(Arc::new(Undo {
+            label: label.to_string(),
+            doc,
+            sel,
+            pending: self.pending.clone(),
+            column: None,
+            md_source: None,
+            md_latest: self.md_file.latest.clone(),
+        }));
         if self.history.len() > MAX_UNDO {
             self.history.remove(0);
             self.undo_evicted += 1;
@@ -211,7 +220,9 @@ impl Session {
             pending: std::mem::replace(&mut self.pending, u.pending),
             column: std::mem::replace(&mut self.column, u.column),
             md_source: std::mem::replace(&mut self.md_source, u.md_source),
+            md_latest: std::mem::replace(&mut self.md_file.latest, u.md_latest),
         };
+        *self.md_file.cached_exact.borrow_mut() = None;
         self.redo.push(Arc::new(cur));
         // Undo swaps the whole body back: a composition belongs to the text it showed.
         self.note_body_replaced();
@@ -238,7 +249,9 @@ impl Session {
             pending: std::mem::replace(&mut self.pending, u.pending),
             column: std::mem::replace(&mut self.column, u.column),
             md_source: std::mem::replace(&mut self.md_source, u.md_source),
+            md_latest: std::mem::replace(&mut self.md_file.latest, u.md_latest),
         };
+        *self.md_file.cached_exact.borrow_mut() = None;
         self.history.push(Arc::new(cur));
         self.note_body_replaced();
         self.refresh_math_session();

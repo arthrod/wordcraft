@@ -600,6 +600,17 @@ fn spreadsheet_named_text_recipient_lists_read_as_text() {
     }
 }
 
+/// CSV recipient headers trim whitespace, name blanks `Column N`, and number repeats consistently
+/// with and without `extra-formats`.
+#[test]
+fn csv_recipient_headers_trim_name_blanks_and_number_repeats() {
+    let mut s = Session::new(Document::new());
+    let csv = " Name , , name , Name , Name 2 , Column 2 \n1,2,3,4,5,6\n";
+    let r = s.run("mailings.recipients", &json!({"csv": csv})).unwrap();
+    assert_eq!(r["fields"], json!(["Name", "Column 2", "name 2", "Name 3", "Name 2 2", "Column 2 2"]));
+    assert_eq!(s.merge.rows, [["1", "2", "3", "4", "5", "6"]]);
+}
+
 /// #778: legacy Excel 97–2003 workbooks are recipient lists; a CSV named .xls reads as text.
 #[cfg(feature = "extra-formats")]
 #[test]

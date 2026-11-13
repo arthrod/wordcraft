@@ -748,10 +748,12 @@ fn layout_summary(s: &mut Session, _: &Value) -> CmdResult {
 const MAX_DOCX_BASE64_BYTES: usize = 64 * 1024 * 1024;
 
 /// Exports the active document as a base64-encoded `.docx` package.
-fn export_docx_cmd(s: &mut Session, _: &Value) -> CmdResult {
+fn export_docx_cmd(s: &mut Session, v: &Value) -> CmdResult {
     // A header/footer just made and left empty isn't exported, as `file.save` (#960).
     let copy = super::insert::saved_copy(s);
-    let bytes = crate::io::save_bytes("document.docx", copy.as_ref().unwrap_or(&s.doc)).map_err(CmdError::Failed)?;
+    let password = s.password.as_ref().map(crate::io::Password::as_str);
+    let opts = export_options(s, v);
+    let bytes = crate::io::save_bytes_with("document.docx", copy.as_ref().unwrap_or(&s.doc), password, &opts).map_err(CmdError::Failed)?;
     let b64 = super::insert::base64_encode(&bytes);
     Ok(json!({"docxBase64": b64, "bytes": bytes.len()}))
 }

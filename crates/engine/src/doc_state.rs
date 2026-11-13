@@ -131,6 +131,8 @@ pub(super) struct Undo {
     pub(super) column: Option<ColumnBlock>,
     /// Pending Markdown Source text preserved by a command that explicitly replaces it.
     pub(super) md_source: Option<crate::cmd::md_source::MdSource>,
+    /// The latest exact Markdown source text associated with the document before this step.
+    pub(super) md_latest: Option<String>,
 }
 
 /// The number of edit locations Go Back cycles through (Word: four).

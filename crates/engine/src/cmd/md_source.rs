@@ -74,8 +74,8 @@ impl MdSource {
 #[derive(Clone, Default)]
 pub struct FileText {
     saved: Option<String>,
-    latest: Option<String>,
-    cached_exact: RefCell<Option<(u64, Option<String>)>>,
+    pub(crate) latest: Option<String>,
+    pub(crate) cached_exact: RefCell<Option<(u64, Option<String>)>>,
 }
 
 impl FileText {
@@ -1022,5 +1022,29 @@ mod tests {
         assert!(matches!(s.run("doc.setMarkdown", &json!({})), Err(CmdError::Params(_))));
         s.doc.settings.protection = Some("readOnly".into());
         assert!(matches!(s.run("doc.setMarkdown", &json!({"markdown": "x"})), Err(CmdError::Disabled(_))));
+    }
+
+    #[test]
+    fn set_markdown_undo_and_redo_preserve_exact_markdown_syntax_without_file() {
+        let mut s = Session::new(Document::new());
+        assert!(s.path.is_none());
+        assert!(s.md_file.is_empty());
+
+        let md_a = "<!-- comment A -->\n# Heading\n\nAlpha.\n";
+        let md_b = "<!-- comment B -->\n# Heading\n\nBeta.\n";
+
+        s.run(SET_MARKDOWN, &json!({"markdown": md_a})).unwrap();
+        assert_eq!(s.run(GET_MARKDOWN, &json!({})).unwrap()["markdown"], md_a);
+
+        s.run(SET_MARKDOWN, &json!({"markdown": md_b})).unwrap();
+        assert_eq!(s.run(GET_MARKDOWN, &json!({})).unwrap()["markdown"], md_b);
+
+        s.run("edit.undo", &json!({})).unwrap();
+        assert_eq!(s.run(GET_MARKDOWN, &json!({})).unwrap()["markdown"], md_a);
+        assert!(body_text(&s).contains("Alpha."));
+
+        s.run("edit.redo", &json!({})).unwrap();
+        assert_eq!(s.run(GET_MARKDOWN, &json!({})).unwrap()["markdown"], md_b);
+        assert!(body_text(&s).contains("Beta."));
     }
 }

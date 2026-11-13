@@ -9,6 +9,7 @@ struct SuccessContext<'a> {
     spec: &'a CommandSpec,
     before_doc: &'a Option<RunSnapshot>,
     pending_before: &'a Option<Option<CharProps>>,
+    md_latest_before: &'a Option<Option<String>>,
     document_id_before: u64,
     replaces_document: bool,
     dirty_before: Option<bool>,
@@ -19,6 +20,24 @@ struct SuccessContext<'a> {
     rev_before: u64,
     sel_before: &'a Selection,
 }
+
+struct ErrorContext<'a> {
+    e: &'a CmdError,
+    before_doc: Option<RunSnapshot>,
+    pending_application_change_before: bool,
+    default_language_before: Option<String>,
+    ime_epoch_before: Option<u64>,
+    math_before: Option<Option<super::MathEdit>>,
+    versions_before: Option<Vec<(String, String, Document)>>,
+    identity_before: Option<IdentitySnapshot>,
+    dirty_before: Option<bool>,
+    md_latest_before: Option<Option<String>>,
+    rev_restore: Option<u64>,
+    blocks_before: Option<std::collections::BTreeMap<String, Fragment>>,
+    pushed: bool,
+}
+
+type IdentitySnapshot = (Option<std::path::PathBuf>, Option<String>, u64, Option<crate::io::Password>, bool, String, bool);
 
 struct ElsewhereContext {
     home: u64,
@@ -45,11 +64,19 @@ impl Session {
     ///
     /// A command that changes nothing is not an edit: it adds no undo step, marks no
     /// unsaved changes, forces no relayout and leaves the redo stack alone (#23).
-    fn unchanged(&self, doc: &Document, sel: &Selection, column: &Option<ColumnBlock>, pending: &Option<CharProps>) -> bool {
+    fn unchanged(
+        &self,
+        doc: &Document,
+        sel: &Selection,
+        column: &Option<ColumnBlock>,
+        pending: &Option<CharProps>,
+        md_latest: &Option<String>,
+    ) -> bool {
         doc.same_content(&self.doc)
             && *sel == self.sel
             && *column == self.column
             && *pending == self.pending
+            && *md_latest == self.md_file.latest
             && !self.md_source.as_ref().is_some_and(|src| src.is_pending())
     }
 
@@ -140,6 +167,7 @@ impl Session {
         // The formatting waiting at the caret (⌘B with nothing selected): an undo step restores
         // it, so a command that only changes it is an edit.
         let pending_before = spec.mutates.then(|| self.pending.clone());
+        let md_latest_before = spec.mutates.then(|| self.md_file.latest.clone());
         // Which document is open. A command that replaces the document (a mail merge) opens a
         // new one, with a new undo history: it is not an edit of this document, whatever the
         // new document holds.
@@ -231,6 +259,7 @@ impl Session {
                 spec,
                 before_doc: &before_doc,
                 pending_before: &pending_before,
+                md_latest_before: &md_latest_before,
                 document_id_before,
                 replaces_document,
                 dirty_before,
@@ -241,56 +270,91 @@ impl Session {
                 rev_before,
                 sel_before: &sel_before,
             }),
-            Err(e) => {
-                self.ime_edit_outcome = ImeEditOutcome::default();
-                self.pending_ime_application_change = pending_application_change_before;
-                self.autocap = None;
-                self.prefs.default_language = default_language_before;
-                if let Some(epoch) = ime_epoch_before {
-                    self.ime_body_epoch = epoch;
-                }
-                if let Some(math) = math_before {
-                    self.math = math;
-                }
-                if let Some(versions) = versions_before {
-                    self.versions = versions;
-                }
-                if let Some((path, file_name, document_id, password, dirty, bib_style, merge_preview)) = identity_before {
-                    self.path = path;
-                    self.file_name = file_name;
-                    self.document_id = document_id;
-                    self.password = password;
-                    self.dirty = dirty;
-                    self.bib_style = bib_style;
-                    self.merge.preview = merge_preview;
-                }
-                if let Some((d, s, h, r, t, ev, c)) = before_doc {
-                    self.doc = d;
-                    self.sel = s;
-                    self.history = h;
-                    self.redo = r;
-                    self.typing_open = t;
-                    // The steps the command pushed out are back, so they no longer count as gone.
-                    self.undo_evicted = ev;
-                    self.column = c;
-                    // Its step is gone with them: its undo group has none to merge into.
-                    if pushed {
-                        self.join_anchor = false;
-                    }
-                }
-                if let Some(dirty) = dirty_before {
-                    self.dirty = dirty;
-                }
-                if let Some(rev) = rev_restore {
-                    self.restore_rev(rev);
-                }
-                if let Some(b) = blocks_before {
-                    self.building_blocks = b;
-                }
-                self.status = e.to_string();
-            }
+            Err(e) => self.finish_error(ErrorContext {
+                e,
+                before_doc,
+                pending_application_change_before,
+                default_language_before,
+                ime_epoch_before,
+                math_before,
+                versions_before,
+                identity_before,
+                dirty_before,
+                md_latest_before,
+                rev_restore,
+                blocks_before,
+                pushed,
+            }),
         }
         result
+    }
+
+    fn finish_error(&mut self, context: ErrorContext) {
+        let ErrorContext {
+            e,
+            before_doc,
+            pending_application_change_before,
+            default_language_before,
+            ime_epoch_before,
+            math_before,
+            versions_before,
+            identity_before,
+            dirty_before,
+            md_latest_before,
+            rev_restore,
+            blocks_before,
+            pushed,
+        } = context;
+        self.ime_edit_outcome = ImeEditOutcome::default();
+        self.pending_ime_application_change = pending_application_change_before;
+        self.autocap = None;
+        self.prefs.default_language = default_language_before;
+        if let Some(epoch) = ime_epoch_before {
+            self.ime_body_epoch = epoch;
+        }
+        if let Some(math) = math_before {
+            self.math = math;
+        }
+        if let Some(versions) = versions_before {
+            self.versions = versions;
+        }
+        if let Some((path, file_name, document_id, password, dirty, bib_style, merge_preview)) = identity_before {
+            self.path = path;
+            self.file_name = file_name;
+            self.document_id = document_id;
+            self.password = password;
+            self.dirty = dirty;
+            self.bib_style = bib_style;
+            self.merge.preview = merge_preview;
+        }
+        if let Some((d, s, h, r, t, ev, c)) = before_doc {
+            self.doc = d;
+            self.sel = s;
+            self.history = h;
+            self.redo = r;
+            self.typing_open = t;
+            // The steps the command pushed out are back, so they no longer count as gone.
+            self.undo_evicted = ev;
+            self.column = c;
+            // Its step is gone with them: its undo group has none to merge into.
+            if pushed {
+                self.join_anchor = false;
+            }
+        }
+        if let Some(dirty) = dirty_before {
+            self.dirty = dirty;
+        }
+        if let Some(md_latest) = md_latest_before {
+            self.md_file.latest = md_latest;
+            *self.md_file.cached_exact.borrow_mut() = None;
+        }
+        if let Some(rev) = rev_restore {
+            self.restore_rev(rev);
+        }
+        if let Some(b) = blocks_before {
+            self.building_blocks = b;
+        }
+        self.status = e.to_string();
     }
 
     fn finish_success(&mut self, context: SuccessContext<'_>) {
@@ -299,6 +363,7 @@ impl Session {
             spec,
             before_doc,
             pending_before,
+            md_latest_before,
             document_id_before,
             replaces_document,
             dirty_before,
@@ -323,9 +388,9 @@ impl Session {
             // document holds: `replaces_document` names the commands that may replace
             // it, and `document_id` catches any other that does (through
             // `set_document`, which starts a new history the old one must not overwrite).
-            let unchanged = |s: &Session| match (before_doc, pending_before) {
-                (Some((doc, sel, _, _, _, _, column)), Some(pending)) => {
-                    !replaces_document && s.document_id == document_id_before && s.unchanged(doc, sel, column, pending)
+            let unchanged = |s: &Session| match (before_doc, pending_before, md_latest_before) {
+                (Some((doc, sel, _, _, _, _, column)), Some(pending), Some(md_latest)) => {
+                    !replaces_document && s.document_id == document_id_before && s.unchanged(doc, sel, column, pending, md_latest)
                 }
                 _ => false,
             };

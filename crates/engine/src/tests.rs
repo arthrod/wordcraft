@@ -101,6 +101,16 @@ fn doc_docx_base64_commands_roundtrip_and_reject_invalid() {
     used.activate(original).unwrap();
     assert_eq!(text(&used), "Unsaved work");
     assert!(used.dirty);
+
+    // Password-protected documents stay encrypted on `doc.exportDocx` and reopen with `password`.
+    let mut encrypted = Session::new(wordcraft_doc::Document::from_text("Secret DOCX bridge"));
+    encrypted.run("file.encrypt", &json!({"password": "pw"})).unwrap();
+    let enc_b64 = encrypted.run("doc.exportDocx", &json!({})).unwrap()["docxBase64"].as_str().unwrap().to_string();
+    let mut reopened = s();
+    assert!(reopened.run("doc.loadDocx", &json!({"docxBase64": enc_b64})).is_err());
+    reopened.run("doc.loadDocx", &json!({"docxBase64": enc_b64, "password": "pw"})).unwrap();
+    assert!(text(&reopened).contains("Secret DOCX bridge"));
+    assert_eq!(reopened.password.as_ref().map(crate::io::Password::as_str), Some("pw"));
 }
 
 #[test]

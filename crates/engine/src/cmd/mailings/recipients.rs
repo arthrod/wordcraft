@@ -240,17 +240,7 @@ pub const RECIPIENT_EXTENSIONS: &[&str] = &["csv", "tsv", "txt", "xlsx", "xlsm",
 
 /// Whether a file name is a spreadsheet read as a recipient list (.xlsx, .xlsm, .xls, .ods).
 pub fn is_spreadsheet_name(name: &str) -> bool {
-    #[cfg(feature = "extra-formats")]
-    {
-        std::path::Path::new(name).extension().is_some_and(|e| wordcraft_formats::sheet::is_extension(&e.to_string_lossy()))
-    }
-    #[cfg(not(feature = "extra-formats"))]
-    {
-        std::path::Path::new(name)
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "xlsx" | "xlsm" | "xls" | "ods"))
-    }
+    std::path::Path::new(name).extension().is_some_and(|e| wordcraft_formats::sheet::is_extension(&e.to_string_lossy()))
 }
 
 /// A file's extension, lower case.
@@ -271,21 +261,7 @@ fn header_split(mut all: Vec<Vec<String>>, headers: bool) -> Result<(Vec<String>
     }
     let fields: Vec<String> = if headers {
         let first = all.remove(0);
-        #[cfg(feature = "extra-formats")]
-        {
-            wordcraft_formats::sheet::field_names(&first[..first.len().min(MAX_FIELDS)])
-        }
-        #[cfg(not(feature = "extra-formats"))]
-        {
-            first[..first.len().min(MAX_FIELDS)]
-                .iter()
-                .enumerate()
-                .map(|(i, s)| {
-                    let t = s.trim();
-                    if t.is_empty() { format!("Column {}", i + 1) } else { t.to_string() }
-                })
-                .collect()
-        }
+        wordcraft_formats::sheet::field_names(&first[..first.len().min(MAX_FIELDS)])
     } else {
         let width = all.iter().map(Vec::len).max().unwrap_or(0).min(MAX_FIELDS);
         (1..=width).map(|i| format!("Column {i}")).collect()
