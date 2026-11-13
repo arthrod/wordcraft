@@ -586,6 +586,20 @@ fn recipient_lists_in_legacy_and_utf16_encodings() {
     assert_eq!(s.merge.rows, [["José"]]);
 }
 
+/// Text exports keep reading as recipient CSV even when a spreadsheet extension names them,
+/// including in a build without workbook support.
+#[test]
+fn spreadsheet_named_text_recipient_lists_read_as_text() {
+    let mut s = Session::new(Document::new());
+    for (path, text, second) in
+        [("export.xls", "Name\tCity\nAda\tLondon\n", vec!["Ada", "London"]), ("export.xlsx", "Name,City\nBo,Oslo\n", vec!["Bo", "Oslo"])]
+    {
+        let r = s.run("mailings.recipients", &json!({"path": path, "data": b64(text.as_bytes())})).unwrap();
+        assert_eq!(r["fields"], json!(["Name", "City"]), "{path}");
+        assert_eq!(s.merge.rows, [second], "{path}");
+    }
+}
+
 /// #778: legacy Excel 97–2003 workbooks are recipient lists; a CSV named .xls reads as text.
 #[test]
 fn recipients_from_an_xls_workbook() {

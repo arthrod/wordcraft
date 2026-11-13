@@ -20,7 +20,14 @@ pub use pixels::{MAX_DECODED_BYTES, MAX_RASTER_PIXELS, decode_fits, decode_peak_
 
 static WASM_NOW_MS_BITS: AtomicU64 = AtomicU64::new(0);
 static WASM_EPOCH_MS_BITS: AtomicU64 = AtomicU64::new(0);
-static WASM_CLOCK_CB: OnceLock<(fn() -> f64, fn(u64) -> i64)> = OnceLock::new();
+/// Host clock callbacks: monotonic ms, Unix-epoch ms, and local UTC offset (secs) at a Unix time.
+struct WasmClock {
+    now_ms: fn() -> f64,
+    epoch_ms: fn() -> f64,
+    tz_offset_secs: fn(u64) -> i64,
+}
+
+static WASM_CLOCK_CB: OnceLock<WasmClock> = OnceLock::new();
 
 /// Updates the atomic monotonic and Unix-epoch clocks (in milliseconds) for WASM hosts.
 pub fn set_wasm_clock(now_ms: f64, epoch_ms: f64) {
@@ -32,15 +39,19 @@ pub fn set_wasm_clock(now_ms: f64, epoch_ms: f64) {
     }
 }
 
-/// Registers browser-side callbacks `(now_and_epoch_ms, tz_offset_secs_at_unix)` at L6 startup.
-pub fn register_wasm_clock(now_ms: fn() -> f64, tz_offset_secs: fn(u64) -> i64) {
-    let _ = WASM_CLOCK_CB.set((now_ms, tz_offset_secs));
+/// Registers host-side clock callbacks at L6 startup: `now_ms` for elapsed-time measurement
+/// (read by [`wasm_now_ms`]), `epoch_ms` for Unix-epoch timestamps (read by [`wasm_epoch_ms`]),
+/// and `tz_offset_secs` for the local UTC offset at a Unix time.
+pub fn register_wasm_clock(now_ms: fn() -> f64, epoch_ms: fn() -> f64, tz_offset_secs: fn(u64) -> i64) {
+    let _ = WASM_CLOCK_CB.set(WasmClock { now_ms, epoch_ms, tz_offset_secs });
 }
 
-/// Current monotonic time in milliseconds for WASM builds without `js-sys` below L6.
+/// Current time in milliseconds for elapsed-time measurement in WASM builds without `js-sys`
+/// below L6, from the host's registered `now_ms` callback (or [`set_wasm_clock`]). It is only as
+/// monotonic as that host clock.
 pub fn wasm_now_ms() -> f64 {
-    if let Some((f, _)) = WASM_CLOCK_CB.get() {
-        let v = f();
+    if let Some(cb) = WASM_CLOCK_CB.get() {
+        let v = (cb.now_ms)();
         if v.is_finite() {
             return v;
         }
@@ -51,8 +62,8 @@ pub fn wasm_now_ms() -> f64 {
 
 /// Current Unix epoch time in milliseconds for WASM builds without `js-sys` below L6.
 pub fn wasm_epoch_ms() -> f64 {
-    if let Some((f, _)) = WASM_CLOCK_CB.get() {
-        let v = f();
+    if let Some(cb) = WASM_CLOCK_CB.get() {
+        let v = (cb.epoch_ms)();
         if v.is_finite() && v > 0.0 {
             return v;
         }
@@ -63,7 +74,7 @@ pub fn wasm_epoch_ms() -> f64 {
 
 /// Local UTC offset in seconds (east positive) at `unix`, supplied by the host clock on WASM.
 pub fn wasm_tz_offset_secs(unix: u64) -> i64 {
-    WASM_CLOCK_CB.get().map_or(0, |(_, f)| f(unix))
+    WASM_CLOCK_CB.get().map_or(0, |cb| (cb.tz_offset_secs)(unix))
 }
 
 /// Points per inch.

@@ -402,7 +402,9 @@ mod tests {
         assert!(fams.iter().any(|f| f == DEFAULT_FAMILY), "{fams:?}");
         assert!(fams.iter().any(|f| f == "Source Sans 3"));
         let styles = db.styles(DEFAULT_FAMILY);
-        for s in ["Regular", "Italic", "Bold", "Semibold"] {
+        // The minimal web font set bundles only the Regular face of each family.
+        let expected: &[&str] = if cfg!(feature = "minimal-wasm-fonts") { &["Regular"] } else { &["Regular", "Italic", "Bold", "Semibold"] };
+        for s in expected {
             assert!(styles.iter().any(|x| x == s), "{s} in {styles:?}");
         }
     }

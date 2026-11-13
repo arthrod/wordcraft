@@ -88,7 +88,11 @@ fn source(s: &Session, v: &Value, fmt: &str) -> Option<String> {
 
 /// Formats the clipboard can be pasted as, best first.
 pub fn available(s: &Session, v: &Value) -> Vec<&'static str> {
-    FORMATS.iter().map(|(id, _)| *id).filter(|id| source(s, v, id).is_some()).collect()
+    FORMATS
+        .iter()
+        .map(|(id, _)| *id)
+        .filter(|id| (cfg!(feature = "extra-formats") || !matches!(*id, "html" | "rtf")) && source(s, v, id).is_some())
+        .collect()
 }
 
 fn formats_json(ids: &[&str]) -> Value {
@@ -150,8 +154,12 @@ fn paste_special(s: &mut Session, v: &Value) -> CmdResult {
             return Ok(r);
         }
         "formatted" => s.clipboard.clone().ok_or_else(|| CmdError::Failed("the clipboard is empty".into()))?,
+        #[cfg(feature = "extra-formats")]
         "html" => adopt(s, import_html(&src)),
+        #[cfg(feature = "extra-formats")]
         _ => adopt(s, wordcraft_formats::rtf::import(src.as_bytes()).map_err(|e| CmdError::Failed(format!("bad RTF: {e}")))?),
+        #[cfg(not(feature = "extra-formats"))]
+        _ => return Err(CmdError::Failed("HTML/RTF paste is not included in this build".into())),
     };
     insert(s, frag)?;
     let mut r = sel_result(s)?;
@@ -160,6 +168,7 @@ fn paste_special(s: &mut Session, v: &Value) -> CmdResult {
 }
 
 /// Indent each side of a pasted `<blockquote>` whose page gives it no margins, points.
+#[cfg_attr(not(feature = "extra-formats"), allow(dead_code))]
 const BLOCKQUOTE_INDENT: f32 = 36.0;
 
 /// Another program's HTML clipboard payload as a document. A `<blockquote>` there is how
@@ -167,6 +176,7 @@ const BLOCKQUOTE_INDENT: f32 = 36.0;
 /// (#1270): it pastes as a Normal paragraph indented by the page's `blockquote` margins, else half
 /// an inch each side, rather than in the (centred, italic) Quote style. Opening an .html file keeps
 /// `<blockquote>` as Quote, so HTML round-trips.
+#[cfg(feature = "extra-formats")]
 fn import_html(html: &str) -> Document {
     let mut doc = wordcraft_formats::html::import(html_fragment(html));
     let (left, right) = blockquote_margins(html);
@@ -185,6 +195,7 @@ fn import_html(html: &str) -> Document {
 
 /// The left and right margins (points) the payload's `<style>` sheets give `blockquote` — LibreOffice
 /// writes `blockquote { margin-left: 1cm; margin-right: 1cm }` — else [`BLOCKQUOTE_INDENT`].
+#[cfg(feature = "extra-formats")]
 fn blockquote_margins(html: &str) -> (f32, f32) {
     let len = |v: &str| wordcraft_formats::html::css_len_pt(v).map(|x| x.clamp(0.0, 1584.0));
     let (mut left, mut right) = (BLOCKQUOTE_INDENT, BLOCKQUOTE_INDENT);
@@ -245,6 +256,7 @@ pub fn html_fragment(html: &str) -> &str {
 }
 
 /// Whether an imported document has anything to paste: text, a table, or a picture it carries.
+#[cfg_attr(not(feature = "extra-formats"), allow(dead_code))]
 fn has_content(d: &Document) -> bool {
     d.body.iter().any(|b| match &**b {
         Block::Para(p) => !p.text.trim().is_empty() || (!p.objects.is_empty() && !d.media.is_empty()),
@@ -255,6 +267,7 @@ fn has_content(d: &Document) -> bool {
 /// Another program's formatted copy, from the system clipboard's HTML, else its RTF (#687), as a
 /// fragment of this document. `None` when neither is given, either is larger than
 /// [`MAX_PASTE_BYTES`], or it holds nothing to paste (the caller pastes the text then).
+#[cfg(feature = "extra-formats")]
 pub fn rich_fragment(s: &mut Session, v: &Value) -> Option<Fragment> {
     let fits = |k: &str| p::str(v, k).filter(|t| !t.trim().is_empty() && t.len() <= MAX_PASTE_BYTES);
     let doc = fits("html").map(import_html);
@@ -266,6 +279,11 @@ pub fn rich_fragment(s: &mut Session, v: &Value) -> Option<Fragment> {
         }
     };
     Some(adopt(s, doc))
+}
+
+#[cfg(not(feature = "extra-formats"))]
+pub fn rich_fragment(_s: &mut Session, _v: &Value) -> Option<Fragment> {
+    None
 }
 
 /// What a Paste brings in.
@@ -432,6 +450,7 @@ pub(crate) fn unlink_sections(blocks: &mut [Block]) {
 
 /// Turn an imported document into a fragment of the session's document: bring over the media,
 /// lists and styles it refers to (renumbered so they can't collide with ours).
+#[cfg_attr(not(feature = "extra-formats"), allow(dead_code))]
 fn adopt(s: &mut Session, src: Document) -> Fragment {
     let mut frag = s.doc.adopt(src);
     // Pasted pictures fit our text width, like Insert › Pictures (layout keeps their size).

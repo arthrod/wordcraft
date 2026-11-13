@@ -650,6 +650,7 @@ fn write_unique(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<PathBuf
         r => r?,
     };
     let written = std::io::Write::write_all(&mut file, bytes);
+    #[cfg_attr(target_arch = "wasm32", allow(clippy::drop_non_drop))]
     drop(file);
     if let Err(e) = written.and_then(|()| std::fs::rename(&tmp, &path)) {
         let _ = std::fs::remove_file(&tmp);

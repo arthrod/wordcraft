@@ -127,9 +127,14 @@ pub fn specs() -> Vec<CommandSpec> {
             .params(r#"{"text"?: string (up to 2 MB), "caret"?: integer >= 0}"#)
             .when(|s| s.md_source.is_none().then_some("only in Markdown Source")),
         CommandSpec::new(GET_MARKDOWN, "Get Markdown", "File › Export", get_markdown).pure(),
-        CommandSpec::new(SET_MARKDOWN, "Set Markdown", "File › Import", set_markdown)
-            .params(r#"{"markdown": string (up to 2 MB)}"#)
-            .when(|s| s.doc.settings.protection.is_some().then_some("not in a protected document")),
+        CommandSpec::new(SET_MARKDOWN, "Set Markdown", "File › Import", set_markdown).params(r#"{"markdown": string (up to 2 MB)}"#).when(|s| {
+            s.doc
+                .settings
+                .protection
+                .is_some()
+                .then_some("not in a protected document")
+                .or_else(|| (s.doc.settings.track_changes || !s.doc.revisions.is_empty()).then_some("not with tracked changes"))
+        }),
     ]
 }
 
@@ -234,10 +239,14 @@ fn set_markdown(s: &mut Session, v: &Value) -> CmdResult {
     if s.doc.settings.protection.is_some() {
         return Err(CmdError::Disabled("not in a protected document".into()));
     }
+    if s.doc.settings.track_changes || !s.doc.revisions.is_empty() {
+        return Err(CmdError::Disabled("not with tracked changes".into()));
+    }
     let md = p::str(v, "markdown").or_else(|| p::str(v, "text")).ok_or_else(|| CmdError::Params("missing `markdown` string".into()))?;
     if md.len() > MAX_SOURCE_BYTES {
         return Err(CmdError::Params(too_long()));
     }
+    s.preserve_md_source_for_undo();
     s.md_source = None;
     let doc = parse(&s.doc, md);
     s.doc = doc;
@@ -935,6 +944,43 @@ mod tests {
         let s = session(SAMPLE);
         let spec = s.registry.get(TEXT).unwrap();
         assert!(spec.mutates, "view.markdownSourceText mutates session and dirty state");
+    }
+
+    #[test]
+    fn set_markdown_refuses_tracked_documents_without_replacing_them() {
+        let mut s = session(SAMPLE);
+        s.doc.settings.track_changes = true;
+        let tracked = s.doc.clone();
+        assert_eq!(s.why_disabled(SET_MARKDOWN), Some("not with tracked changes"));
+        assert!(matches!(s.run(SET_MARKDOWN, &json!({"markdown": "Replacement"})), Err(CmdError::Disabled(_))));
+        assert!(s.doc.same_content(&tracked));
+
+        s.doc.settings.track_changes = false;
+        s.doc.revisions.push(wordcraft_doc::Revision::new(wordcraft_doc::RevisionKind::Insert, "Author", ""));
+        let with_revisions = s.doc.clone();
+        assert!(matches!(s.run(SET_MARKDOWN, &json!({"markdown": "Replacement"})), Err(CmdError::Disabled(_))));
+        assert!(s.doc.same_content(&with_revisions));
+    }
+
+    #[test]
+    fn set_markdown_undo_restores_the_pending_source_buffer() {
+        let mut s = session(SAMPLE);
+        let before = s.doc.clone();
+        s.run(TOGGLE, &json!({})).unwrap();
+        set_text(&mut s, "# Pending source edit\n");
+        let depth = s.undo_depth();
+
+        s.run(SET_MARKDOWN, &json!({"markdown": "# Direct replacement\n"})).unwrap();
+        assert!(s.md_source.is_none());
+        assert!(body_text(&s).contains("Direct replacement"));
+        assert_eq!(s.undo_depth(), depth + 1, "the replacement has one undo step");
+
+        s.run("edit.undo", &json!({})).unwrap();
+        assert!(s.doc.same_content(&before));
+        let src = s.md_source.as_ref().expect("Undo restores the source view");
+        assert_eq!(src.text, "# Pending source edit\n");
+        assert!(src.is_pending());
+        assert_eq!(s.run(GET_MARKDOWN, &json!({})).unwrap()["markdown"], "# Pending source edit\n");
     }
 
     #[test]

@@ -749,12 +749,15 @@ const MAX_DOCX_BASE64_BYTES: usize = 64 * 1024 * 1024;
 
 /// Exports the active document as a base64-encoded `.docx` package.
 fn export_docx_cmd(s: &mut Session, _: &Value) -> CmdResult {
-    let bytes = crate::io::save_bytes("document.docx", &s.doc).map_err(CmdError::Failed)?;
+    // A header/footer just made and left empty isn't exported, as `file.save` (#960).
+    let copy = super::insert::saved_copy(s);
+    let bytes = crate::io::save_bytes("document.docx", copy.as_ref().unwrap_or(&s.doc)).map_err(CmdError::Failed)?;
     let b64 = super::insert::base64_encode(&bytes);
     Ok(json!({"docxBase64": b64, "bytes": bytes.len()}))
 }
 
-/// Replaces the active document from base64-encoded `.docx` bytes.
+/// Loads a document from base64-encoded `.docx` bytes: an untouched blank document gives way to
+/// it; otherwise it opens beside the active document, as `file.open` does.
 fn load_docx_cmd(s: &mut Session, v: &Value) -> CmdResult {
     let b64 = p::str(v, "docxBase64").or_else(|| p::str(v, "data")).ok_or_else(|| CmdError::Params("missing `docxBase64` string".into()))?;
     if b64.len() > MAX_DOCX_BASE64_BYTES {
@@ -766,7 +769,12 @@ fn load_docx_cmd(s: &mut Session, v: &Value) -> CmdResult {
     }
     let password = p::str(v, "password");
     let (doc, encrypted) = crate::io::open_bytes_with("document.docx", &bytes, password).map_err(CmdError::Failed)?;
-    s.set_document(doc);
+    match s.used_because() {
+        None => s.set_document(doc),
+        Some(_) => {
+            s.add_opened_document(doc);
+        }
+    }
     if encrypted {
         s.password = password.map(crate::io::Password::new);
     }

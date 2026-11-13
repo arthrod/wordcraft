@@ -40,6 +40,7 @@ pub(super) fn word_count(s: &mut Session, v: &Value) -> CmdResult {
 
 /// Issues (spelling + grammar) in one paragraph as positions, each in its run's language and
 /// skipping text left unchecked — the same issues the layout underlines.
+#[cfg(feature = "inline-proof")]
 fn para_issues(s: &Session, story: StoryRef, path: &wordcraft_doc::Path) -> Vec<(Pos, Pos, wordcraft_proof::Issue)> {
     let Some(p) = s.doc.para(story, path) else { return Vec::new() };
     let runs = wordcraft_layout::para::proof_runs(&s.doc, p, None);
@@ -47,6 +48,11 @@ fn para_issues(s: &Session, story: StoryRef, path: &wordcraft_doc::Path) -> Vec<
         .into_iter()
         .map(|i| (Pos { story, path: path.clone(), off: i.start }, Pos { story, path: path.clone(), off: i.end }, i))
         .collect()
+}
+
+#[cfg(not(feature = "inline-proof"))]
+fn para_issues(_s: &Session, _story: StoryRef, _path: &wordcraft_doc::Path) -> Vec<(Pos, Pos, wordcraft_proof::Issue)> {
+    Vec::new()
 }
 
 /// The issue under a position.
@@ -65,7 +71,10 @@ pub(super) fn issue_at(s: &Session, at: &Pos) -> Option<(Pos, Pos, wordcraft_pro
 
 fn issue_json(s: &Session, a: &Pos, b: &Pos, i: &wordcraft_proof::Issue) -> Value {
     let word = s.doc.para_at(a).and_then(|p| p.text.get(a.off..b.off)).unwrap_or("").to_string();
+    #[cfg(feature = "inline-proof")]
     let sugg = if i.kind == wordcraft_proof::IssueKind::Spelling { wordcraft_proof::suggest_in(&word, 6, i.lang) } else { i.suggestions.clone() };
+    #[cfg(not(feature = "inline-proof"))]
+    let sugg = i.suggestions.clone();
     json!({
         "start": pos_json(a), "end": pos_json(b), "text": word,
         "kind": if i.kind == wordcraft_proof::IssueKind::Spelling { "spelling" } else { "grammar" },

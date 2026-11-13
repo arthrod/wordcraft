@@ -21,7 +21,9 @@ fn main() {
     }
 
     let mut src = String::from("pub static CRAFT_FONTS: &[CraftFont] = &[\n");
-    if !minimal_wasm_fonts && let Some(dir) = std::env::var_os("CRAFT_FONTS_DIR").map(PathBuf::from) {
+    // `minimal-wasm-fonts` only slims the bundled core faces; supplied craft-fonts still go
+    // through `craft_fonts`, whose wasm filter keeps the small Arabic and Georgian faces.
+    if let Some(dir) = std::env::var_os("CRAFT_FONTS_DIR").map(PathBuf::from) {
         match craft_fonts(&dir) {
             Ok((entries, covered)) => {
                 src.push_str(&entries);
@@ -83,7 +85,7 @@ fn craft_fonts(dir: &std::path::Path) -> Result<(String, Vec<String>), String> {
     Ok((out, covered))
 }
 
-const CORE_WASM_FONTS: &[&str] = &["SourceSans3-Regular", "SourceSerif4-Regular", "Inter-Regular", "Inter-Medium"];
+const CORE_WASM_FONTS: &[&str] = &["SourceSans3-Regular", "SourceSerif4-Regular", "Inter-Regular"];
 
 fn write_bundled_wasm_fonts(out_dir: &std::path::Path, minimal: bool) -> Result<(), String> {
     let manifest_dir = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap_or_default());

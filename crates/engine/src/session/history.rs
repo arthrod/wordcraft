@@ -15,6 +15,7 @@ impl Session {
             sel: self.sel.clone(),
             pending: self.pending.clone(),
             column: self.column.clone(),
+            md_source: None,
         }));
         if self.history.len() > MAX_UNDO {
             self.history.remove(0);
@@ -34,13 +35,23 @@ impl Session {
     /// Record `doc`/`sel` as their own undo step after the fact and close the typing group, so
     /// Undo right after an automatic change (AutoFormat, AutoCorrect) reverts only that change.
     pub fn push_undo(&mut self, label: &str, doc: Document, sel: Selection) {
-        self.history.push(Arc::new(Undo { label: label.to_string(), doc, sel, pending: self.pending.clone(), column: None }));
+        self.history.push(Arc::new(Undo { label: label.to_string(), doc, sel, pending: self.pending.clone(), column: None, md_source: None }));
         if self.history.len() > MAX_UNDO {
             self.history.remove(0);
             self.undo_evicted += 1;
         }
         self.typing_open = false;
         self.join_anchor = true;
+    }
+
+    /// Keep pending Markdown Source text in the current command's undo step. Ordinary edit
+    /// checkpoints don't carry the view; this is for a command that explicitly closes and replaces it.
+    pub(crate) fn preserve_md_source_for_undo(&mut self) {
+        if self.md_source.as_ref().is_some_and(|src| src.is_pending())
+            && let Some(step) = self.history.last_mut()
+        {
+            Arc::make_mut(step).md_source = self.md_source.clone();
+        }
     }
 
     /// Make the next mutating command part of the previous undo step instead of a new one, so a
@@ -195,6 +206,7 @@ impl Session {
             sel: std::mem::replace(&mut self.sel, u.sel),
             pending: std::mem::replace(&mut self.pending, u.pending),
             column: std::mem::replace(&mut self.column, u.column),
+            md_source: std::mem::replace(&mut self.md_source, u.md_source),
         };
         self.redo.push(Arc::new(cur));
         // Undo swaps the whole body back: a composition belongs to the text it showed.
@@ -221,6 +233,7 @@ impl Session {
             sel: std::mem::replace(&mut self.sel, u.sel),
             pending: std::mem::replace(&mut self.pending, u.pending),
             column: std::mem::replace(&mut self.column, u.column),
+            md_source: std::mem::replace(&mut self.md_source, u.md_source),
         };
         self.history.push(Arc::new(cur));
         self.note_body_replaced();
