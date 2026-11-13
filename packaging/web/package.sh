@@ -129,6 +129,9 @@ if [[ "$BUILD_NPM" -eq 1 ]]; then
     if [[ -d "$NPM_TRUNK_OUT/samples" ]]; then
       /bin/cp -fR "$NPM_TRUNK_OUT/samples" "$NPM_STAGE/"
     fi
+    if [[ -d "$NPM_TRUNK_OUT/fonts" ]]; then
+      /bin/cp -fR "$NPM_TRUNK_OUT/fonts" "$NPM_STAGE/"
+    fi
   fi
 
   /bin/cp -f "$HERE/npm/index.js" "$HERE/npm/index.d.ts" "$NPM_STAGE/"
@@ -208,7 +211,7 @@ EOF
     if (pkg.name !== 'wordcraft-web') throw new Error('unexpected package name: ' + pkg.name);
     if (pkg.version !== '$VERSION') throw new Error('version mismatch: ' + pkg.version);
     const paths = new Set(pkg.files.map((f) => f.path));
-    for (const req of ['index.js', 'index.d.ts', 'wordcraft-web.js', 'wordcraft-web.d.ts', 'wordcraft-web_bg.wasm', 'i18n/manifest.json', 'LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE', 'ATTRIBUTION.md', 'README.md']) {
+    for (const req of ['index.js', 'index.d.ts', 'wordcraft-web.js', 'wordcraft-web.d.ts', 'wordcraft-web_bg.wasm', 'i18n/manifest.json', 'fonts/manifest.json', 'LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE', 'ATTRIBUTION.md', 'README.md']) {
       if (!paths.has(req)) throw new Error('npm tarball missing required file: ' + req);
     }
     for (const p of paths) {

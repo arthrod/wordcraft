@@ -8,6 +8,37 @@ use sha2::{Digest as _, Sha256};
 
 const STUB_TSV: &str = "# craft-i18n stub (built without CRAFT_I18N_DIR)\n";
 
+/// The site is a public product page as well as an app: crawlers may index it.
+const ROBOTS_TXT: &str = "User-agent: *\nAllow: /\n";
+
+/// Served by static hosts (Cloudflare Pages serves a root `404.html` with status 404) when a path
+/// matches no deployed file, so missing assets are a real error rather than a silent `index.html`
+/// with status 200.
+const NOT_FOUND_HTML: &str = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Page not found — WordCraft</title>
+<style>
+  body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #e6e6e6; color: #334155; font-family: system-ui, -apple-system, sans-serif; }
+  main { max-width: 34rem; padding: 2rem; }
+  h1 { font-size: 1.4rem; margin: 0 0 0.75rem; }
+  p { line-height: 1.5; }
+  a { color: #2b47b5; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Page not found</h1>
+  <p>The page you requested does not exist or has moved.</p>
+  <p><a href="/">Open WordCraft</a></p>
+</main>
+</body>
+</html>
+"#;
+
 const SAMPLE_SPEC_MD: &str = r#"# WordCraftWeb Architecture & Browser Capabilities
 
 WordCraftWeb runs the clean-room Rust **WordCraft** document engine, layout engine, OOXML codec, and GPU canvas UI completely inside WebAssembly.
@@ -174,7 +205,93 @@ pub fn emit_web_assets(root: &Path, out_dir: &Path, i18n_dir: Option<&Path>, req
         std::fs::write(samples_out.join(name), content).map_err(|e| format!("{}: {e}", samples_out.join(name).display()))?;
     }
 
+    for (name, content) in [("robots.txt", ROBOTS_TXT), ("404.html", NOT_FOUND_HTML)] {
+        std::fs::write(out_dir.join(name), content).map_err(|e| format!("{}: {e}", out_dir.join(name).display()))?;
+    }
+
+    emit_font_packs(root, out_dir)?;
+
     Ok(locales.len())
+}
+
+/// A downloadable pack face: the `assets/fonts/` faces that `minimal-wasm-fonts` builds do not
+/// bundle. This table must agree with `CORE_WASM_FONTS` in `crates/fonts/build.rs` (the bundled
+/// four) and with `PACK_FACES` in `crates/fonts/src/packs.rs`; `tests::font_packs_cover_every_non_bundled_face`
+/// checks the first, the manifest-vs-PACK_FACES agreement is asserted by the family/weight/italic
+/// fields the web shell's `packs::pick_pack_face` matches on.
+struct PackSpec {
+    /// File stem in `assets/fonts/` ("SourceSans3-Bold"); the shipped file is `<stem>.<hash8>.ttf.br`.
+    stem: &'static str,
+    /// Typographic family the face reports ("Source Sans 3").
+    family: &'static str,
+    /// usWeightClass (400 regular, 600 semibold, 700 bold).
+    weight: u16,
+    italic: bool,
+}
+
+const PACK_FACES: &[PackSpec] = &[
+    PackSpec { stem: "Inter-SemiBold", family: "Inter", weight: 600, italic: false },
+    PackSpec { stem: "JetBrainsMono-Regular", family: "JetBrains Mono", weight: 400, italic: false },
+    PackSpec { stem: "SourceSans3-Bold", family: "Source Sans 3", weight: 700, italic: false },
+    PackSpec { stem: "SourceSans3-It", family: "Source Sans 3", weight: 400, italic: true },
+    PackSpec { stem: "SourceSans3-Semibold", family: "Source Sans 3", weight: 600, italic: false },
+    PackSpec { stem: "SourceSerif4-Bold", family: "Source Serif 4", weight: 700, italic: false },
+    PackSpec { stem: "SourceSerif4-BoldIt", family: "Source Serif 4", weight: 700, italic: true },
+    PackSpec { stem: "SourceSerif4-It", family: "Source Serif 4", weight: 400, italic: true },
+    PackSpec { stem: "SourceSerif4-Semibold", family: "Source Serif 4", weight: 600, italic: false },
+];
+
+/// The four faces `crates/fonts/build.rs::CORE_WASM_FONTS` embeds in `minimal-wasm-fonts` builds:
+/// everything else in `assets/fonts/` is a pack. Kept in sync by
+/// `tests::font_packs_cover_every_non_bundled_face`, which parses `build.rs` rather than trusting
+/// this copy.
+const CORE_WASM_FONTS: &[&str] = &["SourceSans3-Regular", "SourceSerif4-Regular", "Inter-Regular", "Inter-Medium"];
+
+/// Stage `fonts/<stem>.<hash8>.ttf.br` (Brotli quality 11; `<hash8>` is the first 8 hex chars of the
+/// SHA-256 of the *uncompressed* TTF, so the name changes exactly when the font does) plus
+/// `fonts/manifest.json` under `out_dir`. Manifest entries carry `family`, `weight`, `italic`,
+/// `file`, `bytes` (decoded size) and `compressedBytes`; the URL is always `assetBase + "fonts/" + file`.
+fn emit_font_packs(root: &Path, out_dir: &Path) -> Result<(), String> {
+    let fonts_dir = root.join("assets/fonts");
+    let fonts_out = out_dir.join("fonts");
+    std::fs::create_dir_all(&fonts_out).map_err(|e| format!("{}: {e}", fonts_out.display()))?;
+
+    // Pack files that no longer match a spec (a face moved out of the pack set) must not ship.
+    for entry in std::fs::read_dir(&fonts_out).map_err(|e| format!("{}: {e}", fonts_out.display()))?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name == "manifest.json" {
+            continue;
+        }
+        let keep = PACK_FACES.iter().any(|p| name.starts_with(&format!("{}.", p.stem)));
+        if !keep {
+            std::fs::remove_file(entry.path()).map_err(|e| format!("{}: {e}", entry.path().display()))?;
+        }
+    }
+
+    let mut faces = Vec::with_capacity(PACK_FACES.len());
+    for spec in PACK_FACES {
+        let path = fonts_dir.join(format!("{}.ttf", spec.stem));
+        let ttf = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let hash8 = sha256_hex(&ttf).get(..8).map(str::to_string).unwrap_or_default();
+        let params = brotli::enc::BrotliEncoderParams { quality: 11, lgwin: 22, ..Default::default() };
+        let mut compressed = Vec::new();
+        brotli::BrotliCompress(&mut ttf.as_slice(), &mut compressed, &params).map_err(|e| format!("brotli {}: {e}", spec.stem))?;
+        let file = format!("{}.{hash8}.ttf.br", spec.stem);
+        std::fs::write(fonts_out.join(&file), &compressed).map_err(|e| format!("{}: {e}", fonts_out.join(&file).display()))?;
+        faces.push(serde_json::json!({
+            "family": spec.family,
+            "weight": spec.weight,
+            "italic": spec.italic,
+            "file": file,
+            "bytes": ttf.len(),
+            "compressedBytes": compressed.len(),
+        }));
+    }
+
+    let manifest = serde_json::json!({ "faces": faces });
+    let bytes = serde_json::to_vec_pretty(&manifest).map_err(|e| format!("serialize font manifest: {e}"))?;
+    std::fs::write(fonts_out.join("manifest.json"), bytes).map_err(|e| format!("{}: {e}", fonts_out.join("manifest.json").display()))?;
+    Ok(())
 }
 
 pub fn run(root: &Path) -> Result<(), String> {
@@ -217,6 +334,9 @@ mod tests {
         assert!(out.join("i18n/manifest.json").is_file());
         assert!(out.join("i18n/fr/wordcraft.tsv").is_file());
         assert!(out.join("samples/spec.md").is_file());
+        assert!(out.join("robots.txt").is_file());
+        let not_found = std::fs::read_to_string(out.join("404.html")).unwrap();
+        assert!(not_found.contains("Page not found"), "{not_found}");
 
         // Synthetic craft-i18n checkout copies real bytes when present.
         let fake_i18n = dir.join("craft-i18n");
@@ -230,6 +350,86 @@ mod tests {
         let manifest: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(out.join("i18n/manifest.json")).unwrap()).unwrap();
         assert_eq!(manifest["locales"]["fr"]["populated"], true);
         assert_eq!(manifest["locales"]["de"]["populated"], false);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Parse the `CORE_WASM_FONTS` stem list out of `crates/fonts/build.rs`.
+    fn core_wasm_fonts(root: &Path) -> Vec<String> {
+        let src = std::fs::read_to_string(root.join("crates/fonts/build.rs")).unwrap();
+        let start = src.find("CORE_WASM_FONTS").unwrap();
+        let src = &src[start..];
+        let list = src.split("= &[").nth(1).and_then(|s| s.split(']').next()).unwrap_or_default();
+        list.split('"').filter(|s| s.chars().next().is_some_and(|c| c.is_alphabetic())).map(str::to_string).collect()
+    }
+
+    /// Every `assets/fonts/*.ttf` that `minimal-wasm-fonts` does not bundle is a pack face, no
+    /// more and no fewer — a drifted `CORE_WASM_FONTS` or a new font file fails here.
+    #[test]
+    fn font_packs_cover_every_non_bundled_face() {
+        let root = crate::root();
+        let core = core_wasm_fonts(&root);
+        assert_eq!(core.len(), 4, "CORE_WASM_FONTS: {core:?}");
+        assert_eq!(core, CORE_WASM_FONTS, "xtask's copy of CORE_WASM_FONTS drifted from crates/fonts/build.rs");
+        let pack_stems: Vec<&str> = PACK_FACES.iter().map(|p| p.stem).collect();
+        let mut ttf_stems = Vec::new();
+        for e in std::fs::read_dir(root.join("assets/fonts")).unwrap().flatten() {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "ttf")
+                && let Some(stem) = p.file_stem().and_then(|s| s.to_str())
+            {
+                ttf_stems.push(stem.to_string());
+            }
+        }
+        assert_eq!(ttf_stems.len(), 13, "assets/fonts TTF count changed: {ttf_stems:?}");
+        for stem in &ttf_stems {
+            if core.iter().any(|c| c == stem) {
+                assert!(!pack_stems.contains(&stem.as_str()), "bundled face {stem} is also a pack");
+            } else {
+                assert!(pack_stems.contains(&stem.as_str()), "{stem} is neither bundled nor a pack");
+            }
+        }
+        assert_eq!(pack_stems.len(), 9);
+    }
+
+    #[test]
+    fn emit_font_packs_writes_decodable_files_and_manifest() {
+        let root = crate::root();
+        let dir = std::env::temp_dir().join(format!("wc_font_packs_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let out = dir.join("out");
+        emit_font_packs(&root, &out).unwrap();
+
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(out.join("fonts/manifest.json")).unwrap()).unwrap();
+        let faces = manifest["faces"].as_array().unwrap();
+        assert_eq!(faces.len(), 9, "{faces:?}");
+        for (spec, entry) in PACK_FACES.iter().zip(faces) {
+            assert_eq!(entry["family"], spec.family);
+            assert_eq!(entry["weight"], spec.weight);
+            assert_eq!(entry["italic"], spec.italic);
+            let file = entry["file"].as_str().unwrap();
+            assert!(file.starts_with(&format!("{}.", spec.stem)) && file.ends_with(".ttf.br"), "{file}");
+            // The hash in the name is the sha256 of the uncompressed TTF.
+            let ttf = std::fs::read(root.join("assets/fonts").join(format!("{}.ttf", spec.stem))).unwrap();
+            let want = sha256_hex(&ttf);
+            assert!(file.contains(&want[..8]), "{file} lacks sha256 {}", &want[..8]);
+            assert_eq!(entry["bytes"].as_u64().unwrap() as usize, ttf.len());
+            let packed = std::fs::read(out.join("fonts").join(file)).unwrap();
+            assert_eq!(entry["compressedBytes"].as_u64().unwrap() as usize, packed.len());
+            assert!(!packed.is_empty());
+            use std::io::Read as _;
+            let mut decoded = Vec::new();
+            brotli_decompressor::Decompressor::new(packed.as_slice(), 4096)
+                .take(ttf.len() as u64 + 1)
+                .read_to_end(&mut decoded)
+                .unwrap();
+            assert_eq!(decoded, ttf, "{} does not decode to the TTF", spec.stem);
+        }
+        // A stale pack file is removed on the next staging run.
+        std::fs::write(out.join("fonts/RemovedFace-Regular.deadbeef.ttf.br"), b"x").unwrap();
+        emit_font_packs(&root, &out).unwrap();
+        assert!(!out.join("fonts/RemovedFace-Regular.deadbeef.ttf.br").exists());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

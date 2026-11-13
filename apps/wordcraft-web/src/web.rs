@@ -276,6 +276,7 @@ fn launch_with_config(config: StartConfig) -> js_sys::Promise {
         let force_sample = config.force_sample;
         let created_api: Rc<RefCell<Option<js_sys::Object>>> = Rc::new(RefCell::new(None));
         let created_api_slot = created_api.clone();
+        let shell_canvas = canvas.clone();
 
         let result = eframe::WebRunner::new()
             .start(
@@ -336,7 +337,7 @@ fn launch_with_config(config: StartConfig) -> js_sys::Promise {
                         crate::host::Bridge::set_author(&mut app, &author);
                         prefs.keep_own_author(&app.session.author, &own);
                     }
-                    Ok(Box::new(WebShell { app, inbox, messages, prefs, asset_base, last_lang_pref: initial_lang }))
+                    Ok(Box::new(WebShell { app, inbox, messages, prefs, asset_base, last_lang_pref: initial_lang, canvas: shell_canvas.clone() }))
                 }),
             )
             .await;
@@ -356,6 +357,7 @@ fn launch_with_config(config: StartConfig) -> js_sys::Promise {
 
         match result {
             Ok(()) => {
+                label_ime_input(&canvas);
                 let api_val = created_api.borrow_mut().take().unwrap_or_default();
                 crate::demo::mount_if_enabled(&document, &canvas, &demo_asset_base, &api_val);
                 Ok(api_val.into())
@@ -371,6 +373,31 @@ fn launch_with_config(config: StartConfig) -> js_sys::Promise {
         list.borrow_mut().push((canvas_key, promise.clone()));
     });
     promise
+}
+
+/// Gives the hidden focusable `<input>` the text agent keeps next to the canvas an accessible
+/// name, so assistive technology announces it instead of a bare "text field". Runs at mount and
+/// again on interface-language changes so the label is re-translated. The agent's input is the
+/// text-typed sibling it created with `autocapitalize="off"`; other controls are left alone.
+fn label_ime_input(canvas: &web_sys::HtmlCanvasElement) {
+    let Some(parent) = canvas.parent_element() else {
+        return;
+    };
+    let label = wordcraft_ui_egui::i18n::t("Text input");
+    let children = parent.children();
+    for i in 0..children.length() {
+        let Some(el) = children.item(i) else {
+            continue;
+        };
+        if let Ok(input) = el.dyn_into::<web_sys::HtmlInputElement>()
+            && input.type_() == "text"
+            && input.get_attribute("autocapitalize").as_deref() == Some("off")
+            && input.get_attribute("aria-label").as_deref() != Some(label)
+            && let Err(e) = input.set_attribute("aria-label", label)
+        {
+            log::warn!("IME input aria-label: {e:?}");
+        }
+    }
 }
 
 fn remove_started_canvas(canvas: &web_sys::HtmlCanvasElement) {
@@ -396,6 +423,7 @@ struct WebShell {
     prefs: crate::prefs::PrefsSync,
     asset_base: String,
     last_lang_pref: String,
+    canvas: web_sys::HtmlCanvasElement,
 }
 
 fn local_storage() -> Option<web_sys::Storage> {
@@ -421,6 +449,7 @@ impl eframe::App for WebShell {
         if self.app.ui.language != self.last_lang_pref {
             self.last_lang_pref = self.app.ui.language.clone();
             ensure_locale_loaded(&self.last_lang_pref, &self.asset_base, ctx.clone());
+            label_ime_input(&self.canvas);
         }
         self.app.logic(ctx);
         crate::api::wake_waiters();

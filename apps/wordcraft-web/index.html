@@ -2,11 +2,15 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Open-source word processor that runs entirely in your browser. Open, edit and save .docx, Markdown and plain text documents locally — no uploads, no sign-in.">
   <title>WordCraft</title>
   <link data-trunk rel="icon" href="../../assets/app-icon/wordcraft.ico" />
   <link data-trunk rel="copy-dir" href="target-assets/i18n" data-target-path="i18n" />
   <link data-trunk rel="copy-dir" href="target-assets/samples" data-target-path="samples" />
+  <link data-trunk rel="copy-dir" href="target-assets/fonts" data-target-path="fonts" />
+  <link data-trunk rel="copy-file" href="target-assets/robots.txt" />
+  <link data-trunk rel="copy-file" href="target-assets/404.html" />
   <link data-trunk rel="rust" data-bin="wordcraft-web" data-cargo-profile="wasm-release" data-typescript data-wasm-opt="z" data-wasm-opt-params="--enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals" data-weak-refs />
   <style>
     html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #e6e6e6; font-family: system-ui, -apple-system, sans-serif; }

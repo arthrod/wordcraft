@@ -7300,6 +7300,8 @@ name = "xtask"
 version = "0.18.1"
 dependencies = [
  "base64 0.23.1",
+ "brotli",
+ "brotli-decompressor",
  "serde_json",
  "sha2 0.11.1",
 ]

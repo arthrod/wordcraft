@@ -25,7 +25,11 @@ npx wrangler dev
 npx wrangler deploy
 ```
 
-Notice that static routes (`/`, `/*.wasm`, `/*.js`, `/i18n/*`, `/samples/*`) are served directly by Cloudflare's static asset tier without invoking the Worker isolate; only `/api/*` enters Rust Worker code.
+Notice that static routes (`/`, `/*.js`, `/i18n/*`, `/samples/*`) are served directly by Cloudflare's static asset tier without invoking the Worker isolate; only `/api/*` enters Rust Worker code.
+
+### Precompressed wasm sidecars (`run_worker_first` + `Accept-Encoding: br`)
+
+`run_worker_first = ["/api/*", "/*.wasm"]` also routes the root-level `wordcraft-web-<hash>_bg.wasm` bundles through the Worker so it can serve the Brotli quality-11 sidecars (`<name>.wasm.br`) emitted by `packaging/web/package.sh` instead of letting the edge compress the plain wasm on every miss (measured: ~4.98 MB transferred with the sidecar vs ~6.61 MB edge-compressed). Note the billing trade-off: every `*.wasm` download whose `Accept-Encoding` offers `br` (all modern browsers) becomes a Worker invocation that counts against the Free plan's daily request quota, while static asset requests do not. Brotli-ineligible requests (no `br` token, `q=0`, `Range`) and missing sidecars fall through to the plain asset untouched.
 
 ## Feasibility Gate & Limits (`5.2a` Benchmark)
 

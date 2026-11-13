@@ -10,5 +10,11 @@ workspace = true
 
 [dependencies]
 base64 = { workspace = true }
+# Pack fonts ship Brotli-compressed (web-assets staging); `brotli` already compresses the
+# bundled minimal-WASM faces in crates/fonts/build.rs.
+brotli = "8"
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+
+[dev-dependencies]
+brotli-decompressor = "5"

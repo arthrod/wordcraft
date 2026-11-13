@@ -40,6 +40,7 @@
     "./wasm": "./wordcraft-web_bg.wasm",
     "./i18n/*.tsv": "./i18n/*.tsv",
     "./samples/*.md": "./samples/*.md",
+    "./fonts/*": "./fonts/*",
     "./package.json": "./package.json"
   },
   "files": [
@@ -51,6 +52,7 @@
     "snippets/",
     "i18n/",
     "samples/",
+    "fonts/",
     "LICENSES-fonts/",
     "ATTRIBUTION.md",
     "LICENSE-MIT",

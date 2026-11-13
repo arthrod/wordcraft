@@ -8,5 +8,9 @@ command = "cargo install -q worker-build && worker-build --release"
 [assets]
 directory = "../../../../dist/web"
 binding = "ASSETS"
-run_worker_first = ["/api/*"]
+# `run_worker_first` uses Cloudflare's glob syntax (`*` matches within a path segment).
+# `/\*.wasm` covers the trunk-emitted root-level `wordcraft-web-<hash>_bg.wasm` bundles so the
+# Worker can serve the precompressed `<name>.wasm.br` sidecars (plan §2.2, F8); every other
+# asset request (js/css/ico/i18n/…) still bypasses the Worker and is served by the asset tier.
+run_worker_first = ["/api/*", "/*.wasm"]
 
