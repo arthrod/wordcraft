@@ -31,8 +31,6 @@ zeroize = { workspace = true }
 miniz_oxide = { workspace = true }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
-# The browser clock (`SystemTime::now()` panics on wasm32-unknown-unknown): ODT change dates.
-js-sys = "0.3"
 # The browser's `crypto.getRandomValues` for the salts and vectors of encrypted saves.
 getrandom = { workspace = true, features = ["wasm_js"] }
 

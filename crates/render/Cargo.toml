@@ -12,7 +12,7 @@ workspace = true
 wordcraft-geom = { workspace = true, features = ["image"] }
 wordcraft-doc = { workspace = true }
 wordcraft-fonts = { workspace = true }
-wordcraft-layout = { workspace = true }
+wordcraft-layout = { workspace = true, default-features = false }
 wordcraft-metafile = { workspace = true }
 vello_cpu = { workspace = true }
 image = { workspace = true }

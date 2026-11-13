@@ -97,10 +97,10 @@ pub(in crate::odt) fn now_unix() -> i64 {
         use std::time::{SystemTime, UNIX_EPOCH};
         SystemTime::now().duration_since(UNIX_EPOCH).ok().and_then(|d| i64::try_from(d.as_secs()).ok()).unwrap_or(0)
     }
-    // `SystemTime::now()` panics on wasm32-unknown-unknown, so ask the browser's clock.
+    // `SystemTime::now()` panics on wasm32-unknown-unknown, so ask the host-supplied clock.
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     {
-        let ms = js_sys::Date::now();
+        let ms = wordcraft_geom::wasm_epoch_ms();
         if ms.is_finite() && ms > 0.0 { (ms / 1000.0) as i64 } else { 0 }
     }
 }

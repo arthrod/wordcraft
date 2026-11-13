@@ -1,18 +1,33 @@
 use super::{CharProps, Document, Paragraph, ResolvedChar};
 
+#[cfg(feature = "inline-proof")]
+pub use wordcraft_proof::ProofLang;
+
+/// Placeholder proofing language when `inline-proof` is compiled out.
+#[cfg(not(feature = "inline-proof"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct ProofLang;
+
+#[cfg(not(feature = "inline-proof"))]
+impl ProofLang {
+    pub fn from_tag(_tag: Option<&str>) -> Self {
+        Self
+    }
+}
+
 /// One run's proofing: its bytes in the paragraph, its language (`w:lang`, resolved through the
 /// styles: the document default, paragraph and character styles, direct formatting) and whether
 /// it is left unchecked ("Do not check spelling or grammar", hidden text, hyperlinks).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProofRun {
     pub range: std::ops::Range<usize>,
-    pub lang: wordcraft_proof::ProofLang,
+    pub lang: ProofLang,
     pub skip: bool,
 }
 
 impl ProofRun {
     pub(super) fn of(range: std::ops::Range<usize>, rc: &ResolvedChar) -> ProofRun {
-        ProofRun { range, lang: wordcraft_proof::ProofLang::from_tag(rc.lang.as_deref()), skip: rc.no_proof || rc.hidden || rc.link.is_some() }
+        ProofRun { range, lang: ProofLang::from_tag(rc.lang.as_deref()), skip: rc.no_proof || rc.hidden || rc.link.is_some() }
     }
 }
 
@@ -24,7 +39,8 @@ pub fn proof_runs(doc: &Document, p: &Paragraph, table: Option<&CharProps>) -> V
 }
 
 /// The language of the run holding byte `off` (English past the last run).
-pub(super) fn lang_at(runs: &[ProofRun], off: usize) -> wordcraft_proof::ProofLang {
+#[cfg_attr(not(feature = "inline-proof"), allow(dead_code))]
+pub(super) fn lang_at(runs: &[ProofRun], off: usize) -> ProofLang {
     let k = runs.partition_point(|r| r.range.end <= off);
     runs.get(k).filter(|r| r.range.start <= off).map(|r| r.lang).unwrap_or_default()
 }
@@ -34,6 +50,7 @@ pub(super) fn lang_at(runs: &[ProofRun], off: usize) -> wordcraft_proof::ProofLa
 /// and none touching a run left unchecked.
 ///
 /// `list_item` (see [`is_list_item`]) turns off the capital-first-word grammar rule.
+#[cfg(feature = "inline-proof")]
 pub fn paragraph_issues(
     p: &Paragraph,
     runs: &[ProofRun],
@@ -45,7 +62,7 @@ pub fn paragraph_issues(
         return Vec::new();
     }
     let text = proof_text(p);
-    let spans: Vec<(std::ops::Range<usize>, wordcraft_proof::ProofLang)> = runs.iter().map(|r| (r.range.clone(), r.lang)).collect();
+    let spans: Vec<(std::ops::Range<usize>, ProofLang)> = runs.iter().map(|r| (r.range.clone(), r.lang)).collect();
     let skipped = skipped_ranges(runs);
     let issues = wordcraft_proof::check_text_with(&text, &spans, spelling, grammar, list_item);
     if skipped.is_empty() {
@@ -57,6 +74,7 @@ pub fn paragraph_issues(
 /// The byte ranges of the runs left unchecked, in order, those that overlap merged: their
 /// starts and ends both rise, so [`overlaps`] finds an issue's by binary search instead of
 /// looking at every run for every issue.
+#[cfg(any(test, feature = "inline-proof"))]
 fn skipped_ranges(runs: &[ProofRun]) -> Vec<(usize, usize)> {
     let mut ranges: Vec<(usize, usize)> = runs.iter().filter(|r| r.skip).map(|r| (r.range.start, r.range.end)).collect();
     ranges.sort_unstable();
@@ -73,6 +91,7 @@ fn skipped_ranges(runs: &[ProofRun]) -> Vec<(usize, usize)> {
 
 /// Whether bytes `a..b` overlap one of `skipped` ([`skipped_ranges`]): the first range ending
 /// after `a` is the only one that can, as every later one starts no earlier.
+#[cfg(any(test, feature = "inline-proof"))]
 fn overlaps(skipped: &[(usize, usize)], a: usize, b: usize) -> bool {
     crate::work::steps(1);
     let k = skipped.partition_point(|&(_, e)| e <= a);
@@ -85,6 +104,7 @@ pub fn is_list_item(doc: &Document, p: &Paragraph) -> bool {
 }
 
 /// Spelling and grammar issues as squiggles (start, end, is grammar), less spelling issues overlapping `typing`.
+#[cfg(feature = "inline-proof")]
 pub(super) fn proof_issues(
     p: &Paragraph,
     runs: &[ProofRun],
@@ -97,6 +117,18 @@ pub(super) fn proof_issues(
         .map(|i| (i.start, i.end, i.kind == wordcraft_proof::IssueKind::Grammar))
         .filter(|&(a, b, grammar)| grammar || !typing.is_some_and(|(s, e)| a < e && s < b))
         .collect()
+}
+
+/// Empty squiggles when `inline-proof` is disabled (background workers or core builds without proofing).
+#[cfg(not(feature = "inline-proof"))]
+pub(super) fn proof_issues(
+    _p: &Paragraph,
+    _runs: &[ProofRun],
+    _opts: &crate::ProofOptions,
+    _typing: Option<(usize, usize)>,
+    _list_item: bool,
+) -> Vec<(usize, usize, bool)> {
+    Vec::new()
 }
 
 /// Text for proofing with the same byte offsets: inline objects and tracked deletions become

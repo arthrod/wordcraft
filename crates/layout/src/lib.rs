@@ -242,17 +242,32 @@ pub struct TypingWord {
     pub end: usize,
 }
 
+/// Placeholder spelling options when `inline-proof` is compiled out.
+#[cfg(not(feature = "inline-proof"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub struct NoProofOptions;
+
 /// File › Options › Proofing choices that change the squiggles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ProofOptions {
     /// Mark grammar errors as you type.
     pub grammar: bool,
+    #[cfg(feature = "inline-proof")]
     pub spelling: wordcraft_proof::Options,
+    #[cfg(not(feature = "inline-proof"))]
+    pub spelling: NoProofOptions,
 }
 
 impl Default for ProofOptions {
     fn default() -> Self {
-        ProofOptions { grammar: true, spelling: wordcraft_proof::Options::default() }
+        #[cfg(feature = "inline-proof")]
+        {
+            ProofOptions { grammar: true, spelling: wordcraft_proof::Options::default() }
+        }
+        #[cfg(not(feature = "inline-proof"))]
+        {
+            ProofOptions { grammar: false, spelling: NoProofOptions }
+        }
     }
 }
 

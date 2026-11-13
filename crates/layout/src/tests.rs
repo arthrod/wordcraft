@@ -1281,7 +1281,7 @@ fn fragmented_hidden_text_lays_out_like_the_visible_text() {
         (starts, hyph)
     };
     let (starts, hyph) = shape(&plain);
-    assert!(starts.len() > 5 && !hyph.is_empty(), "{starts:?} {hyph:?}");
+    assert!(starts.len() > 5 && (!cfg!(feature = "inline-proof") || !hyph.is_empty()), "{starts:?} {hyph:?}");
     // Mapped to the fragmented paragraph: a line starts after the previous visible char (with the
     // hidden one that follows it, which takes no room), a hyphen point is after its char.
     let want_starts: Vec<usize> = starts.iter().map(|s| if *s == 0 { 0 } else { kept[s - 1] + 1 }).collect();
@@ -4976,6 +4976,7 @@ fn drop_cap_font_covers_scripts_and_alignment_keeps_the_gap() {
 }
 
 #[test]
+#[cfg(feature = "inline-proof")]
 fn auto_hyphenation_breaks_long_words() {
     crate::test_fonts();
     let text = "Internationalization considerations notwithstanding, administrators systematically reconsidered extraordinarily uncharacteristic responsibilities. ".repeat(4);
@@ -9926,6 +9927,7 @@ fn endnotes_at_section_end_and_footnotes_below_text() {
 
 /// Each run is hyphenated and proofed in its own language (`w:lang`, resolved through the
 /// styles): Polish patterns and dictionary for Polish runs, English ones for English runs.
+#[cfg(feature = "inline-proof")]
 #[test]
 fn hyphenation_and_proofing_follow_each_runs_language() {
     crate::test_fonts();
@@ -9962,6 +9964,7 @@ fn hyphenation_and_proofing_follow_each_runs_language() {
 /// A list item may be a fragment: the drawn squiggles skip its first word's missing capital, a
 /// plain paragraph's keep it (#1741). The list comes from the paragraph's own numbering or its
 /// style's; a paragraph that switches the style's list off (`num: 0`) is plain again.
+#[cfg(feature = "inline-proof")]
 #[test]
 fn list_item_first_word_gets_no_capital_squiggle() {
     crate::test_fonts();
@@ -9998,6 +10001,7 @@ fn list_item_first_word_gets_no_capital_squiggle() {
 
 /// Text in a language WordCraft can't proof gets no spelling marks, and "Do not check spelling
 /// or grammar" text none either; the document default language applies to text without its own.
+#[cfg(feature = "inline-proof")]
 #[test]
 fn unproofed_languages_and_no_proof_runs_are_not_marked() {
     crate::test_fonts();
@@ -10215,6 +10219,7 @@ fn footer_page_total_needs_one_body_pass() {
 
 /// Bulgarian text (`w:lang` `bg-BG`) is hyphenated by the Bulgarian syllable rules; the same
 /// Cyrillic text in an English run is not hyphenated (the English data has nothing to say about it).
+#[cfg(feature = "inline-proof")]
 #[test]
 fn bulgarian_text_is_hyphenated_by_its_own_rules() {
     crate::test_fonts();
@@ -13055,6 +13060,7 @@ fn ink_member_of_a_group_draws_its_fallback_picture() {
 /// The word being typed gets no spelling squiggle until the caret leaves it (#1552): only in the
 /// paragraph with that revision, only spelling, and a change to it lays that one paragraph out
 /// again without clearing the cache.
+#[cfg(feature = "inline-proof")]
 #[test]
 fn the_word_being_typed_has_no_spelling_squiggle() {
     crate::test_fonts();
@@ -15321,4 +15327,24 @@ fn turned_cell_float_keeps_its_along_text_offset() {
         let reference = place(direction, true);
         assert!((confined.y - reference.y).abs() < 0.01, "{direction:?}: {confined:?} vs {reference:?}");
     }
+}
+
+#[test]
+fn layout_runs_without_inline_proof() {
+    crate::test_fonts();
+    let doc = Document::from_text("Teh quick brown foxx.");
+    let mut cache = LayoutCache::default();
+    let l = layout(&doc, &mut cache, &LayoutOptions { proofing: true, ..Default::default() });
+    assert_eq!(l.pages.len(), 1);
+    let para = l.pages[0]
+        .items
+        .iter()
+        .find_map(|it| match it {
+            Placed::Lines { para, .. } => Some(para),
+            _ => None,
+        })
+        .unwrap();
+    assert!(!para.lines.is_empty());
+    #[cfg(not(feature = "inline-proof"))]
+    assert!(para.issues.is_empty(), "without inline-proof, layout emits no proofing squiggles");
 }

@@ -56,10 +56,10 @@ fn now_unix() -> Option<i64> {
         let secs = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
         i64::try_from(secs).ok()
     }
-    // `SystemTime::now()` panics on wasm32-unknown-unknown, so ask the browser's clock.
+    // `SystemTime::now()` panics on wasm32-unknown-unknown, so ask the host-supplied clock.
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     {
-        let ms = js_sys::Date::now();
+        let ms = wordcraft_geom::wasm_epoch_ms();
         (ms.is_finite() && ms > 0.0).then(|| (ms / 1000.0) as i64)
     }
 }

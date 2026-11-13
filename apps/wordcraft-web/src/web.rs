@@ -19,6 +19,19 @@ const LOADING_ID: &str = "wordcraft_loading";
 
 pub fn start() {
     eframe::WebLogger::init(log::LevelFilter::Info).ok();
+    wordcraft_geom::register_wasm_clock(
+        || js_sys::Date::now(),
+        |unix| {
+            let ms = (unix as f64) * 1000.0;
+            if !ms.is_finite() {
+                return 0;
+            }
+            let west_min = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ms)).get_timezone_offset();
+            if west_min.is_finite() && west_min.abs() <= 26.0 * 60.0 { -(west_min as i64) * 60 } else { 0 }
+        },
+    );
+    let now = js_sys::Date::now();
+    wordcraft_geom::set_wasm_clock(now, now);
     wasm_bindgen_futures::spawn_local(async {
         let Some(document) = web_sys::window().and_then(|w| w.document()) else {
             log::error!("no document");
@@ -155,6 +168,8 @@ impl eframe::App for WebShell {
     /// then writes changed preferences to browser storage immediately, because a reload or closed
     /// tab never runs the exit path.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let now = js_sys::Date::now();
+        wordcraft_geom::set_wasm_clock(now, now);
         let msgs = std::mem::take(&mut *self.messages.borrow_mut());
         for msg in msgs {
             self.app.status(msg);
