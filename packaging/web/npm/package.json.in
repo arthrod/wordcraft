@@ -1,0 +1,64 @@
+{
+  "name": "wordcraft-web",
+  "version": "@VERSION@",
+  "description": "WordCraft in the browser — open-source Rust word processor compiled to WebAssembly with programmatic API",
+  "license": "MIT OR Apache-2.0",
+  "author": "ArtCraft Team and WordCraft contributors",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/storytold/wordcraft.git"
+  },
+  "homepage": "https://github.com/storytold/wordcraft/tree/main/packaging/web",
+  "bugs": {
+    "url": "https://github.com/storytold/wordcraft/issues"
+  },
+  "keywords": [
+    "wordcraft",
+    "word-processor",
+    "docx",
+    "ooxml",
+    "markdown",
+    "editor",
+    "wasm",
+    "webassembly",
+    "rust",
+    "office"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./glue": {
+      "types": "./wordcraft-web.d.ts",
+      "default": "./wordcraft-web.js"
+    },
+    "./wasm": "./wordcraft-web_bg.wasm",
+    "./i18n/*.tsv": "./i18n/*.tsv",
+    "./samples/*.md": "./samples/*.md",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "wordcraft-web.js",
+    "wordcraft-web.d.ts",
+    "wordcraft-web_bg.wasm",
+    "snippets/",
+    "i18n/",
+    "samples/",
+    "LICENSES-fonts/",
+    "ATTRIBUTION.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "NOTICE",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

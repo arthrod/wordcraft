@@ -27,12 +27,41 @@ mod host;
 #[cfg(target_arch = "wasm32")]
 mod web;
 
+#[cfg(test)]
+const DECLARED_API_METHODS: &[&str] =
+    &["request", "execute", "commands", "docInspect", "uiInspect", "screenshot", "getMarkdown", "applyMarkdown", "exportDocx", "loadDocx"];
+
 #[cfg(target_arch = "wasm32")]
 fn main() {
-    web::start();
+    web::start_default_if_present();
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
     eprintln!("wordcraft-web only runs in the browser: build it with `trunk build --release` in apps/wordcraft-web");
+}
+
+#[cfg(test)]
+mod api_contract_tests {
+    #[test]
+    fn dts_declares_every_wordcraft_api_method() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let dts = std::fs::read_to_string(root.join("packaging/web/npm/index.d.ts")).expect("packaging/web/npm/index.d.ts");
+        for method in super::DECLARED_API_METHODS {
+            assert!(dts.contains(&format!("{method}(")) || dts.contains(&format!("{method}<")), "index.d.ts missing method {method}");
+        }
+        assert!(dts.contains("export function start("), "index.d.ts must export start(options)");
+        assert!(dts.contains("export interface StartOptions"), "index.d.ts must export StartOptions");
+        assert!(dts.contains("export interface WordCraftApi"), "index.d.ts must export WordCraftApi");
+
+        let index_js = std::fs::read_to_string(root.join("packaging/web/npm/index.js")).expect("packaging/web/npm/index.js");
+        assert!(!index_js.contains("export default"), "index.js must not use a default export (7.0b)");
+
+        let api_rs = std::fs::read_to_string(root.join("apps/wordcraft-web/src/api.rs")).expect("apps/wordcraft-web/src/api.rs");
+        assert!(!api_rs.contains("Err(JsValue::from_str"), "api.rs must reject with Error objects instead of bare strings (7.2a)");
+        assert!(
+            !api_rs.contains("ok_or_else(|| JsValue::from_str"),
+            "api.rs helpers must reject with Error objects instead of bare strings (7.2a)"
+        );
+    }
 }

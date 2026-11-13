@@ -83,37 +83,170 @@ mod font_store;
 const CANVAS_ID: &str = "wordcraft_canvas";
 const LOADING_ID: &str = "wordcraft_loading";
 
-pub fn start() {
-    eframe::WebLogger::init(log::LevelFilter::Info).ok();
-    // `wasm_now_ms` and `wasm_epoch_ms` both read `Date::now()` here. For `wasm_now_ms` that is
-    // wall-clock time, not a monotonic clock: it can decrease (or jump forward) when the system
-    // clock is adjusted, so elapsed-time readers must tolerate a negative difference.
-    wordcraft_geom::register_wasm_clock(js_sys::Date::now, js_sys::Date::now, |unix| {
-        let ms = (unix as f64) * 1000.0;
-        if !ms.is_finite() {
-            return 0;
+thread_local! {
+    static RUNTIME_INIT: Cell<bool> = const { Cell::new(false) };
+    static STARTED_CANVASES: RefCell<Vec<(web_sys::HtmlCanvasElement, js_sys::Promise)>> = const { RefCell::new(Vec::new()) };
+}
+
+struct StartConfig {
+    canvas: web_sys::HtmlCanvasElement,
+    asset_base: String,
+    host_mode: Option<String>,
+    author: Option<String>,
+    install_global: bool,
+    force_sample: Option<bool>,
+}
+
+fn init_runtime_once() {
+    RUNTIME_INIT.with(|done| {
+        if done.get() {
+            return;
         }
-        let west_min = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ms)).get_timezone_offset();
-        if west_min.is_finite() && west_min.abs() <= 26.0 * 60.0 { -(west_min as i64) * 60 } else { 0 }
+        done.set(true);
+        eframe::WebLogger::init(log::LevelFilter::Info).ok();
+        // `wasm_now_ms` and `wasm_epoch_ms` both read `Date::now()` here. For `wasm_now_ms` that is
+        // wall-clock time, not a monotonic clock: it can decrease (or jump forward) when the system
+        // clock is adjusted, so elapsed-time readers must tolerate a negative difference.
+        wordcraft_geom::register_wasm_clock(js_sys::Date::now, js_sys::Date::now, |unix| {
+            let ms = (unix as f64) * 1000.0;
+            if !ms.is_finite() {
+                return 0;
+            }
+            let west_min = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ms)).get_timezone_offset();
+            if west_min.is_finite() && west_min.abs() <= 26.0 * 60.0 { -(west_min as i64) * 60 } else { 0 }
+        });
+        let now = js_sys::Date::now();
+        wordcraft_geom::set_wasm_clock(now, now);
     });
-    let now = js_sys::Date::now();
-    wordcraft_geom::set_wasm_clock(now, now);
-    wasm_bindgen_futures::spawn_local(async {
+}
+
+fn opt_str_prop(obj: &wasm_bindgen::JsValue, key: &str) -> Result<Option<String>, wasm_bindgen::JsValue> {
+    let val = js_sys::Reflect::get(obj, &wasm_bindgen::JsValue::from_str(key)).unwrap_or(wasm_bindgen::JsValue::UNDEFINED);
+    if val.is_undefined() || val.is_null() {
+        Ok(None)
+    } else if let Some(s) = val.as_string() {
+        Ok(Some(s))
+    } else {
+        Err(js_sys::Error::new(&format!("start(options): `{key}` must be a string")).into())
+    }
+}
+
+fn opt_bool_prop(obj: &wasm_bindgen::JsValue, key: &str) -> Result<Option<bool>, wasm_bindgen::JsValue> {
+    let val = js_sys::Reflect::get(obj, &wasm_bindgen::JsValue::from_str(key)).unwrap_or(wasm_bindgen::JsValue::UNDEFINED);
+    if val.is_undefined() || val.is_null() {
+        Ok(None)
+    } else if let Some(b) = val.as_bool() {
+        Ok(Some(b))
+    } else {
+        Err(js_sys::Error::new(&format!("start(options): `{key}` must be a boolean")).into())
+    }
+}
+
+fn resolve_canvas(document: &web_sys::Document, value: wasm_bindgen::JsValue) -> Result<web_sys::HtmlCanvasElement, wasm_bindgen::JsValue> {
+    if value.is_undefined() || value.is_null() {
+        return document
+            .get_element_by_id(CANVAS_ID)
+            .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+            .ok_or_else(|| js_sys::Error::new(&format!("missing <canvas id=\"{CANVAS_ID}\">")).into());
+    }
+    if let Some(raw_id) = value.as_string() {
+        let id = raw_id.strip_prefix('#').unwrap_or(&raw_id);
+        return document
+            .get_element_by_id(id)
+            .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+            .ok_or_else(|| js_sys::Error::new(&format!("missing canvas element `{raw_id}`")).into());
+    }
+    value
+        .dyn_into::<web_sys::HtmlCanvasElement>()
+        .map_err(|_| js_sys::Error::new("start(options): `canvas` must be an HTMLCanvasElement or element id string").into())
+}
+
+fn parse_start_config(options: &wasm_bindgen::JsValue) -> Result<StartConfig, wasm_bindgen::JsValue> {
+    let document = web_sys::window()
+        .and_then(|w| w.document())
+        .ok_or_else(|| wasm_bindgen::JsValue::from(js_sys::Error::new("no browser document available")))?;
+
+    if options.is_undefined() || options.is_null() {
+        return Ok(StartConfig {
+            canvas: resolve_canvas(&document, wasm_bindgen::JsValue::UNDEFINED)?,
+            asset_base: default_asset_base(&document),
+            host_mode: None,
+            author: query_param("author"),
+            install_global: false,
+            force_sample: None,
+        });
+    }
+    if !options.is_object() {
+        return Err(js_sys::Error::new("start(options): expected an options object").into());
+    }
+
+    let canvas_val = js_sys::Reflect::get(options, &wasm_bindgen::JsValue::from_str("canvas")).unwrap_or(wasm_bindgen::JsValue::UNDEFINED);
+    let canvas = resolve_canvas(&document, canvas_val)?;
+    let asset_base = opt_str_prop(options, "assetBase")?.map(|b| normalize_asset_base(&b)).unwrap_or_else(|| default_asset_base(&document));
+    let host_mode = opt_str_prop(options, "host")?;
+    let author = opt_str_prop(options, "author")?.or_else(|| query_param("author"));
+    let install_global = opt_bool_prop(options, "installGlobal")?.unwrap_or(false);
+    let force_sample = opt_bool_prop(options, "sample")?;
+
+    Ok(StartConfig { canvas, asset_base, host_mode, author, install_global, force_sample })
+}
+
+/// Start WordCraft automatically when the standalone `#wordcraft_canvas` element is present.
+/// Importing the WASM module into a host page without `#wordcraft_canvas` is a harmless no-op;
+/// programmatic callers use [`start`].
+pub fn start_default_if_present() {
+    init_runtime_once();
+    let Some(document) = web_sys::window().and_then(|w| w.document()) else {
+        return;
+    };
+    let Some(canvas) = document.get_element_by_id(CANVAS_ID).and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok()) else {
+        return;
+    };
+    let config = StartConfig {
+        canvas,
+        asset_base: default_asset_base(&document),
+        host_mode: None,
+        author: query_param("author"),
+        install_global: true,
+        force_sample: None,
+    };
+    let _ = launch_with_config(config);
+}
+
+/// Mount WordCraft on `options.canvas` and resolve to the `WordCraftApi` instance. Calling `start`
+/// repeatedly for the same canvas resolves to its existing instance.
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn start(options: wasm_bindgen::JsValue) -> js_sys::Promise {
+    init_runtime_once();
+    match parse_start_config(&options) {
+        Ok(cfg) => launch_with_config(cfg),
+        Err(err) => js_sys::Promise::reject(&err),
+    }
+}
+
+fn launch_with_config(config: StartConfig) -> js_sys::Promise {
+    if let Some(existing) = STARTED_CANVASES.with(|list| {
+        list.borrow()
+            .iter()
+            .find(|(existing_canvas, _)| js_sys::Object::is(existing_canvas.as_ref(), config.canvas.as_ref()))
+            .map(|(_, prom)| prom.clone())
+    }) {
+        return existing;
+    }
+
+    let canvas_key = config.canvas.clone();
+    let promise = wasm_bindgen_futures::future_to_promise(async move {
         let Some(document) = web_sys::window().and_then(|w| w.document()) else {
-            log::error!("no document");
-            return;
+            return Err(js_sys::Error::new("no document").into());
         };
-        let Some(canvas) = document.get_element_by_id(CANVAS_ID).and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok()) else {
-            log::error!("missing <canvas id=\"{CANVAS_ID}\">");
-            return;
+        let canvas = config.canvas;
+        let bridge = match crate::host::Bridge::detect_with_override(&canvas, config.host_mode.as_deref()) {
+            Ok(b) => b,
+            Err(msg) => {
+                remove_started_canvas(&canvas);
+                return Err(js_sys::Error::new(&msg).into());
+            }
         };
-        let initial_asset_base = default_asset_base(&document);
-        // Host modes (`craft-web-host`): `?host=parent`, a same-origin page framing WordCraft, opens documents in
-        // it and stores what it saves (`host`); unframed there is no parent, so that URL on its
-        // own stays the normal app with downloads. `data-host="page"` on the canvas opts a page
-        // in instead: it runs WordCraft in its own document and talks over DOM `CustomEvent`s
-        // on the canvas (`host`). The host guards leaving the page, so this one doesn't.
-        let bridge = crate::host::Bridge::detect(&canvas);
         let app_bridge = bridge.clone();
         let dirty = Rc::new(Cell::new(false));
         let saves = AsyncSaves::default();
@@ -130,9 +263,16 @@ pub fn start() {
         {
             create.instance_descriptor.backends = eframe::wgpu::Backends::GL;
         }
+        let initial_asset_base = config.asset_base;
+        let author_override = config.author;
+        let install_global = config.install_global;
+        let force_sample = config.force_sample;
+        let created_api: Rc<RefCell<Option<js_sys::Object>>> = Rc::new(RefCell::new(None));
+        let created_api_slot = created_api.clone();
+
         let result = eframe::WebRunner::new()
             .start(
-                canvas,
+                canvas.clone(),
                 options,
                 Box::new(move |cc| {
                     #[cfg(feature = "wgpu")]
@@ -150,7 +290,7 @@ pub fn start() {
                     // decimal separator (#838).
                     let region = wordcraft_ui_egui::i18n::system_region();
                     // In host mode the parent sends the document to edit; no sample meanwhile.
-                    let sample = app_bridge.is_none() && query().contains("sample");
+                    let sample = app_bridge.is_none() && force_sample.unwrap_or_else(|| query().contains("sample"));
                     let doc = if sample { wordcraft_engine::sample::sample_document() } else { wordcraft_engine::blank_document(&region) };
                     let mut session = Session::new(doc);
                     session.system_region = region;
@@ -159,7 +299,8 @@ pub fn start() {
                     if let Some(bridge) = &app_bridge {
                         bridge.connect(&mut services, inbox.clone(), cc.egui_ctx.clone());
                     }
-                    let control = crate::api::install(cc.egui_ctx.clone());
+                    let (control, api_obj) = crate::api::install_with_global(cc.egui_ctx.clone(), install_global);
+                    *created_api_slot.borrow_mut() = Some(api_obj);
                     let mut app = WordApp::new(session, services).with_control(control);
                     // Pasted pictures wait apart from dropped files: the app inserts one only when the page is the edit target (#1349).
                     app.services.pasted = Some(pasted);
@@ -183,8 +324,8 @@ pub fn start() {
                     }
                     // The host's name for the user signs this visit's work, but isn't stored as the
                     // browser's own preference, which a visit outside the host would restore.
-                    if app_bridge.is_some()
-                        && let Some(author) = query_param("author")
+                    if (app_bridge.is_some() || force_sample.is_none())
+                        && let Some(author) = author_override
                     {
                         let own = app.session.author.clone();
                         crate::host::Bridge::set_author(&mut app, &author);
@@ -194,7 +335,7 @@ pub fn start() {
                 }),
             )
             .await;
-        // Ready only once the runner is up: starting can still fail after the app is made.
+
         if let Some(bridge) = &bridge {
             match &result {
                 Ok(()) => bridge.post_ready(),
@@ -202,11 +343,33 @@ pub fn start() {
             }
         }
         if let Some(el) = document.get_element_by_id(LOADING_ID) {
-            match result {
+            match &result {
                 Ok(()) => el.remove(),
                 Err(e) => el.set_inner_html(&format!("<p>WordCraft failed to start: {e:?}</p><p>A browser with WebGPU or WebGL2 is required.</p>")),
             }
         }
+
+        match result {
+            Ok(()) => {
+                let api_val = created_api.borrow_mut().take().unwrap_or_default();
+                Ok(api_val.into())
+            }
+            Err(e) => {
+                remove_started_canvas(&canvas);
+                Err(js_sys::Error::new(&format!("WordCraft failed to start: {e:?}")).into())
+            }
+        }
+    });
+
+    STARTED_CANVASES.with(|list| {
+        list.borrow_mut().push((canvas_key, promise.clone()));
+    });
+    promise
+}
+
+fn remove_started_canvas(canvas: &web_sys::HtmlCanvasElement) {
+    STARTED_CANVASES.with(|list| {
+        list.borrow_mut().retain(|(existing, _)| !js_sys::Object::is(existing.as_ref(), canvas.as_ref()));
     });
 }
 

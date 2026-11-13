@@ -60,6 +60,23 @@ impl Bridge {
         Some(Self { host: Rc::new(Host::connect(APP, canvas)?) })
     }
 
+    /// Connect using an explicit `StartOptions.host` override (`"none"`, `"parent"`, or
+    /// `"page"`) or fall back to [`Self::detect`] when omitted.
+    pub fn detect_with_override(canvas: &web_sys::HtmlCanvasElement, mode: Option<&str>) -> Result<Option<Self>, String> {
+        match mode {
+            None => Ok(Self::detect(canvas)),
+            Some("none") => Ok(None),
+            Some("page") => {
+                if canvas.get_attribute("data-host").as_deref() != Some("page") {
+                    let _ = canvas.set_attribute("data-host", "page");
+                }
+                Ok(Self::detect(canvas))
+            }
+            Some("parent") => Ok(Self::detect(canvas)),
+            Some(other) => Err(format!("invalid host mode `{other}` (expected \"none\", \"parent\", or \"page\")")),
+        }
+    }
+
     /// Hand saved and exported files to the host instead of downloading them, report unsaved
     /// changes to it, and hear the files it sends.
     pub fn connect(&self, services: &mut Services, inbox: Inbox, ctx: egui::Context) {
