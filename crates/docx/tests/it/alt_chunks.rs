@@ -372,6 +372,13 @@ fn hostile_chunks_never_panic() {
             assert!(res.is_err(), "{ext} chunk should return Err");
         }
     }
+    // A valid nested .docx whose inner non-Word altChunk fails import propagates DocxError::AltChunk.
+    let inner_failing = package(&format!("{CHUNK}{}", p("inner")), Some(("htm", "text/html", b"<p>fail</p>")));
+    let outer_nested = package(&format!("{CHUNK}{}", p("outer")), Some(("docx", DOCX_MAIN, &inner_failing)));
+    let import = |_: &AltChunk| Err("nested chunk error".into());
+    let res = read_with(&outer_nested, &ReadOptions { chunks: Some(&import), ..Default::default() });
+    assert!(matches!(res, Err(wordcraft_docx::DocxError::AltChunk(ref msg)) if msg == "nested chunk error"));
+
     // A chunk naming a missing part or another relationship type is left out.
     let bytes = package(&format!(r#"<w:altChunk r:id="nope"/><w:altChunk/>{}"#, p("y")), None);
     assert_eq!(body_lines(&read(&bytes).unwrap()), ["y"]);

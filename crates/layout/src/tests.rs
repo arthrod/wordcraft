@@ -9927,7 +9927,7 @@ fn endnotes_at_section_end_and_footnotes_below_text() {
 
 /// Each run is hyphenated and proofed in its own language (`w:lang`, resolved through the
 /// styles): Polish patterns and dictionary for Polish runs, English ones for English runs.
-#[cfg(feature = "inline-proof")]
+#[cfg(all(feature = "inline-proof", feature = "hyphenation"))]
 #[test]
 fn hyphenation_and_proofing_follow_each_runs_language() {
     crate::test_fonts();
@@ -10219,7 +10219,7 @@ fn footer_page_total_needs_one_body_pass() {
 
 /// Bulgarian text (`w:lang` `bg-BG`) is hyphenated by the Bulgarian syllable rules; the same
 /// Cyrillic text in an English run is not hyphenated (the English data has nothing to say about it).
-#[cfg(feature = "inline-proof")]
+#[cfg(feature = "hyphenation")]
 #[test]
 fn bulgarian_text_is_hyphenated_by_its_own_rules() {
     crate::test_fonts();

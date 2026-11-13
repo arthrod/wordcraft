@@ -164,7 +164,6 @@ fn hyphenation(s: &mut Session, v: &Value) -> CmdResult {
 /// space, and could end the line before it if hyphenated. `points` are where a hyphen may go
 /// (char indices into `word`); `suggest` is the last one whose first part fits on that line.
 /// Accepting is `caret.set` to `pos` plus the chosen point, then `text.optionalHyphen`.
-#[cfg(feature = "inline-proof")]
 fn manual_hyphenation(s: &mut Session, v: &Value) -> CmdResult {
     let from = match v.get("from") {
         Some(f) if !f.is_null() => super::parse_pos(f).ok_or_else(|| CmdError::Params("bad `from`".into()))?,
@@ -220,16 +219,6 @@ fn manual_hyphenation(s: &mut Session, v: &Value) -> CmdResult {
         }
     }
     Ok(best.map(|(_, v)| v).unwrap_or_else(|| json!({"done": true})))
-}
-
-#[cfg(not(feature = "inline-proof"))]
-fn manual_hyphenation(_s: &mut Session, v: &Value) -> CmdResult {
-    if let Some(f) = v.get("from")
-        && !f.is_null()
-    {
-        super::parse_pos(f).ok_or_else(|| CmdError::Params("bad `from`".into()))?;
-    }
-    Ok(json!({"done": true}))
 }
 
 fn section_of_part(s: &Session, id: u32) -> usize {

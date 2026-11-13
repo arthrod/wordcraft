@@ -148,12 +148,13 @@ pub(crate) fn read_package(bytes: &[u8], chunks: Option<ChunkImporter>) -> Resul
 /// Read a package whose parts are already unpacked (from a zip, a Flat OPC file or a converted
 /// Word 2003 XML document).
 pub(crate) fn read_opened(pkg: &Package, chunks: Option<ChunkImporter>) -> Result<Document, DocxError> {
-    read_opened_in(pkg, ChunkState::new(chunks)).map(|(doc, ..)| doc)
+    let mut state = ChunkState::new(chunks);
+    read_opened_in(pkg, &mut state).map(|(doc, ..)| doc)
 }
 
 /// [`read_opened`] with what chunks may still bring in; also gives the chunks, chunk bytes and
-/// graphic work left of that.
-fn read_opened_in(pkg: &Package, chunks: ChunkState) -> Result<(Document, usize, u64, usize), DocxError> {
+/// graphic work left of that, updating `chunks` even on an [`DocxError::AltChunk`] abort.
+fn read_opened_in(pkg: &Package, chunks: &mut ChunkState) -> Result<(Document, usize, u64, usize), DocxError> {
     let root_rels = pkg.rels("");
     let main = root_rels.by_type(rt::OFFICE_DOC).filter(|r| !r.external).map(|r| r.target.clone()).unwrap_or_else(|| "word/document.xml".to_string());
     let Some(root) = pkg.xml_strict(&main)? else {
@@ -194,7 +195,7 @@ fn read_opened_in(pkg: &Package, chunks: ChunkState) -> Result<(Document, usize,
         txbx_links: Vec::new(),
         theme_fills: Default::default(),
         group_fill: None,
-        chunks,
+        chunks: *chunks,
         chunk_error: None,
     };
     r.doc.missing_pictures.main = main.clone();
@@ -348,6 +349,9 @@ fn read_opened_in(pkg: &Package, chunks: ChunkState) -> Result<(Document, usize,
         keep_glued_ids(&mut r.doc, &r.glued);
     }
     let (left, bytes, graphic) = (r.chunks.left, r.chunks.bytes, r.chunks.graphic);
+    chunks.left = left;
+    chunks.bytes = bytes;
+    chunks.graphic = graphic;
     let mut doc = r.doc;
     doc.ensure_nonempty();
     if let Some(err) = r.chunk_error.take() {

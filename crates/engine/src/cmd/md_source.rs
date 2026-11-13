@@ -55,6 +55,9 @@ pub struct MdSource {
     step: Option<u64>,
     /// The line each top-level block starts on, from the last parse.
     block_lines: Vec<usize>,
+    /// True when this source buffer was restored by `edit.undo` after `doc.setMarkdown`
+    /// replaced it, permitting `edit.redo` to swap back without applying pending edits first.
+    pub(crate) restored_by_undo: bool,
 }
 
 impl MdSource {
@@ -208,6 +211,7 @@ fn text(s: &mut Session, v: &Value) -> CmdResult {
     }
     if edited {
         src.place_caret = true;
+        src.restored_by_undo = false;
         s.dirty = true;
     }
     let mut result = json!({"caret": src.caret, "losesContent": src.loses_content});
@@ -297,6 +301,7 @@ fn enter(s: &mut Session) -> Result<(), CmdError> {
         has_step: false,
         step: None,
         block_lines,
+        restored_by_undo: false,
     });
     Ok(())
 }
@@ -357,6 +362,7 @@ pub fn apply(s: &mut Session) {
         src.block_lines = lines;
         src.has_step = true;
         src.step = step;
+        src.restored_by_undo = false;
     }
 }
 
@@ -416,7 +422,9 @@ fn block_of_caret(text: &str, caret: usize, doc: &Document, block_lines: &[usize
 
 /// Why the open text refuses command `id`, if it does.
 pub(crate) fn refusal(s: &Session, id: &str, mutates: bool) -> Option<&'static str> {
+    let allow_redo = id == "edit.redo" && s.md_source.as_ref().is_some_and(|src| src.restored_by_undo) && s.can_redo();
     (s.md_source.is_some()
+        && !allow_redo
         && id != TOGGLE
         && id != TEXT
         && id != GET_MARKDOWN
@@ -435,7 +443,7 @@ pub(crate) fn before_command(s: &mut Session, id: &str, mutates: bool) -> Result
         s.run(TOGGLE, &json!({"value": false}))?;
     } else if let Some(why) = refusal(s, id, mutates) {
         return Err(CmdError::Disabled(format!("{id}: {why}")));
-    } else if !id.starts_with("caret.") && !id.starts_with("select.") && !id.starts_with("view.") {
+    } else if !id.starts_with("caret.") && !id.starts_with("select.") && !id.starts_with("view.") && id != "edit.redo" {
         apply(s);
     }
     Ok(())
@@ -981,6 +989,13 @@ mod tests {
         assert_eq!(src.text, "# Pending source edit\n");
         assert!(src.is_pending());
         assert_eq!(s.run(GET_MARKDOWN, &json!({})).unwrap()["markdown"], "# Pending source edit\n");
+
+        // Redo is permitted without leaving source view or applying pending source text.
+        assert_eq!(s.why_disabled("edit.redo"), None);
+        s.run("edit.redo", &json!({})).unwrap();
+        assert!(s.md_source.is_none());
+        assert!(body_text(&s).contains("Direct replacement"));
+        assert!(!body_text(&s).contains("Pending source edit"));
     }
 
     #[test]

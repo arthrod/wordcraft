@@ -356,24 +356,34 @@ pub fn first_supported<'a>(tags: impl IntoIterator<Item = &'a str>) -> Option<La
     tags.into_iter().find_map(lang_from_tag)
 }
 
-/// The system language (looked up once). English when it can't be determined or isn't supported.
+#[cfg(test)]
+static TEST_SYSTEM_TAGS: Mutex<Option<Vec<String>>> = Mutex::new(None);
+
+/// The system language, resolved against the currently active catalogs. English when it can't be
+/// determined or isn't supported.
 pub fn system_lang() -> Lang {
+    #[cfg(test)]
+    if let Some(tags) = TEST_SYSTEM_TAGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
+        return first_supported(tags.iter().map(String::as_str)).unwrap_or(Lang::EN);
+    }
     // Tests drive the UI by its English labels whatever the machine's language is.
     if cfg!(test) {
         return Lang::EN;
     }
-    static SYSTEM: OnceLock<Lang> = OnceLock::new();
-    *SYSTEM.get_or_init(detect_system_lang)
+    static SYSTEM_TAGS: OnceLock<Vec<String>> = OnceLock::new();
+    let tags = SYSTEM_TAGS.get_or_init(detect_system_tags);
+    first_supported(tags.iter().map(String::as_str)).unwrap_or(Lang::EN)
 }
 
-fn detect_system_lang() -> Lang {
+fn detect_system_tags() -> Vec<String> {
     // An explicit override, then the platform's preferred UI languages (Windows display language,
     // macOS preferred languages, `LC_ALL`/`LC_MESSAGES`/`LANG` on Unix, the browser on the web).
-    if let Some(l) = std::env::var("WORDCRAFT_LANGUAGE").ok().and_then(|v| lang_from_tag(&v)) {
-        return l;
+    let mut tags = Vec::new();
+    if let Ok(v) = std::env::var("WORDCRAFT_LANGUAGE") {
+        tags.push(v);
     }
-    let tags: Vec<String> = sys_locale::get_locales().take(16).collect();
-    first_supported(tags.iter().map(String::as_str)).unwrap_or(Lang::EN)
+    tags.extend(sys_locale::get_locales().take(16));
+    tags
 }
 
 /// The system region (#838): it picks the paper File › New starts on, the default measurement
@@ -618,12 +628,14 @@ mod picker_order_tests {
     struct RestoreRuntimeCatalog {
         prev_entries: Vec<CatalogEntry>,
         prev_active: Option<&'static I18n>,
+        prev_test_tags: Option<Vec<String>>,
     }
 
     impl Drop for RestoreRuntimeCatalog {
         fn drop(&mut self) {
             *RUNTIME_CATALOGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = std::mem::take(&mut self.prev_entries);
             *ACTIVE_I18N.write().unwrap_or_else(std::sync::PoisonError::into_inner) = self.prev_active;
+            *TEST_SYSTEM_TAGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = self.prev_test_tags.take();
         }
     }
 
@@ -645,7 +657,13 @@ mod picker_order_tests {
         let _restore = RestoreRuntimeCatalog {
             prev_entries: RUNTIME_CATALOGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone(),
             prev_active: *ACTIVE_I18N.read().unwrap_or_else(std::sync::PoisonError::into_inner),
+            prev_test_tags: TEST_SYSTEM_TAGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take(),
         };
+        *TEST_SYSTEM_TAGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(vec!["fr-FR".to_string()]);
+        let empty: &'static I18n = Box::leak(Box::new(I18n::new(&[], &["fr"]).0));
+        *ACTIVE_I18N.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(empty);
+        assert_eq!(Lang::from_pref(AUTO).code(), "en", "before registration, auto falls back to English");
+
         let existing = CRAFT_I18N.iter().find(|(c, ..)| *c == "fr");
         let shared = existing.map(|(_, s, _)| *s).unwrap_or("");
         let app = if let Some((_, _, orig)) = existing {
@@ -657,5 +675,6 @@ mod picker_order_tests {
         let fr = Lang::from_code("fr").expect("registered fr locale should resolve");
         assert_eq!(tr(fr, "__rt_probe__"), "Sonde runtime");
         assert_eq!(lang_from_tag("fr-FR").map(|l| l.code()), Some("fr"));
+        assert_eq!(Lang::from_pref(AUTO).code(), "fr", "after registration, auto resolves the registered catalog");
     }
 }

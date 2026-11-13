@@ -50,7 +50,11 @@ impl Session {
         if self.md_source.as_ref().is_some_and(|src| src.is_pending())
             && let Some(step) = self.history.last_mut()
         {
-            Arc::make_mut(step).md_source = self.md_source.clone();
+            let mut preserved = self.md_source.clone();
+            if let Some(src) = preserved.as_mut() {
+                src.restored_by_undo = true;
+            }
+            Arc::make_mut(step).md_source = preserved;
         }
     }
 

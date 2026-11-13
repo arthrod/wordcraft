@@ -601,6 +601,7 @@ fn spreadsheet_named_text_recipient_lists_read_as_text() {
 }
 
 /// #778: legacy Excel 97–2003 workbooks are recipient lists; a CSV named .xls reads as text.
+#[cfg(feature = "extra-formats")]
 #[test]
 fn recipients_from_an_xls_workbook() {
     let row = |r: &[&str]| r.iter().map(|c| c.to_string()).collect::<Vec<_>>();
