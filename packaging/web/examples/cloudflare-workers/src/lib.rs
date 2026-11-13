@@ -28,7 +28,7 @@ struct ConvertRequest {
 }
 
 fn no_store_headers(content_type: &str) -> Result<Headers> {
-    let mut headers = Headers::new();
+    let headers = Headers::new();
     headers.set("Content-Type", content_type)?;
     headers.set("Cache-Control", "no-store")?;
     headers.set("X-Content-Type-Options", "nosniff")?;
@@ -135,4 +135,3 @@ async fn main(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let assets = env.assets("ASSETS")?;
     assets.fetch_request(req).await
 }
-
