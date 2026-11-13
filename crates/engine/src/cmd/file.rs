@@ -463,6 +463,7 @@ fn save(s: &mut Session, v: &Value) -> CmdResult {
         s.relayout();
         // What the file holds now.
         s.md_file = super::md_source::FileText::saved(exact.filter(|_| super::md_source::is_markdown_file(&path)));
+        s.clear_md_latest_history();
     }
     Ok(json!({"saved": true, "path": path.to_string_lossy(), "encrypted": encrypted, "rewritten": rewritten}))
 }

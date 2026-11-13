@@ -259,6 +259,21 @@ impl Session {
         true
     }
 
+    /// Saving replaces the document's kept Markdown text with the saved file, discarding any
+    /// unsaved `md_latest` snapshots recorded on the undo/redo stacks.
+    pub(crate) fn clear_md_latest_history(&mut self) {
+        for entry in &mut self.history {
+            if entry.md_latest.is_some() {
+                Arc::make_mut(entry).md_latest = None;
+            }
+        }
+        for entry in &mut self.redo {
+            if entry.md_latest.is_some() {
+                Arc::make_mut(entry).md_latest = None;
+            }
+        }
+    }
+
     /// An equation's editing session cannot ride across Undo/Redo: the equation tree, or the
     /// object at that offset, may be a different one now. A new session token starts a new IME
     /// context; if tokens are exhausted, the equation is left (fail closed).

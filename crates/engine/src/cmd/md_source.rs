@@ -1047,4 +1047,29 @@ mod tests {
         assert_eq!(s.run(GET_MARKDOWN, &json!({})).unwrap()["markdown"], md_b);
         assert!(body_text(&s).contains("Beta."));
     }
+
+    #[test]
+    fn set_markdown_discards_pending_source_with_undo_even_when_replacement_matches_doc() {
+        let mut s = Session::new(Document::new());
+        s.run(SET_MARKDOWN, &json!({"markdown": SAMPLE})).unwrap();
+        s.path = Some(PathBuf::from("/tmp/doc-md-same-test.md"));
+        s.run(TOGGLE, &json!({})).unwrap();
+        set_text(&mut s, "# Pending replacement\n");
+        let depth = s.undo_depth();
+
+        // Replacing with the exact current document & md_file.latest still discards pending source text,
+        // so the checkpoint must be retained for Undo/Redo.
+        s.run(SET_MARKDOWN, &json!({"markdown": SAMPLE})).unwrap();
+        assert!(s.md_source.is_none());
+        assert_eq!(s.undo_depth(), depth + 1, "checkpoint kept when pending source edits are discarded");
+
+        s.run("edit.undo", &json!({})).unwrap();
+        let src = s.md_source.as_ref().expect("Undo restores the discarded pending source buffer");
+        assert_eq!(src.text, "# Pending replacement\n");
+        assert!(src.is_pending());
+
+        s.run("edit.redo", &json!({})).unwrap();
+        assert!(s.md_source.is_none());
+        assert_eq!(s.run(GET_MARKDOWN, &json!({})).unwrap()["markdown"], SAMPLE);
+    }
 }

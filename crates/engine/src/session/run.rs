@@ -10,6 +10,7 @@ struct SuccessContext<'a> {
     before_doc: &'a Option<RunSnapshot>,
     pending_before: &'a Option<Option<CharProps>>,
     md_latest_before: &'a Option<Option<String>>,
+    md_source_pending_before: bool,
     document_id_before: u64,
     replaces_document: bool,
     dirty_before: Option<bool>,
@@ -71,12 +72,14 @@ impl Session {
         column: &Option<ColumnBlock>,
         pending: &Option<CharProps>,
         md_latest: &Option<String>,
+        md_source_pending_before: bool,
     ) -> bool {
         doc.same_content(&self.doc)
             && *sel == self.sel
             && *column == self.column
             && *pending == self.pending
             && *md_latest == self.md_file.latest
+            && !md_source_pending_before
             && !self.md_source.as_ref().is_some_and(|src| src.is_pending())
     }
 
@@ -168,6 +171,7 @@ impl Session {
         // it, so a command that only changes it is an edit.
         let pending_before = spec.mutates.then(|| self.pending.clone());
         let md_latest_before = spec.mutates.then(|| self.md_file.latest.clone());
+        let md_source_pending_before = spec.mutates && self.md_source.as_ref().is_some_and(|src| src.is_pending());
         // Which document is open. A command that replaces the document (a mail merge) opens a
         // new one, with a new undo history: it is not an edit of this document, whatever the
         // new document holds.
@@ -260,6 +264,7 @@ impl Session {
                 before_doc: &before_doc,
                 pending_before: &pending_before,
                 md_latest_before: &md_latest_before,
+                md_source_pending_before,
                 document_id_before,
                 replaces_document,
                 dirty_before,
@@ -364,6 +369,7 @@ impl Session {
             before_doc,
             pending_before,
             md_latest_before,
+            md_source_pending_before,
             document_id_before,
             replaces_document,
             dirty_before,
@@ -390,7 +396,9 @@ impl Session {
             // `set_document`, which starts a new history the old one must not overwrite).
             let unchanged = |s: &Session| match (before_doc, pending_before, md_latest_before) {
                 (Some((doc, sel, _, _, _, _, column)), Some(pending), Some(md_latest)) => {
-                    !replaces_document && s.document_id == document_id_before && s.unchanged(doc, sel, column, pending, md_latest)
+                    !replaces_document
+                        && s.document_id == document_id_before
+                        && s.unchanged(doc, sel, column, pending, md_latest, md_source_pending_before)
                 }
                 _ => false,
             };

@@ -33,6 +33,7 @@ fn translations(code: &str) -> Vec<String> {
 
 #[test]
 fn system_locales_map_to_languages() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     needs_catalogs!();
     let cases = [
         ("zh_CN.UTF-8", Some(lang("zh-hans"))),
@@ -76,6 +77,7 @@ const UNSUPPORTED: &str = "qaa-QM";
 
 #[test]
 fn the_first_supported_preferred_language_wins() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     needs_catalogs!();
     // Windows and macOS list several preferred languages in order.
     assert_eq!(first_supported([UNSUPPORTED, "zh-Hant-TW", "en-US"]), Some(lang("zh-hant")));
@@ -89,6 +91,7 @@ fn the_first_supported_preferred_language_wins() {
 
 #[test]
 fn settings_resolve_with_fallback() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     needs_catalogs!();
     assert_eq!(Lang::from_pref("ja"), lang("ja"));
     assert_eq!(Lang::from_pref("ZH-HANS"), lang("zh-hans"));
@@ -104,6 +107,7 @@ fn settings_resolve_with_fallback() {
 
 #[test]
 fn lookups_fall_back_to_english() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let fx = fixture_lang("x-fixture", "\tFile\tFile-FX\n");
     assert_eq!(tr(fx, "File"), "File-FX");
     assert_eq!(tr(fx, "no such label"), "no such label");
@@ -113,6 +117,7 @@ fn lookups_fall_back_to_english() {
 
 #[test]
 fn current_language_is_per_thread() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     set_current(fixture_lang(
         "x-fixture",
         "\tInsert\tInsert-FX\n\tHome\tHome-FX\n\tFont\tFont-FX\n\tUndo\tUndo-FX\n\tUndo {action}\tUndo-FX: {action}\n\tBold\tBold-FX\n",
@@ -141,6 +146,7 @@ fn placeholders_fill_without_reinterpreting_values() {
 
 #[test]
 fn the_language_setting_is_a_ui_command_and_persists() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     needs_catalogs!();
     let mut app = crate::WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Default::default());
     assert_eq!(app.ui.language, AUTO);
@@ -164,6 +170,7 @@ fn the_language_setting_is_a_ui_command_and_persists() {
 
 #[test]
 fn ukrainian_locales_and_saved_preference_work_without_changing_the_document() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     needs_catalogs!();
     let uk = lang("uk");
     for tag in ["uk", "uk-UA", "UK_ua.UTF-8", "uk-Cyrl-UA", "uk_UA.UTF-8@euro"] {
@@ -184,6 +191,7 @@ fn ukrainian_locales_and_saved_preference_work_without_changing_the_document() {
 
 #[test]
 fn bundled_interface_fonts_cover_ukrainian_without_system_fallbacks() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let db = wordcraft_fonts::FontDb::with_font_dirs(Vec::new());
     needs_catalogs!();
     let entries = translations("uk");
@@ -200,6 +208,7 @@ fn bundled_interface_fonts_cover_ukrainian_without_system_fallbacks() {
 
 #[test]
 fn bundled_interface_fonts_cover_serbian_cyrillic_without_system_fallbacks() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let db = wordcraft_fonts::FontDb::with_font_dirs(Vec::new());
     needs_catalogs!();
     let entries = translations("sr");
@@ -215,6 +224,7 @@ fn bundled_interface_fonts_cover_serbian_cyrillic_without_system_fallbacks() {
 
 #[test]
 fn bundled_interface_fonts_cover_serbian_latin_without_system_fallbacks() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let db = wordcraft_fonts::FontDb::with_font_dirs(Vec::new());
     needs_catalogs!();
     let entries = translations("sr-latn");
@@ -232,6 +242,7 @@ fn bundled_interface_fonts_cover_serbian_latin_without_system_fallbacks() {
 
 #[test]
 fn serbian_locales_resolve_by_script() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     needs_catalogs!();
     let cyr = lang("sr");
     let lat = lang("sr-latn");
@@ -246,6 +257,7 @@ fn serbian_locales_resolve_by_script() {
 
 #[test]
 fn brazilian_portuguese_locales_and_saved_preference_work_without_changing_the_document() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     needs_catalogs!();
     let pt = lang("pt-br");
     for tag in ["pt-BR", "pt_BR.UTF-8", "PT-BR", "pt-BR-latn", "pt_BR.UTF-8@euro"] {
@@ -272,6 +284,7 @@ fn brazilian_portuguese_locales_and_saved_preference_work_without_changing_the_d
 
 #[test]
 fn bundled_interface_fonts_cover_brazilian_portuguese_without_system_fallbacks() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let db = wordcraft_fonts::FontDb::with_font_dirs(Vec::new());
     needs_catalogs!();
     let entries = translations("pt-br");
@@ -294,6 +307,7 @@ fn bundled_interface_fonts_cover_brazilian_portuguese_without_system_fallbacks()
 
 #[test]
 fn czech_locales_and_saved_preference_work_without_changing_the_document() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     needs_catalogs!();
     let cs = lang("cs");
     for tag in ["cs", "cs-CZ", "cs_CZ.UTF-8", "CS", "cs-Latn-CZ", "cs_CZ.UTF-8@euro"] {
@@ -314,6 +328,7 @@ fn czech_locales_and_saved_preference_work_without_changing_the_document() {
 
 #[test]
 fn bundled_interface_fonts_cover_czech_without_system_fallbacks() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let db = wordcraft_fonts::FontDb::with_font_dirs(Vec::new());
     needs_catalogs!();
     let entries = translations("cs");
@@ -334,6 +349,7 @@ fn bundled_interface_fonts_cover_czech_without_system_fallbacks() {
 
 #[test]
 fn chinese_interface_fonts_load_and_cover_simplified_hanzi() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     needs_catalogs!();
     // #241: without an embedded Chinese face the interface adds an installed CJK font; egui must
     // accept it (it panics on font data it can't parse) and draw simplified-only hanzi with it.
@@ -350,6 +366,7 @@ fn chinese_interface_fonts_load_and_cover_simplified_hanzi() {
 
 #[test]
 fn traditional_chinese_interface_puts_an_installed_traditional_font_first() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     needs_catalogs!();
     assert!(Lang::all().filter(|l| l.prefers_hant()).map(Lang::code).eq(["zh-hant"]));
     assert!(lang("zh-hant").prefers_hans());
@@ -380,6 +397,7 @@ fn traditional_chinese_interface_puts_an_installed_traditional_font_first() {
 
 #[test]
 fn korean_interface_fonts_load_and_cover_hangul() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     needs_catalogs!();
     let ctx = egui::Context::default();
     ctx.set_fonts(crate::theme::font_definitions_language(false, true, false, true));
@@ -396,6 +414,7 @@ fn korean_interface_fonts_load_and_cover_hangul() {
 
 #[test]
 fn cjk_catalogs_are_covered_by_the_embedded_interface_faces() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     // #486: every CJK character of the Chinese, Japanese and Korean catalogs and language names
     // has a glyph in the interface font chain built from the embedded faces alone, in every
     // interface weight; `?` and boxes showed where the Japanese face was the only CJK one. Needs
@@ -432,6 +451,7 @@ fn cjk_catalogs_are_covered_by_the_embedded_interface_faces() {
 
 #[test]
 fn only_cjk_languages_ask_for_an_installed_cjk_font() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     needs_catalogs!();
     // #241 follow-up: an English interface must not read a large system CJK font on startup.
     let cjk: Vec<&str> = Lang::all().filter(|l| l.uses_cjk()).map(Lang::code).collect();
@@ -440,6 +460,7 @@ fn only_cjk_languages_ask_for_an_installed_cjk_font() {
 
 #[test]
 fn russian_locales_and_saved_preference_work_without_changing_the_document() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     needs_catalogs!();
     let ru = lang("ru");
     for tag in ["ru", "ru-RU", "ru_RU.UTF-8", "RU-ru", "ru_UA.UTF-8", "ru-Cyrl-RU"] {
@@ -460,6 +481,7 @@ fn russian_locales_and_saved_preference_work_without_changing_the_document() {
 
 #[test]
 fn bundled_interface_fonts_cover_russian_without_system_fallbacks() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let db = wordcraft_fonts::FontDb::with_font_dirs(Vec::new());
     needs_catalogs!();
     let entries = translations("ru");
@@ -482,6 +504,7 @@ fn bundled_interface_fonts_cover_russian_without_system_fallbacks() {
 
 #[test]
 fn built_in_style_names_are_translated_for_display_and_user_styles_are_not() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let sheet = wordcraft_doc::StyleSheet::builtin();
     let name = |id: &str| style_name(sheet.get(id).unwrap());
     set_current(fixture_lang(
@@ -509,6 +532,7 @@ fn built_in_style_names_are_translated_for_display_and_user_styles_are_not() {
 
 #[test]
 fn context_entries_override_only_their_context() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let fx = fixture_lang("x-fixture", "\tTitle\tTitle-FX\npreview\tTitle\tSample-FX\n");
     assert_eq!(tr(fx, "Title"), "Title-FX");
     assert_eq!(trc(fx, "preview", "Title"), "Sample-FX");
@@ -519,6 +543,7 @@ fn context_entries_override_only_their_context() {
 
 #[test]
 fn estonian_locales_and_saved_preference_keep_document_content() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     needs_catalogs!();
     let et = lang("et");
     for tag in ["et", "et-EE", "ET_ee.UTF-8", "et-Latn-EE", "et_EE.UTF-8@euro"] {
@@ -540,6 +565,7 @@ fn estonian_locales_and_saved_preference_keep_document_content() {
 
 #[test]
 fn bundled_interface_fonts_cover_estonian_letters() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let db = wordcraft_fonts::FontDb::with_font_dirs(Vec::new());
     for (family, style) in [("Inter", "Regular"), ("Inter", "Medium"), ("Inter", "SemiBold"), ("JetBrains Mono", "Regular")] {
         let face = db.face(family, style);
@@ -552,6 +578,7 @@ fn bundled_interface_fonts_cover_estonian_letters() {
 
 #[test]
 fn turkish_locales_and_saved_preference_work_without_changing_the_document() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     needs_catalogs!();
     let tr = lang("tr");
     for tag in ["tr", "tr-TR", "TR_tr.UTF-8", "tr-CY", "tr-Latn-TR", "tr_TR.UTF-8@euro"] {
@@ -578,6 +605,7 @@ fn turkish_locales_and_saved_preference_work_without_changing_the_document() {
 
 #[test]
 fn bundled_interface_fonts_cover_turkish_without_system_fallbacks() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let db = wordcraft_fonts::FontDb::with_font_dirs(Vec::new());
     needs_catalogs!();
     let entries = translations("tr");
@@ -595,6 +623,7 @@ fn bundled_interface_fonts_cover_turkish_without_system_fallbacks() {
 
 #[test]
 fn hungarian_locales_and_saved_preference_work_without_changing_the_document() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     needs_catalogs!();
     let hu = lang("hu");
     for tag in ["hu", "hu-HU", "hu_HU.UTF-8", "HU_hu.UTF-8@euro", "hu-Latn-HU"] {
@@ -617,6 +646,7 @@ fn hungarian_locales_and_saved_preference_work_without_changing_the_document() {
 
 #[test]
 fn bundled_interface_fonts_cover_hungarian_without_system_fallbacks() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let db = wordcraft_fonts::FontDb::with_font_dirs(Vec::new());
     needs_catalogs!();
     let entries = translations("hu");
@@ -634,6 +664,7 @@ fn bundled_interface_fonts_cover_hungarian_without_system_fallbacks() {
 
 #[test]
 fn french_locales_and_saved_preference_work_without_changing_the_document() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     needs_catalogs!();
     let fr = lang("fr");
     for tag in ["fr", "fr-FR", "FR_fr.UTF-8", "fr-CA", "fr_BE.UTF-8@euro", "fr-CH", "fr-Latn-FR"] {
@@ -660,6 +691,7 @@ fn french_locales_and_saved_preference_work_without_changing_the_document() {
 
 #[test]
 fn bundled_interface_fonts_cover_french_without_system_fallbacks() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let db = wordcraft_fonts::FontDb::with_font_dirs(Vec::new());
     needs_catalogs!();
     let entries = translations("fr");
@@ -687,6 +719,7 @@ fn bundled_interface_fonts_cover_french_without_system_fallbacks() {
 
 #[test]
 fn polish_locales_and_saved_preference_work_without_changing_the_document() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     needs_catalogs!();
     let pl = lang("pl");
     for tag in ["pl", "pl-PL", "pl_PL.UTF-8", "PL-pl", "pl_PL.UTF-8@euro", "pl-Latn-PL"] {
@@ -707,6 +740,7 @@ fn polish_locales_and_saved_preference_work_without_changing_the_document() {
 
 #[test]
 fn bundled_interface_fonts_cover_polish_without_system_fallbacks() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let db = wordcraft_fonts::FontDb::with_font_dirs(Vec::new());
     needs_catalogs!();
     let entries = translations("pl");
@@ -725,6 +759,7 @@ fn bundled_interface_fonts_cover_polish_without_system_fallbacks() {
 
 #[test]
 fn a_polish_interface_writes_new_documents_in_polish() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     needs_catalogs!();
     let mut app = crate::WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Default::default());
     let ctx = egui::Context::default();
@@ -757,6 +792,7 @@ fn a_polish_interface_writes_new_documents_in_polish() {
 
 #[test]
 fn a_czech_interface_writes_new_documents_and_plain_text_in_czech() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     needs_catalogs!();
     let mut app = crate::WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Default::default());
     let ctx = egui::Context::default();
@@ -787,6 +823,7 @@ fn a_czech_interface_writes_new_documents_and_plain_text_in_czech() {
 
 #[test]
 fn an_italian_interface_writes_new_documents_in_italian() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     needs_catalogs!();
     let mut app = crate::WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Default::default());
     let ctx = egui::Context::default();
@@ -816,6 +853,7 @@ fn the_editing_languages_are_the_ones_wordcraft_can_proof() {
 
 #[test]
 fn german_locales_and_saved_preference_keep_document_content() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     needs_catalogs!();
     let de = lang("de");
     for tag in ["de", "de-DE", "de-AT", "de-CH", "DE_de.UTF-8", "de_DE.UTF-8@euro", "de-Latn-DE"] {
@@ -837,6 +875,7 @@ fn german_locales_and_saved_preference_keep_document_content() {
 
 #[test]
 fn bundled_interface_fonts_cover_german_letters() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let db = wordcraft_fonts::FontDb::with_font_dirs(Vec::new());
     for (family, style) in [("Inter", "Regular"), ("Inter", "Medium"), ("Inter", "SemiBold"), ("JetBrains Mono", "Regular")] {
         let face = db.face(family, style);
@@ -849,6 +888,7 @@ fn bundled_interface_fonts_cover_german_letters() {
 
 #[test]
 fn italian_locales_and_saved_preference_keep_document_content() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     needs_catalogs!();
     let it = lang("it");
     for tag in ["it", "it-IT", "it_IT.UTF-8", "it-CH", "it_IT.UTF-8@euro"] {
@@ -870,6 +910,7 @@ fn italian_locales_and_saved_preference_keep_document_content() {
 
 #[test]
 fn bundled_interface_fonts_cover_italian_letters() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let db = wordcraft_fonts::FontDb::with_font_dirs(Vec::new());
     for (family, style) in [("Inter", "Regular"), ("Inter", "Medium"), ("Inter", "SemiBold"), ("JetBrains Mono", "Regular")] {
         let face = db.face(family, style);
@@ -882,6 +923,7 @@ fn bundled_interface_fonts_cover_italian_letters() {
 
 #[test]
 fn bulgarian_locales_and_saved_preference_work_without_changing_the_document() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     needs_catalogs!();
     let bg = lang("bg");
     for tag in ["bg", "bg-BG", "bg_BG.UTF-8", "BG-bg", "bg-Cyrl-BG"] {
@@ -903,6 +945,7 @@ fn bulgarian_locales_and_saved_preference_work_without_changing_the_document() {
 
 #[test]
 fn bundled_interface_fonts_cover_bulgarian_without_system_fallbacks() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let db = wordcraft_fonts::FontDb::with_font_dirs(Vec::new());
     needs_catalogs!();
     let entries = translations("bg");
@@ -925,6 +968,7 @@ fn bundled_interface_fonts_cover_bulgarian_without_system_fallbacks() {
 
 #[test]
 fn croatian_locales_and_saved_preference_work_without_changing_the_document() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     needs_catalogs!();
     let hr = lang("hr");
     for tag in ["hr", "hr-HR", "hr_HR.UTF-8", "HR-hr", "hr-Latn-HR", "hr-BA"] {
@@ -946,6 +990,7 @@ fn croatian_locales_and_saved_preference_work_without_changing_the_document() {
 
 #[test]
 fn bundled_interface_fonts_cover_croatian_without_system_fallbacks() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let db = wordcraft_fonts::FontDb::with_font_dirs(Vec::new());
     needs_catalogs!();
     let entries = translations("hr");
@@ -968,6 +1013,7 @@ fn bundled_interface_fonts_cover_croatian_without_system_fallbacks() {
 
 #[test]
 fn swedish_locales_and_saved_preference_work_without_changing_the_document() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     needs_catalogs!();
     let sv = lang("sv");
     for tag in ["sv", "sv-SE", "sv_SE.UTF-8", "SV-se", "sv-FI"] {
@@ -989,6 +1035,7 @@ fn swedish_locales_and_saved_preference_work_without_changing_the_document() {
 
 #[test]
 fn bundled_interface_fonts_cover_swedish_letters() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let db = wordcraft_fonts::FontDb::with_font_dirs(Vec::new());
     needs_catalogs!();
     let entries = translations("sv");
@@ -1011,6 +1058,7 @@ fn bundled_interface_fonts_cover_swedish_letters() {
 
 #[test]
 fn vietnamese_locales_and_saved_preference_work_without_changing_the_document() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     needs_catalogs!();
     let vi = lang("vi");
     for tag in ["vi", "vi-VN", "vi_VN.UTF-8", "VI-vi", "vi-Latn-VN", "vi-US"] {
@@ -1033,6 +1081,7 @@ fn vietnamese_locales_and_saved_preference_work_without_changing_the_document() 
 
 #[test]
 fn bundled_interface_fonts_cover_vietnamese_letters() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let db = wordcraft_fonts::FontDb::with_font_dirs(Vec::new());
     needs_catalogs!();
     let entries = translations("vi");
@@ -1072,6 +1121,7 @@ fn spooled_print_receipt_is_translated() {
 
 #[test]
 fn romanian_locales_and_saved_preference_work_without_changing_the_document() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     needs_catalogs!();
     let ro = lang("ro");
     for tag in ["ro", "ro-RO", "ro_RO.UTF-8", "RO-ro", "ro-Latn-RO", "ro-MD"] {
@@ -1094,6 +1144,7 @@ fn romanian_locales_and_saved_preference_work_without_changing_the_document() {
 
 #[test]
 fn bundled_interface_fonts_cover_romanian_without_system_fallbacks() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let db = wordcraft_fonts::FontDb::with_font_dirs(Vec::new());
     needs_catalogs!();
     let entries = translations("ro");
@@ -1111,6 +1162,7 @@ fn bundled_interface_fonts_cover_romanian_without_system_fallbacks() {
 
 #[test]
 fn slovenian_locales_and_saved_preference_work_without_changing_the_document() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     needs_catalogs!();
     let sl = lang("sl");
     for tag in ["sl", "sl-SI", "sl_SI.UTF-8", "SL-si", "sl-Latn-SI"] {
@@ -1131,6 +1183,7 @@ fn slovenian_locales_and_saved_preference_work_without_changing_the_document() {
 
 #[test]
 fn bundled_interface_fonts_cover_slovenian_letters() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     needs_catalogs!();
     let db = wordcraft_fonts::FontDb::with_font_dirs(Vec::new());
     for (family, style) in [("Inter", "Regular"), ("Inter", "Medium"), ("Inter", "SemiBold"), ("JetBrains Mono", "Regular")] {
@@ -1147,6 +1200,7 @@ fn bundled_interface_fonts_cover_slovenian_letters() {
 /// translates it.
 #[test]
 fn a_context_lookup_never_borrows_the_plain_translation() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     set_current(fixture_lang("x-fixture", "\tOpen\tOpen-file-FX\n"));
     assert_eq!(t("Open"), "Open-file-FX");
     assert_eq!(get("spacing", "Open"), None);
@@ -1200,6 +1254,7 @@ fn arabic_fixture(source: &'static str) -> Lang {
 
 #[test]
 fn arabic_locales_and_saved_preference_work_without_changing_the_document() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     needs_catalogs!();
     let Some(ar) = Lang::from_code("ar") else {
         eprintln!("skipped: the embedded catalogs have no Arabic");
@@ -1231,6 +1286,7 @@ fn arabic_locales_and_saved_preference_work_without_changing_the_document() {
 /// filled in place and text for the document stays as typed.
 #[test]
 fn arabic_lookups_keep_typing_order() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let ar = arabic_fixture(concat!(
         "\tTable of Contents\tجدول المحتويات\n",
         "\tPaste Special…\tلصق خاص…\n",
@@ -1274,6 +1330,7 @@ fn arabic_lookups_keep_typing_order() {
 /// the text untouched.
 #[test]
 fn names_and_paths_are_isolated_in_a_right_to_left_interface() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     set_current(Lang::EN);
     assert_eq!(isolate("تقرير 2.docx"), "تقرير 2.docx");
     assert_eq!(isolate_path("C:/ملفات/تقرير.docx"), "C:/ملفات/تقرير.docx");
@@ -1291,6 +1348,7 @@ fn names_and_paths_are_isolated_in_a_right_to_left_interface() {
 /// interface, so Arabic folders do not scramble; in English the message holds the path as it is.
 #[test]
 fn a_path_in_a_message_is_isolated_in_a_right_to_left_interface() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let path = r"C:\ملفات\تقرير.docx";
     set_current(Lang::EN);
     let mut a = crate::WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), crate::Services::default());
