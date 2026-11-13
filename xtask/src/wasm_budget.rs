@@ -4,9 +4,13 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use base64::Engine as _;
+use sha2::{Digest as _, Sha384};
+
 pub const MAX_UNCOMPRESSED_BYTES: usize = 18_500_000;
 pub const MAX_GZIPPED_BYTES: usize = 7_100_000;
 pub const MAX_DATA_SECTION_BYTES: usize = 2_750_000;
+pub const CLOUDFLARE_MAX_FILE_BYTES: usize = 25 * 1024 * 1024;
 
 pub const FORBIDDEN_SYMBOLS: &[&str] = &["krilla::", "wordcraft_docbin::"];
 
@@ -172,6 +176,84 @@ fn gzip_size(path: &Path, wasm_bytes: &[u8]) -> Result<usize, String> {
     Ok(out.stdout.len())
 }
 
+fn extract_attr<'a>(tag: &'a str, attr: &str) -> Option<&'a str> {
+    for quote in ['"', '\''] {
+        let needle = format!("{attr}={quote}");
+        if let Some(idx) = tag.find(&needle) {
+            let after = tag.get(idx + needle.len()..)?;
+            let end = after.find(quote)?;
+            return after.get(..end);
+        }
+    }
+    None
+}
+
+fn sha384_integrity(bytes: &[u8]) -> String {
+    let digest = Sha384::digest(bytes);
+    format!("sha384-{}", base64::engine::general_purpose::STANDARD.encode(digest))
+}
+
+/// Recompute SHA-384 for every `integrity="sha384-..."` tag in `index.html` and verify it matches
+/// the bytes on disk under `dist_web`.
+pub fn verify_sri_digests(dist_web: &Path) -> Result<usize, String> {
+    let index_path = dist_web.join("index.html");
+    let html = std::fs::read_to_string(&index_path).map_err(|e| format!("{}: {e}", index_path.display()))?;
+    let mut checked = 0usize;
+    let mut errs = Vec::new();
+    let mut cursor = html.as_str();
+    while let Some(start) = cursor.find('<') {
+        let rest = cursor.get(start..).unwrap_or("");
+        let Some(end) = rest.find('>') else { break };
+        let tag = rest.get(..=end).unwrap_or("");
+        cursor = rest.get(end + 1..).unwrap_or("");
+        if let Some(expected) = extract_attr(tag, "integrity") {
+            let Some(raw_url) = extract_attr(tag, "href").or_else(|| extract_attr(tag, "src")) else {
+                errs.push(format!("integrity attribute without href/src in tag: {tag}"));
+                continue;
+            };
+            let trimmed = raw_url.split(['?', '#']).next().unwrap_or(raw_url).trim_start_matches("./").trim_start_matches('/');
+            let file_path = dist_web.join(trimmed);
+            match std::fs::read(&file_path) {
+                Ok(bytes) => {
+                    let actual = sha384_integrity(&bytes);
+                    checked += 1;
+                    if actual != expected {
+                        errs.push(format!("SRI mismatch for {trimmed}: index.html declares {expected}, actual file is {actual}"));
+                    }
+                }
+                Err(e) => errs.push(format!("SRI target missing ({trimmed}): {e}")),
+            }
+        }
+    }
+    if errs.is_empty() { Ok(checked) } else { Err(errs.join("; ")) }
+}
+
+fn check_static_sizes_in(dir: &Path, root: &Path, errs: &mut Vec<String>) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
+        let p = entry.path();
+        if p.is_dir() {
+            check_static_sizes_in(&p, root, errs)?;
+        } else if p.is_file() {
+            let meta = std::fs::metadata(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+            let size = usize::try_from(meta.len()).unwrap_or(usize::MAX);
+            if size > CLOUDFLARE_MAX_FILE_BYTES {
+                let rel = p.strip_prefix(root).unwrap_or(&p);
+                errs.push(format!("static file {} is {} bytes > 25 MiB platform limit ({} bytes)", rel.display(), size, CLOUDFLARE_MAX_FILE_BYTES));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Verify no file in `dist_web` exceeds Cloudflare's 25 MiB single-file static asset limit.
+pub fn check_static_file_sizes(dist_web: &Path) -> Result<(), String> {
+    let mut errs = Vec::new();
+    check_static_sizes_in(dist_web, dist_web, &mut errs)?;
+    if errs.is_empty() { Ok(()) } else { Err(errs.join("; ")) }
+}
+
 pub fn run(root: &Path, report_only: bool) -> Result<(), String> {
     let dist_web = root.join("dist/web");
     let wasm_path = find_core_wasm(&dist_web)?;
@@ -188,6 +270,12 @@ pub fn run(root: &Path, report_only: bool) -> Result<(), String> {
     if !report.found_forbidden.is_empty() {
         println!("  forbidden symbols: {}", report.found_forbidden.join(", "));
     }
+    let sri_res = verify_sri_digests(&dist_web);
+    match &sri_res {
+        Ok(n) => println!("  SRI digests:  {n} verified cleanly in index.html"),
+        Err(e) => println!("  SRI digests:  ERROR ({e})"),
+    }
+    let static_size_res = check_static_file_sizes(&dist_web);
     let forbidden_crates = forbidden_crates_in_tree(&wasm_dependency_tree(root)?);
     if !forbidden_crates.is_empty() {
         println!("  forbidden crates in wasm dependency graph: {}", forbidden_crates.join(", "));
@@ -197,6 +285,12 @@ pub fn run(root: &Path, report_only: bool) -> Result<(), String> {
         return Ok(());
     }
     let mut errs = check_budget(&report);
+    if let Err(e) = sri_res {
+        errs.push(e);
+    }
+    if let Err(e) = static_size_res {
+        errs.push(e);
+    }
     if !forbidden_crates.is_empty() {
         errs.push(format!("forbidden crates in wordcraft-web wasm32 dependency graph: {}", forbidden_crates.join(", ")));
     }
@@ -316,6 +410,27 @@ mod tests {
         let measured_valid = gzip_size(&wasm_path, &selected).unwrap();
         assert_eq!(measured_valid, valid_sidecar.stdout.len());
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_sri_digests_accepts_matching_and_rejects_mismatched() {
+        let dir = std::env::temp_dir().join(format!("wc_sri_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let wasm_bytes = b"\0asm\x01\0\0\0demo";
+        std::fs::write(dir.join("app_bg.wasm"), wasm_bytes).unwrap();
+        let good = sha384_integrity(wasm_bytes);
+        std::fs::write(dir.join("index.html"), format!(r#"<link rel="preload" href="./app_bg.wasm" integrity="{good}">"#)).unwrap();
+        assert_eq!(verify_sri_digests(&dir).unwrap(), 1);
+
+        std::fs::write(
+            dir.join("index.html"),
+            r#"<link rel="preload" href="./app_bg.wasm" integrity="sha384-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA">"#,
+        )
+        .unwrap();
+        let err = verify_sri_digests(&dir).unwrap_err();
+        assert!(err.contains("SRI mismatch for app_bg.wasm"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

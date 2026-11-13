@@ -316,6 +316,7 @@ fn pane_bodies_fit_the_narrowest_pane() {
 #[test]
 #[cfg(not(target_arch = "wasm32"))]
 fn navigation_tabs_fit_the_narrowest_pane_in_every_language() {
+    let _lock = crate::i18n::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     use egui_kittest::kittest::Queryable;
     // The language is thread-local: put English back even when an assertion fails.
     struct English;
@@ -454,6 +455,7 @@ fn pane_dock_command_docks_floats_and_reads_each_pane() {
 /// defaults still flip to the reading-start side. Covers `ui.paneDock` and `view.stylesPaneDock`.
 #[test]
 fn pane_dock_left_and_right_are_physical_in_rtl() {
+    let _lock = crate::i18n::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     use craft_ui::panes::{Edge, Place};
     use serde_json::json;
     let arabic = crate::i18n::fixture_lang("ar", "\tHome\tالرئيسية\n");
