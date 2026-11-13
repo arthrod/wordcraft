@@ -180,4 +180,7 @@ pub enum DocxError {
     /// (or encrypting failed).
     #[error("encrypted document: {0}")]
     Encryption(String),
+    /// An alternative format chunk (`w:altChunk`) could not be imported.
+    #[error("{0}")]
+    AltChunk(String),
 }

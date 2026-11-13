@@ -200,6 +200,14 @@ pub(super) fn recipients(s: &mut Session, v: &Value) -> CmdResult {
                 #[cfg(not(feature = "extra-formats"))]
                 return Err(CmdError::Failed("spreadsheet recipient import is not included in this build".into()));
             } else {
+                if !text {
+                    return Err(CmdError::Failed("not a text recipient list; save the recipient list as a CSV text file and select it again".into()));
+                }
+                if !text {
+                    return Err(CmdError::Failed(
+                        "not a text recipient list; save the recipient list as a CSV text file and select it again".into(),
+                    ));
+                }
                 recipient_csv(&decode(&bytes, v)?, p::bool(v, "headers").unwrap_or(true))
             }
         };

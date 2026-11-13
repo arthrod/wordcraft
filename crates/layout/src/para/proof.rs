@@ -1,14 +1,14 @@
 use super::{CharProps, Document, Paragraph, ResolvedChar};
 
-#[cfg(feature = "inline-proof")]
+#[cfg(any(feature = "inline-proof", feature = "hyphenation"))]
 pub use wordcraft_proof::ProofLang;
 
-/// Placeholder proofing language when `inline-proof` is compiled out.
-#[cfg(not(feature = "inline-proof"))]
+/// Placeholder proofing language when `inline-proof` and `hyphenation` are compiled out.
+#[cfg(not(any(feature = "inline-proof", feature = "hyphenation")))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct ProofLang;
 
-#[cfg(not(feature = "inline-proof"))]
+#[cfg(not(any(feature = "inline-proof", feature = "hyphenation")))]
 impl ProofLang {
     pub fn from_tag(_tag: Option<&str>) -> Self {
         Self
@@ -39,7 +39,7 @@ pub fn proof_runs(doc: &Document, p: &Paragraph, table: Option<&CharProps>) -> V
 }
 
 /// The language of the run holding byte `off` (English past the last run).
-#[cfg_attr(not(feature = "inline-proof"), allow(dead_code))]
+#[cfg_attr(not(any(feature = "inline-proof", feature = "hyphenation")), allow(dead_code))]
 pub(super) fn lang_at(runs: &[ProofRun], off: usize) -> ProofLang {
     let k = runs.partition_point(|r| r.range.end <= off);
     runs.get(k).filter(|r| r.range.start <= off).map(|r| r.lang).unwrap_or_default()

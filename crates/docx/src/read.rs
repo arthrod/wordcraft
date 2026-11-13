@@ -112,6 +112,8 @@ pub(crate) struct Reader<'p> {
     embedded: EmbeddedManifest,
     /// What alternative format chunks may still bring in, and how (see [`chunk`]).
     chunks: ChunkState<'p>,
+    /// First error returned by the caller's [`ChunkImporter`] while reading this package.
+    pub(crate) chunk_error: Option<String>,
     /// Linked text boxes as read: (`wps:txbx/@id` or `wps:linkedTxbx/@id`, `seq` (0 for the box
     /// holding the text), text box part). See [`link_text_boxes`].
     pub txbx_links: Vec<(u32, u32, u32)>,
@@ -193,6 +195,7 @@ fn read_opened_in(pkg: &Package, chunks: ChunkState) -> Result<(Document, usize,
         theme_fills: Default::default(),
         group_fill: None,
         chunks,
+        chunk_error: None,
     };
     r.doc.missing_pictures.main = main.clone();
     r.pc.major_font = r.doc.settings.major_font.clone();
@@ -347,6 +350,9 @@ fn read_opened_in(pkg: &Package, chunks: ChunkState) -> Result<(Document, usize,
     let (left, bytes, graphic) = (r.chunks.left, r.chunks.bytes, r.chunks.graphic);
     let mut doc = r.doc;
     doc.ensure_nonempty();
+    if let Some(err) = r.chunk_error.take() {
+        return Err(DocxError::AltChunk(err));
+    }
     Ok((doc, left, bytes, graphic))
 }
 

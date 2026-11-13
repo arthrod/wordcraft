@@ -30,8 +30,8 @@ pub struct AltChunk<'a> {
 }
 
 /// Turns a chunk the docx reader can't read itself into a document whose body takes the chunk's
-/// place; `None` leaves the chunk out.
-pub type ChunkImporter<'a> = &'a dyn Fn(&AltChunk) -> Option<Document>;
+/// place; an `Err` aborts the import with that message.
+pub type ChunkImporter<'a> = &'a dyn Fn(&AltChunk) -> Result<Document, String>;
 
 /// How [`crate::read_with`] reads a package.
 #[derive(Clone, Copy, Default)]
@@ -63,11 +63,27 @@ impl Reader<'_> {
         let chunk = AltChunk { content_type: &ct, part: &part, bytes };
         // A WordprocessingML chunk is a package; one that isn't Word's fails to read (logged).
         let is_docx = bytes.starts_with(b"PK\x03\x04");
-        let doc = if is_docx { self.read_nested(bytes, depth) } else { self.chunks.import.and_then(|f| f(&chunk)) };
-        let Some(mut doc) = doc else {
+        let doc = if is_docx {
+            let Some(doc) = self.read_nested(bytes, depth) else {
+                log::warn!("docx: alternative format chunk {part} ({ct}) is in a format WordCraft can't bring in");
+                return;
+            };
+            doc
+        } else if let Some(import) = self.chunks.import {
+            match import(&chunk) {
+                Ok(doc) => doc,
+                Err(err) => {
+                    if self.chunk_error.is_none() {
+                        self.chunk_error = Some(err);
+                    }
+                    return;
+                }
+            }
+        } else {
             log::warn!("docx: alternative format chunk {part} ({ct}) is in a format WordCraft can't bring in");
             return;
         };
+        let mut doc = doc;
         // The chunk flows in the section it stands in; its own section breaks don't come along.
         for b in &mut doc.body {
             if let Block::Para(p) = &**b

@@ -1160,6 +1160,7 @@ fn a_context_lookup_never_borrows_the_plain_translation() {
 /// alone when it isn't: a missing catalog never fails, it shows English.
 #[test]
 fn the_languages_offered_are_the_embedded_ones_of_the_list() {
+    let _guard = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let all: Vec<&str> = Lang::all().map(Lang::code).collect();
     if CRAFT_I18N.is_empty() {
         assert_eq!(all, ["en"]);

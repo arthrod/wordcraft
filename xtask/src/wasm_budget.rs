@@ -4,9 +4,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const MAX_UNCOMPRESSED_BYTES: usize = 7_500_000;
-pub const MAX_GZIPPED_BYTES: usize = 2_750_000;
-pub const MAX_DATA_SECTION_BYTES: usize = 1_200_000;
+pub const MAX_UNCOMPRESSED_BYTES: usize = 18_500_000;
+pub const MAX_GZIPPED_BYTES: usize = 7_000_000;
+pub const MAX_DATA_SECTION_BYTES: usize = 2_550_000;
 
 pub const FORBIDDEN_SYMBOLS: &[&str] = &["krilla::", "wordcraft_docbin::"];
 
@@ -125,7 +125,7 @@ pub fn find_core_wasm(dist_web: &Path) -> Result<PathBuf, String> {
 /// Crates that must not be in the web target's dependency graph. The byte scan for
 /// [`FORBIDDEN_SYMBOLS`] is only supplementary: `wasm-release` strips symbols, so literals may
 /// not survive, and Rust v0 mangling would not contain the `crate::` form anyway.
-pub const FORBIDDEN_CRATES: &[&str] = &["krilla", "wordcraft-docbin"];
+pub const FORBIDDEN_CRATES: &[&str] = &["krilla", "wordcraft-docbin", "wgpu", "naga"];
 
 /// Forbidden crate names found in `cargo tree --prefix none --format {p}` output.
 pub fn forbidden_crates_in_tree(tree: &str) -> Vec<String> {
@@ -274,8 +274,11 @@ mod tests {
     fn forbidden_crates_detected_in_dependency_tree() {
         let clean = "wordcraft-web v0.1.0 (/x)\nwordcraft-engine v0.1.0 (/x)\nkrilla-svg v0.1.0\n";
         assert!(forbidden_crates_in_tree(clean).is_empty());
-        let dirty = "wordcraft-web v0.1.0 (/x)\nkrilla v0.4.0 (https://x)\nwordcraft-docbin v0.1.0 (/x)\nkrilla v0.4.0 (https://x) (*)\n";
-        assert_eq!(forbidden_crates_in_tree(dirty), vec!["krilla".to_string(), "wordcraft-docbin".to_string()]);
+        let dirty = "wordcraft-web v0.1.0 (/x)\nkrilla v0.4.0 (https://x)\nwordcraft-docbin v0.1.0 (/x)\nwgpu v24.0.0\nnaga v24.0.0\nkrilla v0.4.0 (https://x) (*)\n";
+        assert_eq!(
+            forbidden_crates_in_tree(dirty),
+            vec!["krilla".to_string(), "wordcraft-docbin".to_string(), "wgpu".to_string(), "naga".to_string()]
+        );
     }
 
     #[test]

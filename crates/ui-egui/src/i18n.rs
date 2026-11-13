@@ -56,6 +56,8 @@ static I18N: LazyLock<I18n> = LazyLock::new(|| {
 
 static RUNTIME_CATALOGS: Mutex<Vec<CatalogEntry>> = Mutex::new(Vec::new());
 static ACTIVE_I18N: RwLock<Option<&'static I18n>> = RwLock::new(None);
+#[cfg(test)]
+pub(crate) static RUNTIME_CATALOG_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn active_i18n() -> &'static I18n {
     if let Some(rt) = *ACTIVE_I18N.read().unwrap_or_else(std::sync::PoisonError::into_inner) {
@@ -74,9 +76,25 @@ pub fn register_locale(code: &str, shared_tsv: &str, app_tsv: &str) {
     entries.retain(|(c, ..)| !c.eq_ignore_ascii_case(code_s));
     entries.push((code_s, shared_s, app_s));
 
-    let mut combined: Vec<CatalogEntry> =
-        CRAFT_I18N.iter().copied().filter(|(c, ..)| !entries.iter().any(|(rc, ..)| rc.eq_ignore_ascii_case(c))).collect();
-    combined.extend(entries.iter().copied());
+    // Replace embedded entries in place so existing indices stay valid; append only new locales.
+    let mut used = vec![false; entries.len()];
+    let mut combined: Vec<CatalogEntry> = CRAFT_I18N
+        .iter()
+        .copied()
+        .map(|entry| {
+            if let Some(pos) = entries.iter().position(|(rc, ..)| rc.eq_ignore_ascii_case(entry.0)) {
+                used[pos] = true;
+                entries[pos]
+            } else {
+                entry
+            }
+        })
+        .collect();
+    for (i, entry) in entries.iter().enumerate() {
+        if !used[i] {
+            combined.push(*entry);
+        }
+    }
     let offered: Vec<&str> = LANGUAGES.iter().map(|l| l.code).collect();
     let leaked_slice: &'static [CatalogEntry] = Box::leak(combined.into_boxed_slice());
     let (i18n, problems) = I18n::new(leaked_slice, &offered);
@@ -597,8 +615,21 @@ fn name_sort_key(name: &str) -> String {
 mod picker_order_tests {
     use super::*;
 
+    struct RestoreRuntimeCatalog {
+        prev_entries: Vec<CatalogEntry>,
+        prev_active: Option<&'static I18n>,
+    }
+
+    impl Drop for RestoreRuntimeCatalog {
+        fn drop(&mut self) {
+            *RUNTIME_CATALOGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = std::mem::take(&mut self.prev_entries);
+            *ACTIVE_I18N.write().unwrap_or_else(std::sync::PoisonError::into_inner) = self.prev_active;
+        }
+    }
+
     #[test]
     fn picker_lists_english_first_then_names_alphabetically() {
+        let _lock = RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let order = Lang::for_picker();
         assert_eq!(order.first().map(|l| l.code()), Some(Lang::EN.code()));
         assert_eq!(order.len(), Lang::all().count());
@@ -610,6 +641,11 @@ mod picker_order_tests {
 
     #[test]
     fn runtime_locale_registration_translates_strings() {
+        let _lock = RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = RestoreRuntimeCatalog {
+            prev_entries: RUNTIME_CATALOGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone(),
+            prev_active: *ACTIVE_I18N.read().unwrap_or_else(std::sync::PoisonError::into_inner),
+        };
         let existing = CRAFT_I18N.iter().find(|(c, ..)| *c == "fr");
         let shared = existing.map(|(_, s, _)| *s).unwrap_or("");
         let app = if let Some((_, _, orig)) = existing {

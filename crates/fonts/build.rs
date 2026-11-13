@@ -21,15 +21,16 @@ fn main() {
     }
 
     let mut src = String::from("pub static CRAFT_FONTS: &[CraftFont] = &[\n");
-    // `minimal-wasm-fonts` only slims the bundled core faces; supplied craft-fonts still go
-    // through `craft_fonts`, whose wasm filter keeps the small Arabic and Georgian faces.
-    if let Some(dir) = std::env::var_os("CRAFT_FONTS_DIR").map(PathBuf::from) {
+    let wasm = std::env::var("CARGO_CFG_TARGET_ARCH").is_ok_and(|a| a == "wasm32");
+    // Native minimal builds skip craft-fonts; minimal wasm builds keep the small Arabic/Georgian UI faces.
+    if (!minimal_wasm_fonts || wasm)
+        && let Some(dir) = std::env::var_os("CRAFT_FONTS_DIR").map(PathBuf::from)
+    {
         match craft_fonts(&dir) {
             Ok((entries, covered)) => {
                 src.push_str(&entries);
                 // Each CJK interface language needs its own face: without the Chinese one, Chinese
                 // menus fall back to the Japanese face and show boxes for simplified hanzi (#241).
-                let wasm = std::env::var("CARGO_CFG_TARGET_ARCH").is_ok_and(|a| a == "wasm32");
                 if std::env::var_os("CRAFT_FONTS_REQUIRED").is_some() && !wasm {
                     for s in REQUIRED_SCRIPTS.iter().filter(|s| !covered.iter().any(|c| c == *s)) {
                         println!("cargo::error=CRAFT_FONTS_DIR={}: no {s} font in fonts/manifest.txt (craft-fonts too old?)", dir.display());
@@ -85,7 +86,7 @@ fn craft_fonts(dir: &std::path::Path) -> Result<(String, Vec<String>), String> {
     Ok((out, covered))
 }
 
-const CORE_WASM_FONTS: &[&str] = &["SourceSans3-Regular", "SourceSerif4-Regular", "Inter-Regular"];
+const CORE_WASM_FONTS: &[&str] = &["SourceSans3-Regular", "SourceSerif4-Regular", "Inter-Regular", "Inter-Medium"];
 
 fn write_bundled_wasm_fonts(out_dir: &std::path::Path, minimal: bool) -> Result<(), String> {
     let manifest_dir = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap_or_default());

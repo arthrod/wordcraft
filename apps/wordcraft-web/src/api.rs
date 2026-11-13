@@ -126,7 +126,7 @@ fn attach_doc_helpers(queue: Sender<ControlRequest>, ctx: egui::Context) {
     let _ = js_sys::Reflect::set(&api, &JsValue::from_str("exportDocx"), export_docx.as_ref().unchecked_ref());
     export_docx.forget();
 
-    let load_docx = wasm_bindgen::closure::Closure::<dyn Fn(JsValue) -> js_sys::Promise>::new(move |val: JsValue| {
+    let load_docx = wasm_bindgen::closure::Closure::<dyn Fn(JsValue, JsValue) -> js_sys::Promise>::new(move |val: JsValue, password: JsValue| {
         let q = queue.clone();
         let c = ctx.clone();
         future_to_promise(async move {
@@ -138,7 +138,11 @@ fn attach_doc_helpers(queue: Sender<ControlRequest>, ctx: egui::Context) {
             } else {
                 return Err(JsValue::from_str("loadDocx expects Uint8Array, ArrayBuffer, or base64 string"));
             };
-            let res = execute_command(q, c, "doc.loadDocx", json!({"docxBase64": b64})).await?;
+            let mut params = json!({"docxBase64": b64});
+            if let Some(pw) = password.as_string() {
+                params["password"] = json!(pw);
+            }
+            let res = execute_command(q, c, "doc.loadDocx", params).await?;
             Ok(json_to_js(&res))
         })
     });

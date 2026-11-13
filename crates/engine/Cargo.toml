@@ -24,7 +24,7 @@ test-support = []
 wordcraft-geom = { workspace = true, features = ["image"] }
 wordcraft-doc = { workspace = true }
 wordcraft-fonts = { workspace = true }
-wordcraft-layout = { workspace = true, default-features = false }
+wordcraft-layout = { workspace = true, default-features = false, features = ["hyphenation"] }
 wordcraft-render = { workspace = true }
 wordcraft-proof = { workspace = true }
 wordcraft-docx = { workspace = true }

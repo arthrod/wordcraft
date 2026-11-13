@@ -1281,7 +1281,7 @@ fn fragmented_hidden_text_lays_out_like_the_visible_text() {
         (starts, hyph)
     };
     let (starts, hyph) = shape(&plain);
-    assert!(starts.len() > 5 && (!cfg!(feature = "inline-proof") || !hyph.is_empty()), "{starts:?} {hyph:?}");
+    assert!(starts.len() > 5 && (!cfg!(feature = "hyphenation") || !hyph.is_empty()), "{starts:?} {hyph:?}");
     // Mapped to the fragmented paragraph: a line starts after the previous visible char (with the
     // hidden one that follows it, which takes no room), a hyphen point is after its char.
     let want_starts: Vec<usize> = starts.iter().map(|s| if *s == 0 { 0 } else { kept[s - 1] + 1 }).collect();
@@ -4976,7 +4976,7 @@ fn drop_cap_font_covers_scripts_and_alignment_keeps_the_gap() {
 }
 
 #[test]
-#[cfg(feature = "inline-proof")]
+#[cfg(feature = "hyphenation")]
 fn auto_hyphenation_breaks_long_words() {
     crate::test_fonts();
     let text = "Internationalization considerations notwithstanding, administrators systematically reconsidered extraordinarily uncharacteristic responsibilities. ".repeat(4);

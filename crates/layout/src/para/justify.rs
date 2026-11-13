@@ -1,6 +1,6 @@
 use super::model::ClKind;
 use super::proof::ProofRun;
-#[cfg(feature = "inline-proof")]
+#[cfg(feature = "hyphenation")]
 use super::proof::lang_at;
 use super::{ParaLayout, SOFT_HYPHEN};
 
@@ -76,7 +76,7 @@ pub(super) fn hyphen_glyph(pl: &ParaLayout, style: u32, cache: &mut Vec<(u32, u3
 /// automatic hyphenation is on (words in capitals only with `caps`). Both are found in `text`, the paragraph as laid out (without what
 /// the layout leaves out, [`left_out`]), and `to_para` maps the end of a char there to the
 /// paragraph's text.
-#[cfg_attr(not(feature = "inline-proof"), allow(unused_variables))]
+#[cfg_attr(not(feature = "hyphenation"), allow(unused_variables))]
 pub(super) fn hyphenation_points(
     text: &str,
     to_para: impl Fn(usize) -> Option<usize>,
@@ -85,11 +85,11 @@ pub(super) fn hyphenation_points(
     caps: bool,
     runs: &[ProofRun],
 ) -> Vec<u32> {
-    #[cfg_attr(not(feature = "inline-proof"), allow(unused_mut))]
+    #[cfg_attr(not(feature = "hyphenation"), allow(unused_mut))]
     let mut bytes: Vec<usize> = text.char_indices().filter(|(_, c)| *c == SOFT_HYPHEN).map(|(i, c)| i + c.len_utf8()).collect();
     // Vietnamese words are single syllables and never take a hyphen: no automatic hyphenation in
     // a Vietnamese paragraph, nor in a word written with a Vietnamese-only letter (`Nguyễn`).
-    #[cfg(feature = "inline-proof")]
+    #[cfg(feature = "hyphenation")]
     if auto && !wordcraft_proof::vi::looks_vietnamese(text) {
         let lim = wordcraft_proof::hyphen::Limits::default();
         let mut start: Option<usize> = None;

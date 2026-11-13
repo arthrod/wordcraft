@@ -288,7 +288,7 @@ pub(crate) fn read_docx(bytes: &[u8], password: Option<&str>) -> Result<Document
 /// document: an MHT web archive, HTML, RTF or plain text, told by its content type, its part's
 /// extension or what it holds. Its pictures fit the text width, as when the file is opened.
 #[cfg(feature = "extra-formats")]
-fn import_chunk(c: &wordcraft_docx::AltChunk) -> Option<Document> {
+fn import_chunk(c: &wordcraft_docx::AltChunk) -> Result<Document, String> {
     use wordcraft_formats::{html, mht, rtf, txt};
     let full = c.content_type.to_ascii_lowercase();
     let ct = full.split(';').next().unwrap_or("").trim();
@@ -302,31 +302,31 @@ fn import_chunk(c: &wordcraft_docx::AltChunk) -> Option<Document> {
     {
         mht::import(b)
     } else if ct.contains("rtf") || ext == "rtf" || b.starts_with(b"{\\rtf") {
-        rtf::import(b).ok()?
+        rtf::import(b)?
     } else if ct.contains("html") || matches!(ext.as_str(), "html" | "htm" | "xhtml") {
         html::import_page(&html::decode_as(b, charset), &|_| None)
     } else if ct == "text/plain" || ext == "txt" {
         txt::import(b)
     } else {
-        return None;
+        return Err(format!("unsupported alternative format chunk {} ({})", c.part, ct));
     };
     // shortcut: pictures fit the chunk's default page, not the section it lands in; fit them there if wide pictures in chunks overflow narrow sections.
     fit_pictures(&mut doc);
-    Some(doc)
+    Ok(doc)
 }
 
 #[cfg(not(feature = "extra-formats"))]
-fn import_chunk(c: &wordcraft_docx::AltChunk) -> Option<Document> {
+fn import_chunk(c: &wordcraft_docx::AltChunk) -> Result<Document, String> {
     let full = c.content_type.to_ascii_lowercase();
     let ct = full.split(';').next().unwrap_or("").trim();
     let ext = ext_of(c.part);
     let mut doc = if ct == "text/plain" || ext == "txt" {
         wordcraft_formats::txt::import(c.bytes)
     } else {
-        return None;
+        return Err(format!("alternative format chunk {} ({}) is not included in this build", c.part, ct));
     };
     fit_pictures(&mut doc);
-    Some(doc)
+    Ok(doc)
 }
 
 /// The narrowest text width of the document's sections, points: what a picture must fit.

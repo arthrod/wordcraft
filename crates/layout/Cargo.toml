@@ -9,8 +9,9 @@ description = "WordCraft layout: shaping, line breaking, tabs, lists, tables, pa
 workspace = true
 
 [features]
-default = ["inline-proof"]
+default = ["inline-proof", "hyphenation"]
 inline-proof = ["dep:wordcraft-proof"]
+hyphenation = ["dep:wordcraft-proof"]
 
 [dependencies]
 wordcraft-geom = { workspace = true, features = ["image"] }
