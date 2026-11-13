@@ -286,6 +286,15 @@ pub fn check_static_file_sizes(dist_web: &Path) -> Result<(), String> {
     if errs.is_empty() { Ok(()) } else { Err(errs.join("; ")) }
 }
 
+/// The report line for the static-file-size check, printed like the SRI and i18n results so a
+/// violation is visible even when `--report-only` still returns success.
+fn static_size_report_line(res: &Result<(), String>) -> String {
+    match res {
+        Ok(()) => format!("  static sizes: every file is within the {}-byte platform limit", CLOUDFLARE_MAX_FILE_BYTES),
+        Err(e) => format!("  static sizes: ERROR ({e})"),
+    }
+}
+
 pub fn run(root: &Path, report_only: bool) -> Result<(), String> {
     let dist_web = root.join("dist/web");
     let wasm_path = find_core_wasm(&dist_web)?;
@@ -314,6 +323,7 @@ pub fn run(root: &Path, report_only: bool) -> Result<(), String> {
         Err(e) => println!("  i18n assets:  ERROR ({e})"),
     }
     let static_size_res = check_static_file_sizes(&dist_web);
+    println!("{}", static_size_report_line(&static_size_res));
     let forbidden_crates = forbidden_crates_in_tree(&wasm_dependency_tree(root)?);
     if !forbidden_crates.is_empty() {
         println!("  forbidden crates in wasm dependency graph: {}", forbidden_crates.join(", "));
@@ -402,6 +412,18 @@ mod tests {
         assert_eq!(find_core_wasm(&dir).unwrap(), a);
         std::fs::write(dir.join("wordcraft-web-bbb_bg.wasm"), b"b").unwrap();
         assert!(find_core_wasm(&dir).unwrap_err().contains("ambiguous"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn oversized_static_file_is_reported() {
+        let dir = std::env::temp_dir().join(format!("wc_wasm_static_size_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::File::create(dir.join("oversized.bin")).unwrap().set_len((CLOUDFLARE_MAX_FILE_BYTES + 1) as u64).unwrap();
+        let line = static_size_report_line(&check_static_file_sizes(&dir));
+        assert!(line.contains("ERROR"), "{line}");
+        assert!(line.contains("oversized.bin"), "{line}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

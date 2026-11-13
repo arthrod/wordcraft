@@ -33,6 +33,7 @@ struct ErrorContext<'a> {
     identity_before: Option<IdentitySnapshot>,
     dirty_before: Option<bool>,
     md_latest_before: Option<Option<String>>,
+    md_source_before: Option<Option<crate::cmd::md_source::MdSource>>,
     rev_restore: Option<u64>,
     blocks_before: Option<std::collections::BTreeMap<String, Fragment>>,
     pushed: bool,
@@ -171,6 +172,9 @@ impl Session {
         // it, so a command that only changes it is an edit.
         let pending_before = spec.mutates.then(|| self.pending.clone());
         let md_latest_before = spec.mutates.then(|| self.md_file.latest.clone());
+        // The Markdown Source buffer travels with undo/redo the way the document does: a failed
+        // command that ran `edit.undo` leaves it swapped unless it is rolled back too.
+        let md_source_before = spec.mutates.then(|| self.md_source.clone());
         let md_source_pending_before = spec.mutates && self.md_source.as_ref().is_some_and(|src| src.is_pending());
         // Which document is open. A command that replaces the document (a mail merge) opens a
         // new one, with a new undo history: it is not an edit of this document, whatever the
@@ -286,6 +290,7 @@ impl Session {
                 identity_before,
                 dirty_before,
                 md_latest_before,
+                md_source_before,
                 rev_restore,
                 blocks_before,
                 pushed,
@@ -306,6 +311,7 @@ impl Session {
             identity_before,
             dirty_before,
             md_latest_before,
+            md_source_before,
             rev_restore,
             blocks_before,
             pushed,
@@ -352,6 +358,9 @@ impl Session {
         if let Some(md_latest) = md_latest_before {
             self.md_file.latest = md_latest;
             *self.md_file.cached_exact.borrow_mut() = None;
+        }
+        if let Some(md_source) = md_source_before {
+            self.md_source = md_source;
         }
         if let Some(rev) = rev_restore {
             self.restore_rev(rev);

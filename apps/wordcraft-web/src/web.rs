@@ -48,7 +48,7 @@ async fn fetch_text(window: &web_sys::Window, url: &str) -> Result<String, Strin
 
 pub(crate) fn ensure_locale_loaded(pref: &str, asset_base: &str, ctx: egui::Context) {
     let code = wordcraft_ui_egui::i18n::target_locale_code(pref);
-    if code == "en" || wordcraft_ui_egui::i18n::Lang::from_code(code).is_some() {
+    if code == "en" || wordcraft_ui_egui::i18n::locale_registered(code) {
         return;
     }
     let first_attempt = ATTEMPTED_LOCALES.with(|s| s.borrow_mut().insert(code));

@@ -1210,23 +1210,23 @@ fn a_context_lookup_never_borrows_the_plain_translation() {
     assert_eq!(get("spacing", "Open"), None);
 }
 
-/// WordCraft offers exactly the languages in `LANGUAGES` when craft-i18n is embedded, and English
-/// alone when it isn't: a missing catalog never fails, it shows English.
+/// WordCraft offers exactly the languages in `LANGUAGES`, embedded catalog or not, so the web
+/// picker can list a locale before its pack loads: a missing catalog never fails, it shows
+/// English until it registers.
 #[test]
-fn the_languages_offered_are_the_embedded_ones_of_the_list() {
+fn the_languages_offered_are_the_listed_ones() {
     let _guard = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let all: Vec<&str> = Lang::all().map(Lang::code).collect();
-    if CRAFT_I18N.is_empty() {
-        assert_eq!(all, ["en"]);
-        assert_eq!(Lang::from_code("fr"), None);
-        assert_eq!(Lang::from_pref("fr"), Lang::EN, "a saved language without a catalog shows English");
-        assert_eq!(normalize_pref("fr"), None);
-        assert_eq!(tr(Lang::EN, "File"), "File");
-        return;
-    }
     let listed: Vec<&str> = LANGUAGES.iter().map(|l| l.code).collect();
-    assert_eq!(all, listed, "every language WordCraft lists has its catalog in craft-i18n");
+    assert_eq!(all, listed, "the picker offers every listed language");
     assert!(Lang::from_code("pseudo").is_none(), "the pseudo locale is never a setting");
+    if CRAFT_I18N.is_empty() {
+        let fr = Lang::from_code("fr").expect("an offered language resolves before its catalog loads");
+        assert_eq!(Lang::from_pref("fr"), fr);
+        assert_eq!(normalize_pref("fr"), Some("fr"));
+        assert_eq!(tr(fr, "File"), "File", "an unloaded catalog falls back to English");
+        assert!(!locale_registered("fr"));
+    }
 }
 
 /// The flatpak manifest builds with the craft-i18n commit `craft-i18n.rev` pins (CI and releases
@@ -1364,6 +1364,8 @@ fn offered_code_from_tag_matches_locale_variants_before_catalog_load() {
     let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(super::offered_code_from_tag("fr-FR"), Some("fr"));
     assert_eq!(super::offered_code_from_tag("zh-TW"), Some("zh-hant"));
+    assert_eq!(super::offered_code_from_tag("zh-Hans-HK"), Some("zh-hans"), "an explicit script beats the region's usual one");
+    assert_eq!(super::offered_code_from_tag("zh-Hant-CN"), Some("zh-hant"));
     assert_eq!(super::offered_code_from_tag("zh_CN.UTF-8"), Some("zh-hans"));
     assert_eq!(super::offered_code_from_tag("sr-Latn-RS"), Some("sr-latn"));
     assert_eq!(super::offered_code_from_tag("sr-RS"), Some("sr"));

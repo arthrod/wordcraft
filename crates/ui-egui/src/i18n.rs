@@ -45,11 +45,25 @@ include!(concat!(env!("OUT_DIR"), "/craft_i18n.rs"));
 
 type CatalogEntry = (&'static str, &'static str, &'static str);
 
+/// The embedded catalogs plus an empty entry for each offered language without one yet, so it
+/// resolves for the picker and `ui.language` before its runtime catalog registers (a web build
+/// embeds none and fetches them instead); its lookups read English until the catalog lands.
+fn base_catalogs() -> Vec<CatalogEntry> {
+    let mut out: Vec<CatalogEntry> = CRAFT_I18N.to_vec();
+    for l in LANGUAGES.iter() {
+        if l.code != "en" && !out.iter().any(|(c, ..)| c.eq_ignore_ascii_case(l.code)) {
+            out.push((l.code, "", ""));
+        }
+    }
+    out
+}
+
 /// The embedded catalogs, offering exactly the languages in [`LANGUAGES`]. Built on first use;
 /// a locale is parsed on its first lookup.
 static I18N: LazyLock<I18n> = LazyLock::new(|| {
     let offered: Vec<&str> = LANGUAGES.iter().map(|l| l.code).collect();
-    let (i18n, problems) = I18n::new(CRAFT_I18N, &offered);
+    let catalogs: &'static [CatalogEntry] = Box::leak(base_catalogs().into_boxed_slice());
+    let (i18n, problems) = I18n::new(catalogs, &offered);
     problems.iter().for_each(|p| log::warn!("interface catalogs: {p}"));
     i18n
 });
@@ -78,9 +92,8 @@ pub fn register_locale(code: &str, shared_tsv: &str, app_tsv: &str) {
 
     // Replace embedded entries in place so existing indices stay valid; append only new locales.
     let mut used = vec![false; entries.len()];
-    let mut combined: Vec<CatalogEntry> = CRAFT_I18N
-        .iter()
-        .copied()
+    let mut combined: Vec<CatalogEntry> = base_catalogs()
+        .into_iter()
         .map(|entry| {
             if let Some(pos) = entries.iter().position(|(rc, ..)| rc.eq_ignore_ascii_case(entry.0)) {
                 used[pos] = true;
@@ -101,6 +114,15 @@ pub fn register_locale(code: &str, shared_tsv: &str, app_tsv: &str) {
     problems.iter().for_each(|p| log::warn!("interface catalogs (runtime): {p}"));
     let leaked_i18n: &'static I18n = Box::leak(Box::new(i18n));
     *ACTIVE_I18N.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(leaked_i18n);
+}
+
+/// Whether `code` has real catalogs — embedded or registered at run time — rather than an
+/// offered-language entry still waiting for them. A shell that fetches locale packs (the web
+/// build) loads a locale only while this is false.
+pub fn locale_registered(code: &str) -> bool {
+    code.eq_ignore_ascii_case("en")
+        || CRAFT_I18N.iter().any(|(c, ..)| c.eq_ignore_ascii_case(code))
+        || RUNTIME_CATALOGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().any(|(c, ..)| c.eq_ignore_ascii_case(code))
 }
 
 /// The `language` setting that follows the system.
@@ -291,7 +313,9 @@ impl Lang {
         chars.into_iter().collect()
     }
 
-    /// A language by its exact code (any case): one of [`LANGUAGES`] whose catalogs are registered.
+    /// A language by its exact code (any case): one of [`LANGUAGES`]. A locale whose catalog
+    /// hasn't loaded yet still resolves; its lookups read English until it registers
+    /// ([`locale_registered`] says which it is).
     pub fn from_code(code: &str) -> Option<Lang> {
         let info = LANGUAGES.iter().find(|l| l.code.eq_ignore_ascii_case(code))?;
         let i18n = active_i18n();
@@ -305,16 +329,18 @@ impl Lang {
         Lang::from_code(pref).unwrap_or_else(system_lang)
     }
 
-    /// Every language the interface can be shown in: [`LANGUAGES`] in order, those with embedded
-    /// catalogs (English only in a build without craft-i18n).
+    /// Every language WordCraft offers: [`LANGUAGES`] in order, catalog or not — a language
+    /// whose catalog isn't loaded yet shows English until it registers (the web build fetches
+    /// catalogs on demand; a build without craft-i18n still lists them).
     pub fn all() -> impl Iterator<Item = Lang> {
         LANGUAGES.iter().filter_map(|l| Lang::from_code(l.code))
     }
 
-    /// Every registered language in the order a picker lists them: English first (the source
+    /// Every offered language in the order a picker lists them: English first (the source
     /// language and the fallback), then the rest by their own name with accents folded, so
     /// Čeština sits under C rather than after Z. Names in other scripts follow the Latin ones in
-    /// code point order: Greek, Cyrillic, Arabic, then the CJK languages.
+    /// code point order: Greek, Cyrillic, Arabic, then the CJK languages. A locale without a
+    /// registered catalog yet lists under its code until the catalog brings its name.
     pub fn for_picker() -> Vec<Lang> {
         let mut rest: Vec<Lang> = Lang::all().filter(|l| l.code() != Lang::EN.code()).collect();
         rest.sort_by_cached_key(|l| name_sort_key(l.name()));
@@ -322,8 +348,10 @@ impl Lang {
     }
 }
 
-/// The canonical `language` setting for user input: [`AUTO`] or a registered code (any case).
-/// `None` for anything else, so callers keep the current setting.
+/// The canonical `language` setting for user input: [`AUTO`] or an offered code (any case).
+/// `None` for anything else, so callers keep the current setting. An offered code whose catalog
+/// isn't registered is still a valid setting: a shell with runtime catalogs fetches it, and the
+/// lookups read English until it lands.
 pub fn normalize_pref(pref: &str) -> Option<&'static str> {
     if pref.eq_ignore_ascii_case(AUTO) {
         return Some(AUTO);
@@ -357,6 +385,11 @@ pub fn offered_code_from_tag(tag: &str) -> Option<&'static str> {
     let parts: Vec<&str> = clean.split(['-', '_']).filter(|p| !p.is_empty()).collect();
     let primary = *parts.first()?;
     if primary == "zh" {
+        // An explicit script subtag wins over region inference: zh-Hans-HK is Simplified
+        // Chinese in Hong Kong, not Traditional. The region only decides without a script.
+        if parts.contains(&"hans") {
+            return Some("zh-hans");
+        }
         if parts.iter().any(|p| matches!(*p, "hant" | "tw" | "hk" | "mo")) {
             return Some("zh-hant");
         }

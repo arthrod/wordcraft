@@ -13,6 +13,7 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
+use futures_util::StreamExt;
 use serde::Deserialize;
 use worker::*;
 
@@ -73,9 +74,17 @@ async fn main(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
             return json_error(413, "Document exceeds 4 MiB Cloudflare edge conversion cap; use Local WASM mode instead.");
         }
 
-        let body_bytes = req.bytes().await?;
-        if body_bytes.len() > MAX_BODY_BYTES {
-            return json_error(413, "Document exceeds 4 MiB Cloudflare edge conversion cap; use Local WASM mode instead.");
+        let mut stream = match req.stream() {
+            Ok(s) => s,
+            Err(_) => return json_error(400, "Invalid JSON conversion request"),
+        };
+        let mut body_bytes: Vec<u8> = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            if body_bytes.len().saturating_add(chunk.len()) > MAX_BODY_BYTES {
+                return json_error(413, "Document exceeds 4 MiB Cloudflare edge conversion cap; use Local WASM mode instead.");
+            }
+            body_bytes.extend_from_slice(&chunk);
         }
 
         let parsed: ConvertRequest = match serde_json::from_slice(&body_bytes) {

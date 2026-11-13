@@ -90,8 +90,9 @@ EOF
       writeFileSync('$WORK/$NAME/_headers', headers);
     "
   else
-    /bin/cp -f "$HERE/_headers" "$STATIC_DIST/_headers"
-    /bin/cp -f "$HERE/_headers" "$WORK/$NAME/_headers"
+    echo "error: node is required to hash the inline bootstrap script into _headers" >&2
+    echo "       (without the sha256 entries the Content-Security-Policy blocks the app from starting)" >&2
+    exit 1
   fi
   copy_docs "$WORK/$NAME"
   rm -f "$DIST/$NAME.zip"
@@ -152,12 +153,14 @@ if [[ "$RUN_CHECK" -eq 1 ]]; then
     if (typeof wc.start !== 'function' || typeof wc.init !== 'function' || typeof wc.initSync !== 'function') {
       throw new Error('wordcraft-web missing expected named exports');
     }
+    let rejected = false;
     try {
       await wc.start(42);
-      throw new Error('start(42) should reject');
     } catch (err) {
+      rejected = true;
       if (!(err instanceof Error)) throw new Error('start(42) must reject with an Error instance');
     }
+    if (!rejected) throw new Error('start(42) should reject');
   "
 
   if command -v tsc >/dev/null; then

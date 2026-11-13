@@ -1,4 +1,6 @@
-use super::{CmdError, CmdResult, Pos, Selection, Session, StoryRef, Value, json, p, pos_json};
+use super::{CmdError, CmdResult, Pos, Session, StoryRef, Value, json, p, pos_json};
+#[cfg(feature = "inline-proof")]
+use super::Selection;
 
 pub(super) fn word_count(s: &mut Session, v: &Value) -> CmdResult {
     if let Some(b) = p::bool(v, "includeTextBoxes") {
