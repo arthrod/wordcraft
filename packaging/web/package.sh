@@ -67,6 +67,13 @@ EOF
   /bin/cp -fR "$STATIC_DIST/"* "$WORK/$NAME/"
   rm -f "$WORK/$NAME/.trunk-lock" "$WORK/$NAME/_headers" "$WORK/$NAME/"*.wasm.gz "$WORK/$NAME/"*.d.ts
   /bin/cp -f "$HERE/.htaccess" "$WORK/$NAME/"
+  # Precompressed Brotli wasm sidecars (plan §2.2): hosts that negotiate Content-Encoding serve
+  # `<name>.wasm.br` instead of compressing the wasm on every miss. Only sidecars are written —
+  # the .wasm bytes (and their SRI hashes baked into index.html) are untouched.
+  for wasm_file in "$WORK/$NAME/"*.wasm; do
+    [[ -f "$wasm_file" ]] || continue
+    [[ -f "$wasm_file.br" ]] || (cd "$ROOT" && cargo xtask brotli "$wasm_file" "$wasm_file.br")
+  done
   if command -v node >/dev/null; then
     node --input-type=module -e "
       import { createHash } from 'node:crypto';

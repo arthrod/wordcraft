@@ -7,6 +7,16 @@
   ! Content-Type
   Content-Type: application/wasm
 
+# Precompressed Brotli sidecars (plan §2.2). The bytes are already br-encoded wasm; a host that
+# serves them verbatim must still label the payload so the browser decodes it. Requesters that
+# never offer `br` never fetch these (the Worker negotiates; pages don't reference them).
+/*.wasm.br
+  ! Content-Type
+  Content-Type: application/wasm
+  Content-Encoding: br
+  Vary: Accept-Encoding
+  Cache-Control: public, max-age=31536000, immutable
+
 /wordcraft-web-*.wasm
   Cache-Control: public, max-age=31536000, immutable
 

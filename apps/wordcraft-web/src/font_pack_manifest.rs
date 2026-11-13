@@ -26,49 +26,41 @@ pub(crate) fn parse_manifest(text: &str) -> Option<Vec<ManifestEntry>> {
     let json: serde_json::Value = serde_json::from_str(text).ok()?;
     let mut out = Vec::new();
     for e in json.get("faces")?.as_array()?.iter().take(MAX_MANIFEST_ENTRIES) {
-        let family = e.get("family")?.as_str()?;
-        let file = e.get("file")?.as_str()?;
-        if family.is_empty()
-            || family.len() > 256
-            || file.is_empty()
-            || file.len() > 128
-            || !file.ends_with(".ttf.br")
-            || file.chars().any(|c| matches!(c, '/' | '\\' | '?' | '#' | '%') || c.is_control())
-        {
+        let Some(entry) = parse_entry(e) else {
             continue;
-        }
-        let weight = e.get("weight")?.as_u64()?;
-        let bytes = e.get("bytes")?.as_u64()?;
-        if bytes == 0 || bytes > MAX_PACK_BYTES {
-            continue;
-        }
-        out.push(ManifestEntry {
-            family: family.to_string(),
-            weight: u16::try_from(weight).ok()?,
-            italic: e.get("italic")?.as_bool()?,
-            file: file.to_string(),
-            bytes: usize::try_from(bytes).ok()?,
-        });
+        };
+        out.push(entry);
     }
     Some(out)
 }
 
-/// The manifest entry best matching `(family, bold, italic)` — the same rule
-/// `wordcraft_fonts`'s `packs::pick_pack_face` applies: `italic` must match exactly (a roman face
-/// can't satisfy an italic want), a bold want needs a face at least semibold (a lighter face
-/// would still fake the bold — bold italic sans has no pack face and stays synthesized), then
-/// closest weight to the target (`700` bold, else `400`), ties to the heavier weight.
-#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-pub(crate) fn pick_entry<'a>(manifest: &'a [ManifestEntry], family: &str, bold: bool, italic: bool) -> Option<&'a ManifestEntry> {
-    let target: i32 = if bold { 700 } else { 400 };
-    manifest
-        .iter()
-        .filter(|e| e.family.eq_ignore_ascii_case(family) && e.italic == italic && if bold { e.weight >= 600 } else { e.weight <= 500 })
-        .min_by(|a, b| {
-            let da = (i32::from(a.weight) - target).abs();
-            let db = (i32::from(b.weight) - target).abs();
-            da.cmp(&db).then(b.weight.cmp(&a.weight))
-        })
+/// One manifest face, or `None` when any field is missing or unreasonable. File names come from
+/// our own staging, so `file` must stay inside `fonts/` and carry no query — anything that
+/// couldn't is refused.
+fn parse_entry(e: &serde_json::Value) -> Option<ManifestEntry> {
+    let family = e.get("family")?.as_str()?;
+    let file = e.get("file")?.as_str()?;
+    if family.is_empty()
+        || family.len() > 256
+        || file.is_empty()
+        || file.len() > 128
+        || !file.ends_with(".ttf.br")
+        || file.chars().any(|c| matches!(c, '/' | '\\' | '?' | '#' | '%') || c.is_control())
+    {
+        return None;
+    }
+    let weight = e.get("weight")?.as_u64()?;
+    let bytes = e.get("bytes")?.as_u64()?;
+    if bytes == 0 || bytes > MAX_PACK_BYTES {
+        return None;
+    }
+    Some(ManifestEntry {
+        family: family.to_string(),
+        weight: u16::try_from(weight).ok()?,
+        italic: e.get("italic")?.as_bool()?,
+        file: file.to_string(),
+        bytes: usize::try_from(bytes).ok()?,
+    })
 }
 
 /// Every manifest face of `family` (manual installs fetch the family's whole pack set).
@@ -145,35 +137,6 @@ mod tests {
             .join(",")
         );
         assert_eq!(parse_manifest(&big).unwrap().len(), MAX_MANIFEST_ENTRIES);
-    }
-
-    #[test]
-    fn pick_entry_matches_family_weight_italic() {
-        let faces = parse_manifest(
-            r#"{"faces":[
-              {"family":"Inter","weight":600,"italic":false,"file":"inter-sb.ttf.br","bytes":1,"compressedBytes":1},
-              {"family":"JetBrains Mono","weight":400,"italic":false,"file":"jb.ttf.br","bytes":1,"compressedBytes":1},
-              {"family":"Source Sans 3","weight":700,"italic":false,"file":"ss3-b.ttf.br","bytes":1,"compressedBytes":1},
-              {"family":"Source Sans 3","weight":400,"italic":true,"file":"ss3-i.ttf.br","bytes":1,"compressedBytes":1},
-              {"family":"Source Sans 3","weight":600,"italic":false,"file":"ss3-sb.ttf.br","bytes":1,"compressedBytes":1},
-              {"family":"Source Serif 4","weight":700,"italic":false,"file":"sf4-b.ttf.br","bytes":1,"compressedBytes":1},
-              {"family":"Source Serif 4","weight":700,"italic":true,"file":"sf4-bi.ttf.br","bytes":1,"compressedBytes":1},
-              {"family":"Source Serif 4","weight":400,"italic":true,"file":"sf4-i.ttf.br","bytes":1,"compressedBytes":1},
-              {"family":"Source Serif 4","weight":600,"italic":false,"file":"sf4-sb.ttf.br","bytes":1,"compressedBytes":1}
-            ]}"#,
-        )
-        .unwrap();
-        // The acceptance case: Calibri bold substitutes to Source Sans 3 → SourceSans3-Bold.
-        assert_eq!(pick_entry(&faces, "Source Sans 3", true, false).map(|e| e.file.as_str()), Some("ss3-b.ttf.br"));
-        assert_eq!(pick_entry(&faces, "Inter", true, false).map(|e| e.file.as_str()), Some("inter-sb.ttf.br"));
-        assert_eq!(pick_entry(&faces, "Source Serif 4", true, true).map(|e| e.file.as_str()), Some("sf4-bi.ttf.br"));
-        assert_eq!(pick_entry(&faces, "Source Serif 4", false, true).map(|e| e.file.as_str()), Some("sf4-i.ttf.br"));
-        assert_eq!(pick_entry(&faces, "JetBrains Mono", false, false).map(|e| e.file.as_str()), Some("jb.ttf.br"));
-        // Bold italic sans has no pack face: it stays synthesized.
-        assert!(pick_entry(&faces, "Source Sans 3", true, true).is_none());
-        assert!(pick_entry(&faces, "Inter", false, true).is_none());
-        // Case-insensitive family.
-        assert_eq!(pick_entry(&faces, "jetbrains mono", false, false).map(|e| e.file.as_str()), Some("jb.ttf.br"));
     }
 
     #[test]

@@ -2,8 +2,27 @@
 AddType application/wasm .wasm
 AddType text/javascript .js
 
+# Serve the precompressed <name>.wasm.br to clients that offer Brotli (plan §2.2). The .wasm
+# itself stays untouched — fallback clients and Range requests get the plain asset.
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteCond %{HTTP:Accept-Encoding} \bbr\b
+  RewriteCond %{HTTP:Range} !^.
+  RewriteCond %{REQUEST_FILENAME}.br -f
+  RewriteRule ^(.+\.wasm)$ $1.br [L]
+</IfModule>
+
 <IfModule mod_deflate.c>
+  SetEnvIfNoCase Request_URI \.wasm\.br$ no-gzip
   AddOutputFilterByType DEFLATE application/wasm text/javascript text/html
+</IfModule>
+
+<IfModule mod_headers.c>
+  <FilesMatch "\.wasm\.br$">
+    Header set Content-Type "application/wasm"
+    Header set Content-Encoding "br"
+    Header set Vary "Accept-Encoding"
+  </FilesMatch>
 </IfModule>
 
 <IfModule mod_headers.c>
