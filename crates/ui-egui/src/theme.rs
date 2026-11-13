@@ -566,26 +566,39 @@ pub fn font_definitions_language_arabic(
     prefer_korean: bool,
     prefer_hant: bool,
     system_cjk: bool,
-    system_arabic: bool,
+    #[cfg_attr(target_arch = "wasm32", allow(unused_variables))] system_arabic: bool,
 ) -> FontDefinitions {
     let mut fonts = FontDefinitions::default();
     let add = |fonts: &mut FontDefinitions, name: &str, bytes: &'static [u8]| {
         fonts.font_data.insert(name.into(), Arc::new(FontData::from_static(bytes)));
     };
-    add(&mut fonts, "Inter", include_bytes!("../../../assets/fonts/Inter-Regular.ttf"));
-    add(&mut fonts, "InterMedium", include_bytes!("../../../assets/fonts/Inter-Medium.ttf"));
-    add(&mut fonts, "InterSemiBold", include_bytes!("../../../assets/fonts/Inter-SemiBold.ttf"));
-    add(&mut fonts, "SourceSans", include_bytes!("../../../assets/fonts/SourceSans3-Regular.ttf"));
-    add(&mut fonts, "Mono", include_bytes!("../../../assets/fonts/JetBrainsMono-Regular.ttf"));
+    if let Some(inter) = wordcraft_fonts::bundled_by_stem("Inter-Regular") {
+        add(&mut fonts, "Inter", inter);
+    }
+    if let Some(med) = wordcraft_fonts::bundled_by_stem("Inter-Medium") {
+        add(&mut fonts, "InterMedium", med);
+    }
+    if let Some(sans) = wordcraft_fonts::bundled_by_stem("SourceSans3-Regular") {
+        add(&mut fonts, "SourceSans", sans);
+    }
+    if let Some(semi) = wordcraft_fonts::bundled_by_stem("Inter-SemiBold") {
+        add(&mut fonts, "InterSemiBold", semi);
+    }
+    if let Some(mono) = wordcraft_fonts::bundled_by_stem("JetBrainsMono-Regular") {
+        add(&mut fonts, "Mono", mono);
+    }
+    let has_semi = fonts.font_data.contains_key("InterSemiBold");
+    let has_mono = fonts.font_data.contains_key("Mono");
     if let Some(prop) = fonts.families.get_mut(&FontFamily::Proportional) {
         prop.insert(0, "Inter".into());
         prop.push("SourceSans".into());
     }
     if let Some(m) = fonts.families.get_mut(&FontFamily::Monospace) {
-        m.insert(0, "Mono".into());
+        m.insert(0, if has_mono { "Mono" } else { "SourceSans" }.into());
     }
     fonts.families.insert(FontFamily::Name("medium".into()), vec!["InterMedium".into(), "Inter".into(), "SourceSans".into()]);
-    fonts.families.insert(FontFamily::Name("semibold".into()), vec!["InterSemiBold".into(), "Inter".into(), "SourceSans".into()]);
+    let semibold = if has_semi { "InterSemiBold" } else { "InterMedium" };
+    fonts.families.insert(FontFamily::Name("semibold".into()), vec![semibold.into(), "Inter".into(), "SourceSans".into()]);
     let add_cjk = |fonts: &mut FontDefinitions, name: String, data: FontData| {
         fonts.font_data.insert(name.clone(), Arc::new(data));
         for fam in [FontFamily::Proportional, FontFamily::Name("medium".into()), FontFamily::Name("semibold".into())] {

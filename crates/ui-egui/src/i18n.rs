@@ -35,13 +35,15 @@
 //! - [`fmt_plain`]: [`fmt`] without bidi isolate marks, for text that goes into the document.
 
 use std::cell::Cell;
-use std::sync::{LazyLock, OnceLock};
+use std::sync::{LazyLock, Mutex, OnceLock, RwLock};
 
 use craft_i18n::I18n;
 
 pub use craft_i18n::{fmt, fmt_plain};
 
 include!(concat!(env!("OUT_DIR"), "/craft_i18n.rs"));
+
+type CatalogEntry = (&'static str, &'static str, &'static str);
 
 /// The embedded catalogs, offering exactly the languages in [`LANGUAGES`]. Built on first use;
 /// a locale is parsed on its first lookup.
@@ -51,6 +53,37 @@ static I18N: LazyLock<I18n> = LazyLock::new(|| {
     problems.iter().for_each(|p| log::warn!("interface catalogs: {p}"));
     i18n
 });
+
+static RUNTIME_CATALOGS: Mutex<Vec<CatalogEntry>> = Mutex::new(Vec::new());
+static ACTIVE_I18N: RwLock<Option<&'static I18n>> = RwLock::new(None);
+
+fn active_i18n() -> &'static I18n {
+    if let Some(rt) = *ACTIVE_I18N.read().unwrap_or_else(std::sync::PoisonError::into_inner) {
+        return rt;
+    }
+    LazyLock::force(&I18N)
+}
+
+/// Register or replace a locale's interface catalogs at run time (for externalized web locale packs).
+pub fn register_locale(code: &str, shared_tsv: &str, app_tsv: &str) {
+    let code_s: &'static str = Box::leak(code.to_ascii_lowercase().into_boxed_str());
+    let shared_s: &'static str = Box::leak(shared_tsv.to_string().into_boxed_str());
+    let app_s: &'static str = Box::leak(app_tsv.to_string().into_boxed_str());
+
+    let mut entries = RUNTIME_CATALOGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    entries.retain(|(c, ..)| !c.eq_ignore_ascii_case(code_s));
+    entries.push((code_s, shared_s, app_s));
+
+    let mut combined: Vec<CatalogEntry> =
+        CRAFT_I18N.iter().copied().filter(|(c, ..)| !entries.iter().any(|(rc, ..)| rc.eq_ignore_ascii_case(c))).collect();
+    combined.extend(entries.iter().copied());
+    let offered: Vec<&str> = LANGUAGES.iter().map(|l| l.code).collect();
+    let leaked_slice: &'static [CatalogEntry] = Box::leak(combined.into_boxed_slice());
+    let (i18n, problems) = I18n::new(leaked_slice, &offered);
+    problems.iter().for_each(|p| log::warn!("interface catalogs (runtime): {p}"));
+    let leaked_i18n: &'static I18n = Box::leak(Box::new(i18n));
+    *ACTIVE_I18N.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(leaked_i18n);
+}
 
 /// The `language` setting that follows the system.
 pub const AUTO: &str = "auto";
@@ -162,7 +195,7 @@ impl Lang {
     pub const EN: Lang = Lang { lang: craft_i18n::Lang::EN, catalogs: None };
 
     fn i18n(self) -> &'static I18n {
-        self.catalogs.unwrap_or_else(|| LazyLock::force(&I18N))
+        self.catalogs.unwrap_or_else(active_i18n)
     }
 
     fn info(self) -> Option<&'static LangInfo> {
@@ -240,10 +273,12 @@ impl Lang {
         chars.into_iter().collect()
     }
 
-    /// A language by its exact code (any case): one of [`LANGUAGES`] whose catalogs are embedded.
+    /// A language by its exact code (any case): one of [`LANGUAGES`] whose catalogs are registered.
     pub fn from_code(code: &str) -> Option<Lang> {
         let info = LANGUAGES.iter().find(|l| l.code.eq_ignore_ascii_case(code))?;
-        I18N.from_code(info.code).map(|lang| Lang { lang, catalogs: None })
+        let i18n = active_i18n();
+        let rt_active = ACTIVE_I18N.read().unwrap_or_else(std::sync::PoisonError::into_inner).is_some();
+        i18n.from_code(info.code).map(|lang| Lang { lang, catalogs: rt_active.then_some(i18n) })
     }
 
     /// Resolve the `language` setting: a language code, or [`AUTO`] (and anything unknown, e.g. a
@@ -293,7 +328,8 @@ pub fn lang_from_tag(tag: &str) -> Option<Lang> {
     if non_brazilian_portuguese(tag) {
         return None;
     }
-    I18N.match_tag(tag).and_then(|lang| Lang::from_code(I18N.code(lang)))
+    let i18n = active_i18n();
+    i18n.match_tag(tag).and_then(|lang| Lang::from_code(i18n.code(lang)))
 }
 
 /// The first of the system's preferred languages WordCraft has, in the user's order: someone
@@ -570,5 +606,20 @@ mod picker_order_tests {
         assert!(keys.windows(2).all(|w| w[0] <= w[1]), "{keys:?}");
         assert_eq!(name_sort_key("Čeština"), "cestina");
         assert_eq!(name_sort_key("Türkçe"), "turkce");
+    }
+
+    #[test]
+    fn runtime_locale_registration_translates_strings() {
+        let existing = CRAFT_I18N.iter().find(|(c, ..)| *c == "fr");
+        let shared = existing.map(|(_, s, _)| *s).unwrap_or("");
+        let app = if let Some((_, _, orig)) = existing {
+            format!("{orig}\n\t__rt_probe__\tSonde runtime\n")
+        } else {
+            "@id\tlanguage.name\tFrançais\n\t__rt_probe__\tSonde runtime\n".to_string()
+        };
+        register_locale("fr", shared, &app);
+        let fr = Lang::from_code("fr").expect("registered fr locale should resolve");
+        assert_eq!(tr(fr, "__rt_probe__"), "Sonde runtime");
+        assert_eq!(lang_from_tag("fr-FR").map(|l| l.code()), Some("fr"));
     }
 }

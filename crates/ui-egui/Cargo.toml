@@ -8,6 +8,13 @@ description = "WordCraft egui front end (Word-style ribbon UI); swappable: nothi
 [lints]
 workspace = true
 
+[features]
+default = ["embedded-i18n-catalog", "desktop-integrations", "default-fonts"]
+embedded-i18n-catalog = []
+desktop-integrations = ["dep:wordcraft-zotero"]
+default-fonts = ["egui/default_fonts", "egui/monochrome_emoji_fonts"]
+minimal-wasm = ["wordcraft-fonts/minimal-wasm-fonts"]
+
 [dependencies]
 craft-ui = { git = "https://github.com/storytold/craft-libs", rev = "92d392cff132eaf53e13afff77f38b5c11b73aa0" }
 # Interface translations: lookup, fallback, plurals and system-locale matching over the craft-i18n
@@ -23,8 +30,8 @@ wordcraft-fonts = { workspace = true }
 wordcraft-layout = { workspace = true }
 wordcraft-render = { workspace = true }
 wordcraft-engine = { workspace = true }
-wordcraft-zotero = { workspace = true }
-egui = { workspace = true, features = ["default_fonts", "monochrome_emoji_fonts"] }
+wordcraft-zotero = { workspace = true, optional = true }
+egui = { workspace = true }
 egui_extras = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
