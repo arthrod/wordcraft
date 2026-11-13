@@ -106,8 +106,51 @@ pub fn find_core_wasm(dist_web: &Path) -> Result<PathBuf, String> {
             matches.push(p);
         }
     }
-    matches.sort();
-    matches.into_iter().next().ok_or_else(|| format!("no wordcraft-web*_bg.wasm found in {}", dist_web.display()))
+    match matches.len() {
+        0 => Err(format!("no wordcraft-web*_bg.wasm found in {}", dist_web.display())),
+        1 => matches.pop().ok_or_else(|| format!("no wordcraft-web*_bg.wasm found in {}", dist_web.display())),
+        _ => {
+            matches.sort();
+            let names: Vec<String> = matches.iter().map(|p| p.display().to_string()).collect();
+            Err(format!(
+                "ambiguous: {} wordcraft-web*_bg.wasm files in {} ({}); clean the directory and rebuild",
+                matches.len(),
+                dist_web.display(),
+                names.join(", ")
+            ))
+        }
+    }
+}
+
+/// Crates that must not be in the web target's dependency graph. The byte scan for
+/// [`FORBIDDEN_SYMBOLS`] is only supplementary: `wasm-release` strips symbols, so literals may
+/// not survive, and Rust v0 mangling would not contain the `crate::` form anyway.
+pub const FORBIDDEN_CRATES: &[&str] = &["krilla", "wordcraft-docbin"];
+
+/// Forbidden crate names found in `cargo tree --prefix none --format {p}` output.
+pub fn forbidden_crates_in_tree(tree: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for line in tree.lines() {
+        let Some(name) = line.split_whitespace().next() else { continue };
+        if FORBIDDEN_CRATES.contains(&name) && !found.iter().any(|f| f == name) {
+            found.push(name.to_string());
+        }
+    }
+    found
+}
+
+fn wasm_dependency_tree(root: &Path) -> Result<String, String> {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let out = Command::new(cargo)
+        .current_dir(root)
+        .args(["tree", "-p", "wordcraft-web", "--target", "wasm32-unknown-unknown", "-e", "normal"])
+        .args(["--prefix", "none", "--format", "{p}"])
+        .output()
+        .map_err(|e| format!("cargo tree failed: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("cargo tree exited with {}: {}", out.status, String::from_utf8_lossy(&out.stderr)));
+    }
+    String::from_utf8(out.stdout).map_err(|e| format!("cargo tree output is not UTF-8: {e}"))
 }
 
 fn sidecar_matches_wasm(gz_path: &Path, wasm_bytes: &[u8]) -> bool {
@@ -145,11 +188,18 @@ pub fn run(root: &Path, report_only: bool) -> Result<(), String> {
     if !report.found_forbidden.is_empty() {
         println!("  forbidden symbols: {}", report.found_forbidden.join(", "));
     }
+    let forbidden_crates = forbidden_crates_in_tree(&wasm_dependency_tree(root)?);
+    if !forbidden_crates.is_empty() {
+        println!("  forbidden crates in wasm dependency graph: {}", forbidden_crates.join(", "));
+    }
 
     if report_only {
         return Ok(());
     }
-    let errs = check_budget(&report);
+    let mut errs = check_budget(&report);
+    if !forbidden_crates.is_empty() {
+        errs.push(format!("forbidden crates in wordcraft-web wasm32 dependency graph: {}", forbidden_crates.join(", ")));
+    }
     if errs.is_empty() {
         println!("OK: wordcraft-web satisfies all WASM budgets.");
         Ok(())
@@ -204,6 +254,28 @@ mod tests {
         let rep = analyze_wasm_bytes(PathBuf::from("big.wasm"), &bytes, MAX_GZIPPED_BYTES + 1).unwrap();
         let errs = check_budget(&rep);
         assert_eq!(errs.len(), 3, "{errs:?}");
+    }
+
+    #[test]
+    fn find_core_wasm_rejects_ambiguous_and_missing() {
+        let dir = std::env::temp_dir().join(format!("wc_wasm_find_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(find_core_wasm(&dir).unwrap_err().contains("no wordcraft-web"));
+        let a = dir.join("wordcraft-web-aaa_bg.wasm");
+        std::fs::write(&a, b"a").unwrap();
+        assert_eq!(find_core_wasm(&dir).unwrap(), a);
+        std::fs::write(dir.join("wordcraft-web-bbb_bg.wasm"), b"b").unwrap();
+        assert!(find_core_wasm(&dir).unwrap_err().contains("ambiguous"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn forbidden_crates_detected_in_dependency_tree() {
+        let clean = "wordcraft-web v0.1.0 (/x)\nwordcraft-engine v0.1.0 (/x)\nkrilla-svg v0.1.0\n";
+        assert!(forbidden_crates_in_tree(clean).is_empty());
+        let dirty = "wordcraft-web v0.1.0 (/x)\nkrilla v0.4.0 (https://x)\nwordcraft-docbin v0.1.0 (/x)\nkrilla v0.4.0 (https://x) (*)\n";
+        assert_eq!(forbidden_crates_in_tree(dirty), vec!["krilla".to_string(), "wordcraft-docbin".to_string()]);
     }
 
     #[test]
