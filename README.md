@@ -11,22 +11,22 @@
   <img src="assets/app-icon/hicolor/256x256/apps/ai.storyteller.wordcraft.png" width="128" height="128" alt="WordCraft icon: a document page and pen on a blue tile">
 </p>
 
-<h1 align="center">WordCraft</h1>
+<h1 align="center">WordCraftWeb (<code>wordcraft-web</code>)</h1>
 
 <p align="center">
-  <b>Writing and document design; an open-source, modern word processor, built in pure Rust.</b>
+  <b>Writing and document design; an open-source, Microsoft Word-parity document engine and editor built in pure Rust for the browser (WebAssembly) and desktop.</b>
 </p>
 
 <p align="center">
-  A fast, open-source word processor with a familiar workflow: the ribbon, styles,
-  tables, track changes, references and mail merge. It reads and writes .docx, runs natively on
-  macOS, Windows, Linux and BSD, and in the browser via WebAssembly.<br>
+  A clean-room word processor with the ribbon, styles, tables, track changes, references, and mail merge. It reads and writes <code>.docx</code> and Markdown in WebAssembly (~6.95 MB gzipped), ships as an npm ES module (<code>wordcraft-web</code>) and Cloudflare static/Worker deployments, and includes the companion <code>wordcraft</code> desktop app and <code>wordcraft-cli</code> / MCP server.<br>
   <i>By the ArtCraft team.</i>
 </p>
 
 <p align="center">
   <img alt="Written in Rust" src="https://img.shields.io/badge/written%20in-Rust-2b47b5?style=flat-square&logo=rust&logoColor=white">
-  <img alt="Runs on macOS, Windows, Linux, BSD and the web" src="https://img.shields.io/badge/runs%20on-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux%20%C2%B7%20BSD%20%C2%B7%20Web-3b5bdb?style=flat-square">
+  <img alt="npm package: wordcraft-web" src="https://img.shields.io/badge/npm-wordcraft--web-cb3837?style=flat-square&logo=npm&logoColor=white">
+  <a href="packaging/web/examples/cloudflare-pages/README.md"><img alt="Cloudflare Demo: Static and Hybrid Edge" src="https://img.shields.io/badge/Cloudflare%20Demo-Pages%20%7C%20Workers-f38020?style=flat-square&logo=cloudflare&logoColor=white"></a>
+  <img alt="WASM Budget <= 7.1 MB gz" src="https://img.shields.io/badge/WASM%20budget-%3C%3D%207.1%20MB%20gz-2b47b5?style=flat-square">
   <img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-2b47b5?style=flat-square">
   <img alt="Agent-drivable over MCP" src="https://img.shields.io/badge/agents-MCP%20%C2%B7%20CLI-3b5bdb?style=flat-square">
   <br>
@@ -199,7 +199,39 @@ writes (`--page`; `--scale` doesn't matter), prints nothing on stdout when it re
 same way. The engine takes `strict: true` on `file.save`, `file.saveAs`, `file.exportPdf` and
 `file.exportPng`, and `file.strictReport {markup?, page?}` returns the report without writing.
 
-Web: `cd apps/wordcraft-web && trunk serve`, then open <http://127.0.0.1:8771/?sample>.
+## Web quick start (`wordcraft-web` npm & Cloudflare)
+
+```sh
+npm install wordcraft-web      # or: pnpm add wordcraft-web / bun add wordcraft-web
+```
+
+`wordcraft-web` supports three integration modes (see [packaging/web/README.md](packaging/web/README.md) for CSP, `assetBase`, and Vite `optimizeDeps.exclude` setup):
+
+1. **ESM `start(options)` + `WordCraftApi` Promise interface:**
+
+   ```js
+   import { start } from "wordcraft-web";
+
+   const api = await start({
+     canvas: document.getElementById("wordcraft_canvas"),
+     // installGlobal: true, // optional: also set window.wordcraft
+     // assetBase: "/wordcraft/", // when serving i18n/ & samples/ from a custom path
+   });
+
+   await api.execute("text.insert", { text: "Hello WordCraftWeb" });
+   const md = await api.getMarkdown();
+   const docxBytes = await api.exportDocx();
+   ```
+
+2. **Same-document `<canvas id="wordcraft_canvas" data-host="page">`:** emits `wordcraft:ready`, `wordcraft:save`, `wordcraft:dirty`, `wordcraft:failed`, and `wordcraft:handoff` `CustomEvent`s on the canvas and listens for `wordcraft:open`.
+3. **Isolated `<iframe>` host (`?host=parent&author=Alice`):** communicates via typed same-origin `window.postMessage` bridges for sandboxed embeds.
+
+### Cloudflare deployments
+
+- **100% Browser Mode (Pages or Workers static assets):** [`packaging/web/examples/cloudflare-pages/`](packaging/web/examples/cloudflare-pages/README.md) — zero backend, on-demand locale TSV catalogs (`/i18n/`), and client-side `.docx` / `.md` codecs.
+- **Hybrid Edge Mode (Workers + `workers-rs`):** [`packaging/web/examples/cloudflare-workers/`](packaging/web/examples/cloudflare-workers/README.md) — serves the same static build plus an unlogged `POST /api/convert` endpoint bounded to `4 MiB` (`Cache-Control: no-store`).
+
+Local dev server: `cd apps/wordcraft-web && trunk serve`, then open <http://127.0.0.1:8771/?sample&demo=1>.
 
 ## For agents: CLI and MCP
 
@@ -249,6 +281,18 @@ covers every target starting with it (`wordcraft*=debug`). The logger is
 | L5 | `wordcraft-mcp` | MCP server |
 | L6 | `wordcraft-ui-egui` | the word processor front end (swappable) |
 | apps | `wordcraft`, `wordcraft-cli`, `wordcraft-web` | desktop, command line, browser |
+
+### WASM build & size budget
+
+`apps/wordcraft-web` builds with `trunk build --release` (using `glow` WebGL2 by default, Twiggy-inspected budgets, externalized `i18n/` TSVs, and `wasm-opt -Oz` before SRI hashing):
+
+| Budget Check | Measured (`release`) | Ceiling | Command |
+|---|---:|---:|---|
+| Raw `.wasm` | 17,685,630 B | 18.5 MB (25 MiB Cloudflare cap) | `cargo xtask wasm-budget` |
+| Gzip `.wasm` | 6,948,828 B | 7.1 MB | `cargo xtask wasm-budget` |
+| Custom `sec11` overhead | 2,602,190 B | 2.75 MB | `cargo xtask wasm-budget` |
+
+Package and verify both distributions with `./packaging/web/package.sh` (or `--npm --check` / `--static`).
 
 `cargo xtask ci` runs formatting, clippy, ~800 tests, the asset-attribution check, the layering
 check and the wasm build. Contributor and agent instructions: [AGENTS.md](AGENTS.md).
@@ -390,9 +434,10 @@ emerge --ask app-office/wordcraft-bin
 
 ### Web (WebAssembly)
 
-| Build | File | Notes |
+| Build | Artifact | Notes |
 |---|---|---|
-| Static site | `wordcraft-web-<ver>.zip` | Runs in a modern browser; host it on any static server |
+| Static site | `wordcraft-web-<ver>.zip` | Host on Cloudflare Pages, Cloudflare Workers static assets, or any static host |
+| NPM package | `wordcraft-web` (`index.js` + `.d.ts`) | ES module wrapper exposing `start(options)`, `init()`, and `WordCraftApi` |
 
 ## The Crafting Apps
 
