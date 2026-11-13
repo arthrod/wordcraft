@@ -23,6 +23,8 @@ mod save_fallback;
 #[cfg(target_arch = "wasm32")]
 mod api;
 #[cfg(target_arch = "wasm32")]
+mod demo;
+#[cfg(target_arch = "wasm32")]
 mod host;
 #[cfg(target_arch = "wasm32")]
 mod web;
@@ -59,9 +61,6 @@ mod api_contract_tests {
 
         let api_rs = std::fs::read_to_string(root.join("apps/wordcraft-web/src/api.rs")).expect("apps/wordcraft-web/src/api.rs");
         assert!(!api_rs.contains("Err(JsValue::from_str"), "api.rs must reject with Error objects instead of bare strings (7.2a)");
-        assert!(
-            !api_rs.contains("ok_or_else(|| JsValue::from_str"),
-            "api.rs helpers must reject with Error objects instead of bare strings (7.2a)"
-        );
+        assert!(!api_rs.contains("ok_or_else(|| JsValue::from_str"), "api.rs helpers must reject with Error objects instead of bare strings (7.2a)");
     }
 }

@@ -1,13 +1,29 @@
-# Netlify / Cloudflare Pages header rules (see HOSTING.md). Other hosts: set the same headers.
 /*
   X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; worker-src 'self'; connect-src 'self'
 
 /*.wasm
   Content-Type: application/wasm
+
+/wordcraft-web-*.wasm
+  Content-Type: application/wasm
   Cache-Control: public, max-age=31536000, immutable
 
-/*.js
+/wordcraft-web-*.js
+  Cache-Control: public, max-age=31536000, immutable
+
+/wordcraft-*.ico
+  Cache-Control: public, max-age=31536000, immutable
+
+/snippets/*
   Cache-Control: public, max-age=31536000, immutable
 
 /index.html
   Cache-Control: no-cache
+
+/i18n/*
+  Cache-Control: public, max-age=3600, must-revalidate
+
+/samples/*
+  Cache-Control: public, max-age=3600, must-revalidate

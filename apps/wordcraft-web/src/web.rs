@@ -264,6 +264,7 @@ fn launch_with_config(config: StartConfig) -> js_sys::Promise {
             create.instance_descriptor.backends = eframe::wgpu::Backends::GL;
         }
         let initial_asset_base = config.asset_base;
+        let demo_asset_base = initial_asset_base.clone();
         let author_override = config.author;
         let install_global = config.install_global;
         let force_sample = config.force_sample;
@@ -352,6 +353,7 @@ fn launch_with_config(config: StartConfig) -> js_sys::Promise {
         match result {
             Ok(()) => {
                 let api_val = created_api.borrow_mut().take().unwrap_or_default();
+                crate::demo::mount_if_enabled(&document, &canvas, &demo_asset_base, &api_val);
                 Ok(api_val.into())
             }
             Err(e) => {
@@ -819,7 +821,7 @@ async fn write_file_handle(handle: &wasm_bindgen::JsValue, bytes: &[u8]) -> Resu
     Ok(())
 }
 
-fn trigger_anchor_download(window: &web_sys::Window, name: &str, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn trigger_anchor_download(window: &web_sys::Window, name: &str, bytes: &[u8]) -> Result<(), String> {
     let js = |e: wasm_bindgen::JsValue| format!("{e:?}");
     let document = window.document().ok_or("no document")?;
     let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(bytes));

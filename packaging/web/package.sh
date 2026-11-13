@@ -51,15 +51,43 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
   command -v trunk >/dev/null || { echo "error: trunk not found (cargo install trunk --locked)" >&2; exit 1; }
 fi
 
+STATIC_DIST="$ROOT/dist/web"
+
 if [[ "$BUILD_STATIC" -eq 1 ]]; then
   if [[ "$SKIP_BUILD" -eq 0 ]]; then
     (cd "$ROOT/apps/wordcraft-web" && trunk build --release)
   fi
-  [[ -f "$DIST/web/index.html" ]] || { echo "error: missing $DIST/web/index.html (build static site first)" >&2; exit 1; }
+  [[ -f "$STATIC_DIST/index.html" ]] || { echo "error: missing $STATIC_DIST/index.html (build static site first)" >&2; exit 1; }
   mkdir -p "$WORK/$NAME"
-  /bin/cp -fR "$DIST/web/"* "$WORK/$NAME/"
-  rm -f "$WORK/$NAME/.trunk-lock"
-  /bin/cp -f "$HERE/_headers" "$HERE/.htaccess" "$WORK/$NAME/"
+  /bin/cp -fR "$STATIC_DIST/"* "$WORK/$NAME/"
+  rm -f "$WORK/$NAME/.trunk-lock" "$WORK/$NAME/_headers"
+  /bin/cp -f "$HERE/.htaccess" "$WORK/$NAME/"
+  if command -v node >/dev/null; then
+    node --input-type=module -e "
+      import { createHash } from 'node:crypto';
+      import { readFileSync, writeFileSync } from 'node:fs';
+      const html = readFileSync('$STATIC_DIST/index.html', 'utf8');
+      const hashes = [];
+      for (const m of html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)) {
+        const body = m[1];
+        if (body.trim().length > 0) {
+          hashes.push(\`'sha256-\${createHash('sha256').update(body, 'utf8').digest('base64')}'\`);
+        }
+      }
+      let headers = readFileSync('$HERE/_headers', 'utf8');
+      if (hashes.length > 0) {
+        headers = headers.replace(
+          \"script-src 'self' 'wasm-unsafe-eval'\",
+          \"script-src 'self' 'wasm-unsafe-eval' \" + hashes.join(' ')
+        );
+      }
+      writeFileSync('$STATIC_DIST/_headers', headers);
+      writeFileSync('$WORK/$NAME/_headers', headers);
+    "
+  else
+    /bin/cp -f "$HERE/_headers" "$STATIC_DIST/_headers"
+    /bin/cp -f "$HERE/_headers" "$WORK/$NAME/_headers"
+  fi
   copy_docs "$WORK/$NAME"
   rm -f "$DIST/$NAME.zip"
   (cd "$WORK" && zip -qr9 "$DIST/$NAME.zip" "$NAME")
