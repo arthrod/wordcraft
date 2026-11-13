@@ -247,6 +247,38 @@ fn check_static_sizes_in(dir: &Path, root: &Path, errs: &mut Vec<String>) -> Res
     Ok(())
 }
 
+/// Verify that `dist_web/i18n/` contains `manifest.json` and `common.tsv` + `wordcraft.tsv` for every
+/// offered non-English locale in `crates/ui-egui/src/i18n.rs`. When `require_populated` is true
+/// (`CRAFT_I18N_REQUIRED=1`), every locale in `manifest.json` must also have `populated == true`.
+pub fn verify_i18n_dist(root: &Path, dist_web: &Path, require_populated: bool) -> Result<usize, String> {
+    let i18n_dir = dist_web.join("i18n");
+    let manifest_path = i18n_dir.join("manifest.json");
+    let manifest_bytes = std::fs::read(&manifest_path).map_err(|e| format!("missing {}: {e}", manifest_path.display()))?;
+    let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).map_err(|e| format!("invalid {}: {e}", manifest_path.display()))?;
+    let locales_obj =
+        manifest.get("locales").and_then(|v| v.as_object()).ok_or_else(|| format!("{}: missing `locales` object", manifest_path.display()))?;
+
+    let offered = crate::web_assets::offered_non_english_locales(root)?;
+    let mut errs = Vec::new();
+    for code in &offered {
+        let loc_dir = i18n_dir.join(code);
+        for file in ["common.tsv", "wordcraft.tsv"] {
+            let p = loc_dir.join(file);
+            if !p.is_file() {
+                errs.push(format!("missing i18n/{code}/{file}"));
+            }
+        }
+        match locales_obj.get(code) {
+            None => errs.push(format!("manifest.json missing locale `{code}`")),
+            Some(entry) if require_populated && entry.get("populated").and_then(|v| v.as_bool()) != Some(true) => {
+                errs.push(format!("locale `{code}` has populated != true under CRAFT_I18N_REQUIRED=1"));
+            }
+            Some(_) => {}
+        }
+    }
+    if errs.is_empty() { Ok(offered.len()) } else { Err(errs.join("; ")) }
+}
+
 /// Verify no file in `dist_web` exceeds Cloudflare's 25 MiB single-file static asset limit.
 pub fn check_static_file_sizes(dist_web: &Path) -> Result<(), String> {
     let mut errs = Vec::new();
@@ -275,6 +307,12 @@ pub fn run(root: &Path, report_only: bool) -> Result<(), String> {
         Ok(n) => println!("  SRI digests:  {n} verified cleanly in index.html"),
         Err(e) => println!("  SRI digests:  ERROR ({e})"),
     }
+    let require_populated = std::env::var("CRAFT_I18N_REQUIRED").is_ok_and(|v| v.trim() == "1");
+    let i18n_res = verify_i18n_dist(root, &dist_web, require_populated);
+    match &i18n_res {
+        Ok(n) => println!("  i18n assets:  {n} non-English locale bundles + manifest.json present"),
+        Err(e) => println!("  i18n assets:  ERROR ({e})"),
+    }
     let static_size_res = check_static_file_sizes(&dist_web);
     let forbidden_crates = forbidden_crates_in_tree(&wasm_dependency_tree(root)?);
     if !forbidden_crates.is_empty() {
@@ -286,6 +324,9 @@ pub fn run(root: &Path, report_only: bool) -> Result<(), String> {
     }
     let mut errs = check_budget(&report);
     if let Err(e) = sri_res {
+        errs.push(e);
+    }
+    if let Err(e) = i18n_res {
         errs.push(e);
     }
     if let Err(e) = static_size_res {

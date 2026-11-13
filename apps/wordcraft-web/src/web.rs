@@ -2,12 +2,78 @@
 //! web runner.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use wasm_bindgen::JsCast as _;
 use wordcraft_engine::Session;
 use wordcraft_ui_egui::async_saves::{AsyncSaves, SaveOutcome};
 use wordcraft_ui_egui::{Inbox, Services, WordApp};
+
+thread_local! {
+    static ATTEMPTED_LOCALES: RefCell<HashSet<&'static str>> = RefCell::new(HashSet::new());
+}
+
+fn default_asset_base(document: &web_sys::Document) -> String {
+    document.base_uri().ok().flatten().filter(|s| !s.is_empty()).map_or_else(|| "./".to_string(), |s| normalize_asset_base(&s))
+}
+
+pub(crate) fn normalize_asset_base(base: &str) -> String {
+    let trimmed = base.trim();
+    if trimmed.is_empty() {
+        "./".to_string()
+    } else if trimmed.ends_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/")
+    }
+}
+
+async fn fetch_text(window: &web_sys::Window, url: &str) -> Result<String, String> {
+    let resp_val = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str(url)).await.map_err(|e| format!("{e:?}"))?;
+    let resp: web_sys::Response = resp_val.dyn_into().map_err(|_| "fetch did not return a Response".to_string())?;
+    if !resp.ok() {
+        return Err(format!("HTTP {} for {url}", resp.status()));
+    }
+    let text_prom = resp.text().map_err(|e| format!("{e:?}"))?;
+    let text_val = wasm_bindgen_futures::JsFuture::from(text_prom).await.map_err(|e| format!("{e:?}"))?;
+    Ok(text_val.as_string().unwrap_or_default())
+}
+
+pub(crate) fn ensure_locale_loaded(pref: &str, asset_base: &str, ctx: egui::Context) {
+    let code = wordcraft_ui_egui::i18n::target_locale_code(pref);
+    if code == "en" || wordcraft_ui_egui::i18n::Lang::from_code(code).is_some() {
+        return;
+    }
+    let first_attempt = ATTEMPTED_LOCALES.with(|s| s.borrow_mut().insert(code));
+    if !first_attempt {
+        return;
+    }
+    let base = normalize_asset_base(asset_base);
+    wasm_bindgen_futures::spawn_local(async move {
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let common_url = format!("{base}i18n/{code}/common.tsv");
+        let app_url = format!("{base}i18n/{code}/wordcraft.tsv");
+        let (common_res, app_res) = (fetch_text(&window, &common_url).await, fetch_text(&window, &app_url).await);
+        match (common_res, app_res) {
+            (Ok(common_tsv), Ok(app_tsv)) => {
+                let has_entries = app_tsv.lines().any(|line| {
+                    let t = line.trim();
+                    !t.is_empty() && !t.starts_with('#')
+                });
+                if has_entries {
+                    wordcraft_ui_egui::i18n::register_locale(code, &common_tsv, &app_tsv);
+                    ctx.request_repaint();
+                }
+            }
+            (Err(e), _) | (_, Err(e)) => {
+                log::warn!("i18n: could not load locale `{code}` ({e}); keeping English");
+            }
+        }
+    });
+}
 
 const DOC_EXTS: &[&str] =
     &["docx", "docm", "dotx", "dotm", "doc", "dot", "odt", "ott", "fodt", "rtf", "txt", "md", "html", "htm", "mht", "mhtml", "tex", "json", "xml"];
@@ -41,6 +107,7 @@ pub fn start() {
             log::error!("missing <canvas id=\"{CANVAS_ID}\">");
             return;
         };
+        let initial_asset_base = default_asset_base(&document);
         // Host modes (`craft-web-host`): `?host=parent`, a same-origin page framing WordCraft, opens documents in
         // it and stores what it saves (`host`); unframed there is no parent, so that URL on its
         // own stays the normal app with downloads. `data-host="page"` on the canvas opts a page
@@ -100,6 +167,9 @@ pub fn start() {
                     // Preferences from an earlier visit (#2132), as the desktop app reads `ui.json`.
                     let stored = stored_prefs();
                     crate::prefs::restore(&mut app, stored.as_deref());
+                    let asset_base = initial_asset_base;
+                    let initial_lang = app.ui.language.clone();
+                    ensure_locale_loaded(&initial_lang, &asset_base, cc.egui_ctx.clone());
                     // A region chosen in File › Options replaces the browser's for the first blank
                     // document too (#838).
                     if !sample && app.session.prefs.region.is_some() {
@@ -120,7 +190,7 @@ pub fn start() {
                         crate::host::Bridge::set_author(&mut app, &author);
                         prefs.keep_own_author(&app.session.author, &own);
                     }
-                    Ok(Box::new(WebShell { app, inbox, messages, prefs }))
+                    Ok(Box::new(WebShell { app, inbox, messages, prefs, asset_base, last_lang_pref: initial_lang }))
                 }),
             )
             .await;
@@ -155,6 +225,8 @@ struct WebShell {
     inbox: Inbox,
     messages: Rc<RefCell<Vec<String>>>,
     prefs: crate::prefs::PrefsSync,
+    asset_base: String,
+    last_lang_pref: String,
 }
 
 fn local_storage() -> Option<web_sys::Storage> {
@@ -176,6 +248,10 @@ impl eframe::App for WebShell {
         let msgs = std::mem::take(&mut *self.messages.borrow_mut());
         for msg in msgs {
             self.app.status(msg);
+        }
+        if self.app.ui.language != self.last_lang_pref {
+            self.last_lang_pref = self.app.ui.language.clone();
+            ensure_locale_loaded(&self.last_lang_pref, &self.asset_base, ctx.clone());
         }
         self.app.logic(ctx);
         crate::api::wake_waiters();

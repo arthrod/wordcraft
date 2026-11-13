@@ -14,6 +14,11 @@ wasm_bindgen = "0.2.129"
 wasm_opt = "version_133"
 
 [[hooks]]
+stage = "pre_build"
+command = "cargo"
+command_arguments = ["xtask", "web-assets"]
+
+[[hooks]]
 stage = "post_build"
 command = "sh"
 command_arguments = ["-c", "for f in \"$TRUNK_STAGING_DIR\"/*_bg.wasm; do gzip -9 -k -f \"$f\"; done"]

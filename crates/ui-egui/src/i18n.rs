@@ -340,6 +340,63 @@ fn non_brazilian_portuguese(tag: &str) -> bool {
     parts.next() == Some("pt") && !parts.any(|p| p == "br")
 }
 
+/// A language by an offered code or BCP-47 tag even before its runtime TSV catalog is loaded.
+/// Used by the web build to decide which external locale catalog to fetch.
+pub fn offered_code_from_tag(tag: &str) -> Option<&'static str> {
+    if non_brazilian_portuguese(tag) {
+        return None;
+    }
+    let lowered = tag.trim().to_ascii_lowercase();
+    let clean = lowered.split(['.', '@']).next().unwrap_or("");
+    if clean.is_empty() {
+        return None;
+    }
+    if clean == "c" || clean == "posix" {
+        return Some("en");
+    }
+    let parts: Vec<&str> = clean.split(['-', '_']).filter(|p| !p.is_empty()).collect();
+    let primary = *parts.first()?;
+    if primary == "zh" {
+        if parts.iter().any(|p| matches!(*p, "hant" | "tw" | "hk" | "mo")) {
+            return Some("zh-hant");
+        }
+        return Some("zh-hans");
+    }
+    if primary == "sr" {
+        return Some(if parts.contains(&"latn") { "sr-latn" } else { "sr" });
+    }
+    if primary == "pt" {
+        return parts.contains(&"br").then_some("pt-br");
+    }
+    LANGUAGES.iter().find(|l| l.code == primary).map(|l| l.code)
+}
+
+/// Resolve a saved preference (`"auto"` or explicit locale code) to an offered locale code
+/// (defaulting to `"en"`) without requiring runtime catalogs to be registered yet.
+pub fn target_locale_code(pref: &str) -> &'static str {
+    let trimmed = pref.trim();
+    if !trimmed.is_empty()
+        && !trimmed.eq_ignore_ascii_case(AUTO)
+        && let Some(info) = LANGUAGES.iter().find(|l| l.code.eq_ignore_ascii_case(trimmed))
+    {
+        return info.code;
+    }
+    if !trimmed.is_empty()
+        && !trimmed.eq_ignore_ascii_case(AUTO)
+        && let Some(code) = offered_code_from_tag(trimmed)
+    {
+        return code;
+    }
+    #[cfg(test)]
+    if let Some(tags) = TEST_SYSTEM_TAGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
+        return tags.iter().find_map(|t| offered_code_from_tag(t)).unwrap_or("en");
+    }
+    if cfg!(test) {
+        return "en";
+    }
+    detect_system_tags().iter().find_map(|t| offered_code_from_tag(t)).unwrap_or("en")
+}
+
 /// The registered language for a locale tag such as `ja_JP.UTF-8` or `zh-Hant-TW`; `None` when
 /// there is no catalog for it. `C`/`POSIX` mean English.
 pub fn lang_from_tag(tag: &str) -> Option<Lang> {
