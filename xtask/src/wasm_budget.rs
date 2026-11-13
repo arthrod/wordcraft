@@ -7,7 +7,10 @@ use std::process::Command;
 use base64::Engine as _;
 use sha2::{Digest as _, Sha384};
 
-pub const MAX_UNCOMPRESSED_BYTES: usize = 18_500_000;
+/// Main-module ceilings ratchet to measured size plus a small headroom (plan §3.5); lower them
+/// whenever the artifact shrinks. Ratcheted 2026-11-13: 18,965,881 measured (font packs, locale
+/// catalogs, worker link) → 19.5 MB.
+pub const MAX_UNCOMPRESSED_BYTES: usize = 19_500_000;
 pub const MAX_GZIPPED_BYTES: usize = 7_100_000;
 pub const MAX_DATA_SECTION_BYTES: usize = 2_750_000;
 pub const CLOUDFLARE_MAX_FILE_BYTES: usize = 25 * 1024 * 1024;
