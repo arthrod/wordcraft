@@ -5,7 +5,7 @@ pub(crate) mod sysfonts;
 #[cfg(not(target_arch = "wasm32"))]
 fn occasional_slow_hinted_glyphs_do_not_turn_hinting_off() {
     let off = |pattern: &[bool]| {
-        let face = super::make_face(super::FontBytes::Static(super::BUNDLED[0]), 0, "T".into(), "Regular".into(), "T".into(), Vec::new()).unwrap();
+        let face = super::make_face(super::FontBytes::Static(super::bundled()[0]), 0, "T".into(), "Regular".into(), "T".into(), Vec::new()).unwrap();
         pattern.iter().position(|&slow| face.count_hinted(slow))
     };
     // A face slow throughout stops at the third strike.
@@ -193,14 +193,14 @@ fn a_thai_run_with_latin_falls_back_to_one_face() {
 fn a_run_without_a_covering_face_keeps_the_per_character_path() {
     // Use only this repository's Latin faces. Optional craft-fonts inputs can contain a
     // complete Thai face even when system font loading is disabled.
-    let bundled = FontDb::with_font_dirs(Vec::new());
-    bundled.faces.write().unwrap().retain(|face| BUNDLED.iter().any(|bytes| std::ptr::eq(face.data(), *bytes)));
-    bundled.set_system_fallback(false);
-    let latin = bundled.face(FALLBACK_FAMILY, "Regular");
+    let bundled_db = FontDb::with_font_dirs(Vec::new());
+    bundled_db.faces.write().unwrap().retain(|face| bundled().iter().any(|bytes| std::ptr::eq(face.data(), *bytes)));
+    bundled_db.set_system_fallback(false);
+    let latin = bundled_db.face(FALLBACK_FAMILY, "Regular");
     let chars: Vec<char> = THAI_RUN.chars().filter(|c| !c.is_whitespace()).collect();
-    assert!(!bundled.faces.read().unwrap().is_empty(), "the negative fixture retains real Latin faces");
-    assert!(bundled.faces.read().unwrap().iter().all(|face| !face.covers('น')));
-    assert!(bundled.fallback_for_run(&chars, latin.id(), false, false).is_none());
+    assert!(!bundled_db.faces.read().unwrap().is_empty(), "the negative fixture retains real Latin faces");
+    assert!(bundled_db.faces.read().unwrap().iter().all(|face| !face.covers('น')));
+    assert!(bundled_db.fallback_for_run(&chars, latin.id(), false, false).is_none());
 }
 
 #[test]
@@ -208,14 +208,20 @@ fn a_family_named_for_a_heavy_weight_is_that_heavy() {
     let face = |bytes: &'static [u8], family: &str| {
         make_face(FontBytes::Static(bytes), 0, family.into(), "Regular".into(), family.into(), Vec::new()).unwrap()
     };
+    let regular = bundled()[0];
     // The file says 400, as the core-fonts Arial Black does: bold must not embolden it again.
-    assert_eq!(face(BUNDLED[0], "Arial Black").weight, 900.0);
-    assert_eq!(face(BUNDLED[0], "Franklin Gothic Heavy ").weight, 900.0);
-    assert_eq!(face(BUNDLED[0], "Segoe UI ExtraBold").weight, 800.0);
-    assert_eq!(face(BUNDLED[0], "Blackadder ITC").weight, 400.0);
-    assert_eq!(face(BUNDLED[0], "Arial").weight, 400.0);
+    assert_eq!(face(regular, "Arial Black").weight, 900.0);
+    assert_eq!(face(regular, "Franklin Gothic Heavy ").weight, 900.0);
+    assert_eq!(face(regular, "Segoe UI ExtraBold").weight, 800.0);
+    assert_eq!(face(regular, "Blackadder ITC").weight, 400.0);
+    assert_eq!(face(regular, "Arial").weight, 400.0);
     // A file that already says it is heavy keeps its own weight (Lato Heavy is 800, not 900).
-    assert_eq!(face(BUNDLED[1], "Source Sans 3 Heavy").weight, 600.0);
+    let heavy = crate::bundled_by_stem("SourceSans3-Semibold");
+    if let Some(semi) = heavy {
+        assert_eq!(face(semi, "Source Sans 3 Heavy").weight, 600.0);
+    } else {
+        assert_eq!(face(crate::bundled_by_stem("Inter-Medium").unwrap(), "Inter Heavy").weight, 500.0);
+    }
 }
 
 #[test]
@@ -459,7 +465,7 @@ fn named_instances_and_collection_members_are_capped() {
     assert_eq!(enumerate_faces(&font, MAX_FILE_FACES).len(), MAX_FILE_FACES);
     // A million members, all the same font: read once, and no more than the cap.
     let started = std::time::Instant::now();
-    let ttc = collection_of(BUNDLED[0], 1_000_000);
+    let ttc = collection_of(bundled()[0], 1_000_000);
     let found = enumerate_faces(&ttc, MAX_FILE_FACES);
     assert_eq!(found.iter().map(|f| (f.family.as_str(), f.style.as_str())).collect::<Vec<_>>(), [(FALLBACK_FAMILY, "Regular")]);
     let db = FontDb::with_font_dirs(vec![]);

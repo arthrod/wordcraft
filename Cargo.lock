@@ -6959,6 +6959,7 @@ dependencies = [
 name = "wordcraft-fonts"
 version = "0.18.1"
 dependencies = [
+ "brotli",
  "brotli-decompressor",
  "harfrust 0.13.3",
  "kurbo",

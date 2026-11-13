@@ -16,7 +16,7 @@ pub mod word;
 
 pub use fontdb::{
     FALLBACK_FAMILY, FONT_FILE_EXTS, FaceRef, FontDb, FontFace, FontFormat, Installed, LocalName, MAX_FONT_FILE_BYTES, UserFont, UserFontError,
-    base_style, bundled, decode_font_file, is_font_file_name, name_language_matches, sniff, system_font_dirs,
+    base_style, bundled, bundled_by_stem, decode_font_file, is_font_file_name, name_language_matches, sniff, system_font_dirs,
 };
 pub use harfrust::Feature;
 use harfrust::{Direction, ShapeOptions, ShapePlan, ShapePlanKey, Shaper, Tag, UnicodeBuffer};
@@ -653,6 +653,23 @@ mod tests {
             assert!(japanese_fonts().next().is_none() && japanese_document_fonts().is_empty());
             let latin = db.face(DEFAULT_FAMILY, "Regular");
             assert!(db.fallback_for('語', latin.id()).is_none(), "no bundled Japanese font");
+        }
+    }
+
+    #[test]
+    fn bundled_by_stem_returns_valid_sfnt_fonts() {
+        for stem in ["Inter-Regular", "Inter-Medium", "SourceSans3-Regular", "SourceSerif4-Regular"] {
+            let bytes = bundled_by_stem(stem).unwrap_or_else(|| panic!("missing bundled font {stem}"));
+            assert!(skrifa::FontRef::from_index(bytes, 0).is_ok(), "{stem} is not a valid SFNT font");
+        }
+        assert!(bundled_by_stem("DoesNotExist").is_none());
+        if cfg!(feature = "minimal-wasm-fonts") {
+            assert_eq!(bundled().len(), 4);
+        } else {
+            assert_eq!(bundled().len(), 13);
+            for stem in ["Inter-SemiBold", "JetBrainsMono-Regular", "SourceSans3-Bold", "SourceSerif4-Bold"] {
+                assert!(bundled_by_stem(stem).is_some(), "missing {stem}");
+            }
         }
     }
 }

@@ -11,6 +11,8 @@ workspace = true
 [features]
 # Opt-in test harness support; enabling this alone never changes the application database.
 test-support = []
+# Minimal core font set (brotli-compressed into OUT_DIR) for slim WASM builds.
+minimal-wasm-fonts = []
 
 [dependencies]
 kurbo = { workspace = true }
@@ -21,3 +23,6 @@ brotli-decompressor = { workspace = true }
 unicode-bidi = { workspace = true }
 unicode-script = { workspace = true }
 log = { workspace = true }
+
+[build-dependencies]
+brotli = "8"

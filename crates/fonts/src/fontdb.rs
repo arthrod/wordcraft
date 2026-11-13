@@ -24,8 +24,8 @@ mod fallback_data;
 mod lookup;
 mod names;
 
-use face::{BUNDLED, FontBytes};
-pub use face::{FALLBACK_FAMILY, FaceRef, FontFace, bundled};
+use face::FontBytes;
+pub use face::{FALLBACK_FAMILY, FaceRef, FontFace, bundled, bundled_by_stem};
 #[cfg(not(target_arch = "wasm32"))]
 use fallback_data::{CoverageIndex, SysFallback};
 use fallback_data::{FallbackCache, RunFallbackCache};
@@ -100,7 +100,7 @@ impl FontDb {
     pub fn with_font_dirs(font_dirs: Vec<std::path::PathBuf>) -> Self {
         let others = crate::CRAFT_FONTS.iter().filter(|f| !f.scripts.contains(&"Jpan"));
         let craft = crate::japanese_document_fonts().into_iter().chain(others).map(|f| f.bytes);
-        Self::with_static_fonts(font_dirs, BUNDLED.iter().copied().chain(craft))
+        Self::with_static_fonts(font_dirs, bundled().iter().copied().chain(craft))
     }
 
     fn with_static_fonts(font_dirs: Vec<std::path::PathBuf>, fonts: impl Iterator<Item = &'static [u8]>) -> Self {
@@ -172,7 +172,7 @@ impl FontDb {
             let mut installed = false;
             GLOBAL.get_or_init(|| {
                 installed = true;
-                let db = Self::with_static_fonts(Vec::new(), BUNDLED.iter().copied());
+                let db = Self::with_static_fonts(Vec::new(), bundled().iter().copied());
                 db.set_system_fallback(false);
                 db
             });
