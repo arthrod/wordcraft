@@ -29,9 +29,23 @@ mod host;
 #[cfg(target_arch = "wasm32")]
 mod web;
 
+#[cfg(any(target_arch = "wasm32", test))]
+mod font_pack_manifest;
+
 #[cfg(test)]
-const DECLARED_API_METHODS: &[&str] =
-    &["request", "execute", "commands", "docInspect", "uiInspect", "screenshot", "getMarkdown", "applyMarkdown", "exportDocx", "loadDocx"];
+const DECLARED_API_METHODS: &[&str] = &[
+    "request",
+    "execute",
+    "commands",
+    "docInspect",
+    "uiInspect",
+    "screenshot",
+    "getMarkdown",
+    "applyMarkdown",
+    "exportDocx",
+    "loadDocx",
+    "installFonts",
+];
 
 #[cfg(target_arch = "wasm32")]
 fn main() {

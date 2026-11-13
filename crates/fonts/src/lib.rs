@@ -10,6 +10,7 @@
 pub mod color;
 mod fontdb;
 pub mod math;
+pub mod packs;
 mod script;
 mod ui_fallback;
 pub mod word;
@@ -21,6 +22,7 @@ pub use fontdb::{
 pub use harfrust::Feature;
 use harfrust::{Direction, ShapeOptions, ShapePlan, ShapePlanKey, Shaper, Tag, UnicodeBuffer};
 pub use kurbo::BezPath;
+pub use packs::{PACK_FACES, PackFace, PackFontError, WantedPackFace, decode_pack_bytes, pick_pack_face};
 pub use script::{fallback_rank, is_emoji, joins_cursively, needs_layout_tables, script_fallbacks};
 use skrifa::MetadataProvider;
 use skrifa::instance::Size;

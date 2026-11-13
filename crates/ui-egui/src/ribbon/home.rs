@@ -68,6 +68,8 @@ pub(super) fn home(app: &mut WordApp, ui: &mut Ui) {
                         app.run("font.add", json!({}))
                     } else if f == crate::widgets::LOAD_SYSTEM_FONTS {
                         app.run("font.loadSystem", json!({}))
+                    } else if f == crate::widgets::INSTALL_FONT_PACKS {
+                        app.run("font.installPack", json!({}))
                     } else {
                         let f = app.previews.font_stored(&f);
                         app.run("format.font", json!({"name": f}))

@@ -55,13 +55,15 @@ pub(crate) fn parse_manifest(text: &str) -> Option<Vec<ManifestEntry>> {
 
 /// The manifest entry best matching `(family, bold, italic)` — the same rule
 /// `wordcraft_fonts`'s `packs::pick_pack_face` applies: `italic` must match exactly (a roman face
-/// can't satisfy an italic want), then closest weight to the target (`700` bold, else `400`),
-/// ties to the heavier weight.
+/// can't satisfy an italic want), a bold want needs a face at least semibold (a lighter face
+/// would still fake the bold — bold italic sans has no pack face and stays synthesized), then
+/// closest weight to the target (`700` bold, else `400`), ties to the heavier weight.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub(crate) fn pick_entry<'a>(manifest: &'a [ManifestEntry], family: &str, bold: bool, italic: bool) -> Option<&'a ManifestEntry> {
     let target: i32 = if bold { 700 } else { 400 };
     manifest
         .iter()
-        .filter(|e| e.family.eq_ignore_ascii_case(family) && e.italic == italic)
+        .filter(|e| e.family.eq_ignore_ascii_case(family) && e.italic == italic && if bold { e.weight >= 600 } else { e.weight <= 500 })
         .min_by(|a, b| {
             let da = (i32::from(a.weight) - target).abs();
             let db = (i32::from(b.weight) - target).abs();
@@ -70,6 +72,7 @@ pub(crate) fn pick_entry<'a>(manifest: &'a [ManifestEntry], family: &str, bold: 
 }
 
 /// Every manifest face of `family` (manual installs fetch the family's whole pack set).
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub(crate) fn entries_for_family<'a>(manifest: &'a [ManifestEntry], family: &str) -> Vec<&'a ManifestEntry> {
     manifest.iter().filter(|e| e.family.eq_ignore_ascii_case(family)).collect()
 }
@@ -114,13 +117,14 @@ mod tests {
         assert_eq!(good[0].file, "Inter-SemiBold.abcd1234.ttf.br");
         assert_eq!(good[0].bytes, 1234);
 
-        // A path or query in `file`, missing fields, absurd sizes, or a non-.br file is dropped.
+        // A path or query in `file`, missing fields, absurd sizes, or a non-.br file is dropped;
+        // `compressedBytes` is informational — the decode contract is `bytes` — so it isn't read.
         let junk = parse_manifest(
             r#"{"faces":[
               {"family":"X","weight":400,"italic":false,"file":"../index.html","bytes":10,"compressedBytes":1},
               {"family":"Y","weight":400,"italic":false,"file":"a.ttf.br?x=1","bytes":10,"compressedBytes":1},
               {"family":"Z","weight":400,"italic":false,"file":"z.ttf.br","bytes":999999999999,"compressedBytes":1},
-              {"family":"W","weight":400,"italic":false,"file":"w.ttf.br","bytes":10},
+              {"family":"W","weight":400,"italic":false,"file":"w.ttf.br"},
               {"family":"V","weight":400,"italic":false,"file":"v.ttf","bytes":10,"compressedBytes":1},
               {"family":"U","weight":400,"italic":false,"file":"u.ttf.br","bytes":0,"compressedBytes":1}
             ]}"#,
@@ -131,7 +135,15 @@ mod tests {
         assert!(parse_manifest("not json").is_none());
         assert!(parse_manifest("{}").is_none());
         // Over-long manifests are cut at the cap rather than read whole.
-        let big = format!("{{\"faces\":[{}]}}", std::iter::repeat_n(r#"{"family":"F","weight":400,"italic":false,"file":"f.ttf.br","bytes":1,"compressedBytes":1}"#, MAX_MANIFEST_ENTRIES + 10).collect::<Vec<_>>().join(","));
+        let big = format!(
+            "{{\"faces\":[{}]}}",
+            std::iter::repeat_n(
+                r#"{"family":"F","weight":400,"italic":false,"file":"f.ttf.br","bytes":1,"compressedBytes":1}"#,
+                MAX_MANIFEST_ENTRIES + 10
+            )
+            .collect::<Vec<_>>()
+            .join(",")
+        );
         assert_eq!(parse_manifest(&big).unwrap().len(), MAX_MANIFEST_ENTRIES);
     }
 

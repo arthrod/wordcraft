@@ -244,7 +244,8 @@ const PACK_FACES: &[PackSpec] = &[
 /// The four faces `crates/fonts/build.rs::CORE_WASM_FONTS` embeds in `minimal-wasm-fonts` builds:
 /// everything else in `assets/fonts/` is a pack. Kept in sync by
 /// `tests::font_packs_cover_every_non_bundled_face`, which parses `build.rs` rather than trusting
-/// this copy.
+/// this copy. Only the drift test reads it.
+#[cfg(test)]
 const CORE_WASM_FONTS: &[&str] = &["SourceSans3-Regular", "SourceSerif4-Regular", "Inter-Regular", "Inter-Medium"];
 
 /// Stage `fonts/<stem>.<hash8>.ttf.br` (Brotli quality 11; `<hash8>` is the first 8 hex chars of the
@@ -400,8 +401,7 @@ mod tests {
         let out = dir.join("out");
         emit_font_packs(&root, &out).unwrap();
 
-        let manifest: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(out.join("fonts/manifest.json")).unwrap()).unwrap();
+        let manifest: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(out.join("fonts/manifest.json")).unwrap()).unwrap();
         let faces = manifest["faces"].as_array().unwrap();
         assert_eq!(faces.len(), 9, "{faces:?}");
         for (spec, entry) in PACK_FACES.iter().zip(faces) {
@@ -420,10 +420,7 @@ mod tests {
             assert!(!packed.is_empty());
             use std::io::Read as _;
             let mut decoded = Vec::new();
-            brotli_decompressor::Decompressor::new(packed.as_slice(), 4096)
-                .take(ttf.len() as u64 + 1)
-                .read_to_end(&mut decoded)
-                .unwrap();
+            brotli_decompressor::Decompressor::new(packed.as_slice(), 4096).take(ttf.len() as u64 + 1).read_to_end(&mut decoded).unwrap();
             assert_eq!(decoded, ttf, "{} does not decode to the TTF", spec.stem);
         }
         // A stale pack file is removed on the next staging run.

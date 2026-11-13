@@ -160,6 +160,7 @@ fn attach_doc_helpers(api: &js_sys::Object, queue: Sender<ControlRequest>, ctx: 
     let _ = js_sys::Reflect::set(api, &JsValue::from_str("exportDocx"), export_docx.as_ref().unchecked_ref());
     export_docx.forget();
 
+    let c_fonts = ctx.clone();
     let load_docx = wasm_bindgen::closure::Closure::<dyn Fn(JsValue, JsValue) -> js_sys::Promise>::new(move |val: JsValue, password: JsValue| {
         let q = queue.clone();
         let c = ctx.clone();
@@ -182,6 +183,17 @@ fn attach_doc_helpers(api: &js_sys::Object, queue: Sender<ControlRequest>, ctx: 
     });
     let _ = js_sys::Reflect::set(api, &JsValue::from_str("loadDocx"), load_docx.as_ref().unchecked_ref());
     load_docx.forget();
+
+    let install_fonts = wasm_bindgen::closure::Closure::<dyn Fn(JsValue) -> js_sys::Promise>::new(move |val: JsValue| {
+        let families: Option<Vec<String>> = if val.is_undefined() || val.is_null() {
+            None
+        } else {
+            js_sys::Array::from(&val).iter().filter_map(|v| v.as_string()).take(64).collect::<Vec<String>>().into()
+        };
+        crate::web::font_packs::install_fonts_promise(families, c_fonts.clone())
+    });
+    let _ = js_sys::Reflect::set(api, &JsValue::from_str("installFonts"), install_fonts.as_ref().unchecked_ref());
+    install_fonts.forget();
 }
 
 struct ReplyFuture {

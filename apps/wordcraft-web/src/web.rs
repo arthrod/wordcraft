@@ -85,6 +85,7 @@ const DOC_EXTS: &[&str] =
     &["docx", "docm", "dotx", "dotm", "doc", "dot", "odt", "ott", "fodt", "rtf", "txt", "md", "html", "htm", "mht", "mhtml", "tex", "json", "xml"];
 const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "wmf", "emf"];
 const RECIPIENT_EXTS: &[&str] = wordcraft_engine::cmd::mailings::RECIPIENT_EXTENSIONS;
+pub(crate) mod font_packs;
 mod font_store;
 const CANVAS_ID: &str = "wordcraft_canvas";
 const LOADING_ID: &str = "wordcraft_loading";
@@ -317,6 +318,7 @@ fn launch_with_config(config: StartConfig) -> js_sys::Promise {
                     let stored = stored_prefs();
                     crate::prefs::restore(&mut app, stored.as_deref());
                     let asset_base = initial_asset_base;
+                    font_packs::init(&asset_base, messages.clone());
                     let initial_lang = app.ui.language.clone();
                     ensure_locale_loaded(&initial_lang, &asset_base, cc.egui_ctx.clone());
                     // A region chosen in File › Options replaces the browser's for the first blank
@@ -452,6 +454,8 @@ impl eframe::App for WebShell {
             label_ime_input(&self.canvas);
         }
         self.app.logic(ctx);
+        // Wanted pack faces are recorded during layout, so drain them after the app ran.
+        font_packs::drain_wanted(ctx);
         crate::api::wake_waiters();
         // Store changed preferences straight away: a reload or closed tab runs no exit code (#2132).
         if let Some(json) = self.prefs.changed(&self.app) {
@@ -552,6 +556,7 @@ fn services(inbox: Inbox, ctx: egui::Context, dirty: Rc<Cell<bool>>, saves: Asyn
     let save_ctx = ctx.clone();
     let font_ctx = ctx.clone();
     let font_messages = messages.clone();
+    let pack_ctx = ctx.clone();
     Services {
         open_async: Some(Box::new(move |purpose: &str| {
             let inbox = open_inbox.clone();
@@ -596,6 +601,9 @@ fn services(inbox: Inbox, ctx: egui::Context, dirty: Rc<Cell<bool>>, saves: Asyn
         forget_font: Some(Box::new(font_store::forget)),
         load_system_fonts: Some(Box::new(move || {
             load_system_fonts(font_ctx.clone(), font_messages.clone());
+        })),
+        install_font_packs: Some(Box::new(move |families: Vec<String>| {
+            font_packs::install_families(families, pack_ctx.clone());
         })),
         ..Default::default()
     }

@@ -469,6 +469,14 @@ impl WordApp {
                 "insertPicture" => self.pick_picture(),
                 "addFont" => self.pick_font(),
                 "loadSystemFonts" => self.load_system_fonts(),
+                "installFontPacks" => {
+                    let families: Vec<String> = req
+                        .get("families")
+                        .and_then(Value::as_array)
+                        .map(|a| a.iter().filter_map(|f| f.as_str().map(str::to_string)).take(64).collect())
+                        .unwrap_or_default();
+                    self.install_font_packs(families);
+                }
                 "print" => {
                     self.ui.backstage = true;
                     self.ui.backstage_page = "print".into();

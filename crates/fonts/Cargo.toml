@@ -25,5 +25,9 @@ unicode-bidi = { workspace = true }
 unicode-script = { workspace = true }
 log = { workspace = true }
 
+[dev-dependencies]
+# Tests compress pack fixtures the way `cargo xtask web-assets` ships them (quality 11).
+brotli = "8"
+
 [build-dependencies]
 brotli = "8"

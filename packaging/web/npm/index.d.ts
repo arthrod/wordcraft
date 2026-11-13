@@ -42,6 +42,13 @@ export interface WordCraftApi {
   exportDocx(): Promise<Uint8Array>;
   /** Load a `.docx` file from bytes or a base64 string (with optional password). */
   loadDocx(data: Uint8Array | ArrayBuffer | string, password?: string): Promise<Record<string, unknown>>;
+  /**
+   * Download the unbundled pack faces of `families` from `<assetBase>/fonts/` (all pack faces
+   * when omitted) and resolve `{installed, failed}` (font file names) once no pack fetch is in
+   * flight. Await it before measuring layout-sensitive output — a bold face arriving can move
+   * line and page breaks.
+   */
+  installFonts(families?: string[]): Promise<{ installed: string[]; failed: string[] }>;
 }
 
 /** Incoming CustomEvent names emitted by `<canvas data-host="page">`. */

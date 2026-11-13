@@ -1,0 +1,102 @@
+//! `cargo xtask brotli <input> <output>`: Brotli-compress one file at quality 11.
+//!
+//! `packaging/web/package.sh` uses this to emit `<name>_bg.wasm.br` sidecars: serving the
+//! pre-compressed bytes lets hosts skip on-the-fly compression, and only a sidecar is written —
+//! the `.wasm` itself is never touched, so the SHA-384 SRI digests baked into `index.html`
+//! still hold. Compressing in Rust (instead of shelling out to a `brotli` CLI, which distros
+//! may not ship) keeps the pipeline on the `brotli` crate that `crates/fonts/build.rs` already
+//! uses for the minimal font set.
+
+use std::fs::File;
+use std::io::{BufReader, BufWriter, Read, Write};
+use std::path::Path;
+
+/// Brotli's maximum quality. Sidecars are built once per release, so the slowest (and densest)
+/// setting is the right trade here. `lgwin: 24` is the largest window, which also suits the
+/// multi-megabyte wasm better than the default 22.
+const QUALITY: i32 = 11;
+const LGWIN: i32 = 24;
+
+/// Compress everything `input` yields into `output` at [`QUALITY`]. Exposed separately from
+/// [`run`] so tests can round-trip in-memory buffers without touching the filesystem.
+pub fn compress<R: Read, W: Write>(input: &mut R, output: &mut W) -> Result<(), String> {
+    let params = brotli::enc::BrotliEncoderParams { quality: QUALITY, lgwin: LGWIN, ..brotli::enc::BrotliEncoderParams::default() };
+    brotli::BrotliCompress(input, output, &params).map(|_| ()).map_err(|e| format!("brotli compress: {e}"))?;
+    output.flush().map_err(|e| format!("brotli output flush: {e}"))
+}
+
+/// Human-readable `output/input` share, e.g. `26.6% of input`; `n/a` for an empty input.
+fn ratio_str(input_bytes: usize, output_bytes: usize) -> String {
+    if input_bytes == 0 {
+        return "n/a (empty input)".to_string();
+    }
+    let pct = output_bytes as f64 / input_bytes as f64 * 100.0;
+    format!("{pct:.1}% of input")
+}
+
+pub fn run(args: &[&str]) -> Result<(), String> {
+    let [input, output] = args else {
+        return Err(
+            "usage: cargo xtask brotli <input> <output>\n\n  Brotli-compress <input> at quality 11 into <output> (packaging/web wasm .br sidecars)"
+                .into(),
+        );
+    };
+    let input_path = Path::new(input);
+    let output_path = Path::new(output);
+    let input_bytes = usize::try_from(std::fs::metadata(input_path).map_err(|e| format!("{}: {e}", input_path.display()))?.len())
+        .map_err(|_| format!("{}: file too large", input_path.display()))?;
+
+    let in_file = File::open(input_path).map_err(|e| format!("{}: {e}", input_path.display()))?;
+    let out_file = File::create(output_path).map_err(|e| format!("{}: {e}", output_path.display()))?;
+    compress(&mut BufReader::new(in_file), &mut BufWriter::new(out_file))?;
+
+    let output_bytes = usize::try_from(std::fs::metadata(output_path).map_err(|e| format!("{}: {e}", output_path.display()))?.len())
+        .map_err(|_| format!("{}: file too large", output_path.display()))?;
+    println!("brotli (quality {QUALITY}): {} -> {}", input_path.display(), output_path.display());
+    println!("  input:  {input_bytes} bytes");
+    println!("  output: {output_bytes} bytes ({})", ratio_str(input_bytes, output_bytes));
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    /// Round-trip `data` through [`compress`] and the `brotli-decompressor` crate (the same
+    /// decoder wasm-hosted fonts use), asserting byte equality.
+    fn round_trip(data: &[u8]) {
+        let mut compressed = Vec::new();
+        compress(&mut Cursor::new(data), &mut compressed).unwrap();
+        let mut decompressed = Vec::new();
+        brotli_decompressor::Decompressor::new(&compressed[..], 4096)
+            .read_to_end(&mut decompressed)
+            .unwrap_or_else(|e| panic!("decompress failed: {e}"));
+        assert_eq!(decompressed, data, "round-trip mismatch for {} input bytes", data.len());
+    }
+
+    #[test]
+    fn round_trips_small_buffer() {
+        let text = b"WordCraft brotli round-trip sample: \0\0\xFF the quick brown fox\n".repeat(16);
+        round_trip(&text);
+    }
+
+    #[test]
+    fn empty_input_round_trips() {
+        round_trip(b"");
+    }
+
+    #[test]
+    fn compresses_repetitive_input_smaller() {
+        let repetitive = vec![0x42u8; 64 * 1024];
+        let mut compressed = Vec::new();
+        compress(&mut Cursor::new(&repetitive), &mut compressed).unwrap();
+        assert!(compressed.len() < 1024, "64 KiB of one byte compressed to {}", compressed.len());
+    }
+
+    #[test]
+    fn ratio_str_guards_empty_input() {
+        assert_eq!(ratio_str(0, 0), "n/a (empty input)");
+        assert_eq!(ratio_str(200, 50), "25.0% of input");
+    }
+}

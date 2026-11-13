@@ -61,6 +61,10 @@ pub struct FontDb {
     catalog: RwLock<Vec<CatalogEntry>>,
     /// Fonts the user added at run time, and the folder they are stored in (#582).
     user: RwLock<user::UserFonts>,
+    /// Pack faces the host downloaded and installed, and the wanted-face record
+    /// ([`crate::packs`]). Kept apart from `user` so packs never persist, count against
+    /// [`user::MAX_USER_FONTS`], or answer to [`FontDb::remove_user_font`].
+    pub(crate) packs: RwLock<crate::packs::PackFonts>,
     /// Bumped whenever user fonts are added or removed ([`FontDb::generation`]).
     generation: AtomicU64,
     /// The folders the system font scan reads (the platform's font folders for [`FontDb::global`]).
@@ -123,6 +127,7 @@ impl FontDb {
             #[cfg(not(target_arch = "wasm32"))]
             catalog: RwLock::new(Vec::new()),
             user: RwLock::new(user::UserFonts::default()),
+            packs: RwLock::new(crate::packs::PackFonts::default()),
             generation: AtomicU64::new(0),
             font_dirs,
             #[cfg(not(target_arch = "wasm32"))]

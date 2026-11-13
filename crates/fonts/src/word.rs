@@ -684,6 +684,7 @@ pub fn resolve(family: &str, bold: bool, italic: bool) -> Resolved {
     let (fam, substituted) = resolve_family(db, family);
     let face = db.face(&fam, style_name(bold, italic));
     let r = Resolved { synth_bold: bold && face.weight < 600.0, synth_italic: italic && !face.italic, substituted, face: FaceRef::of(&face) };
+    note_wanted_pack(db, family, bold, italic, &r);
     if cacheable {
         let mut c = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if c.0 == generation {
@@ -702,6 +703,40 @@ pub fn resolve(family: &str, bold: bool, italic: bool) -> Resolved {
         }
     }
     r
+}
+
+/// Tell the wanted-pack record ([`crate::packs`]) which downloadable faces this resolution would
+/// use, so the host can fetch them:
+///
+/// - the family it settled on, when that face synthesizes bold or italic and belongs to a pack
+///   family: a pack face of the same family would draw the text real (a Calibri bold run
+///   substitutes to Source Sans 3 and fakes bold until SourceSans3-Bold lands);
+/// - and, on a substitution, every pack family the metric-twin and substitutes walk went past
+///   with no face installed — a mono request walks MONO past JetBrains Mono, which the minimal
+///   web build doesn't bundle, so a download lets the walk settle there instead.
+///
+/// [`crate::packs::note_wanted`] records pack families only, deduped and bounded, so on native
+/// builds — every pack face bundled — the walk records nothing.
+fn note_wanted_pack(db: &FontDb, family: &str, bold: bool, italic: bool, r: &Resolved) {
+    if r.synth_bold || r.synth_italic {
+        crate::packs::note_wanted(&r.face.family, bold, italic);
+    }
+    if !r.substituted {
+        return;
+    }
+    for cand in family.split(';').map(str::trim).filter(|s| !s.is_empty() && s.len() <= FAMILY_KEY_MAX).take(8) {
+        if cand.eq_ignore_ascii_case("Symbol (PCL6)") {
+            continue;
+        }
+        let base = charset_base_family(cand);
+        // The request itself, when it names a pack family that isn't installed.
+        crate::packs::note_wanted(cand, bold, italic);
+        for name in metric_twins(base).chain(substitutes(base).iter().copied()).take(24) {
+            if !db.has_family(name) {
+                crate::packs::note_wanted(name, bold, italic);
+            }
+        }
+    }
 }
 
 /// A line's (ascent, descent) from hhea values, both positive: the line gap goes above the ascent.

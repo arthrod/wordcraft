@@ -186,6 +186,7 @@ async function check(canvas: HTMLCanvasElement, precompiled: WebAssembly.Module)
   await api.applyMarkdown(md);
   const bytes: Uint8Array = await api.exportDocx();
   await api.loadDocx(bytes);
+  const fonts: { installed: string[]; failed: string[] } = await api.installFonts(["Inter"]);
   await init();
   initSync(precompiled);
   await rawInit();

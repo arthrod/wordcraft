@@ -238,6 +238,40 @@ pub fn mount_if_enabled(document: &web_sys::Document, canvas: &web_sys::HtmlCanv
         });
     }
 
+    // Install Font Packs (downloads every unbundled face from fonts/ on demand)
+    {
+        let doc_c = document.clone();
+        let api_c = api.clone();
+        add_button(document, &bar, "Install Fonts", false, move || {
+            let doc_async = doc_c.clone();
+            let api_async = api_c.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                set_status(&doc_async, "Installing font packs...");
+                match call_api_cmd(&api_async, "font.installPack", &JsValue::NULL).await {
+                    Ok(_) => set_status(&doc_async, "Font packs requested (status follows)"),
+                    Err(err) => set_status(&doc_async, &format!("font.installPack failed: {err}")),
+                }
+            });
+        });
+    }
+
+    // Install Font Packs (downloads every unbundled face from fonts/ on demand)
+    {
+        let doc_c = document.clone();
+        let api_c = api.clone();
+        add_button(document, &bar, "Install Fonts", false, move || {
+            let doc_async = doc_c.clone();
+            let api_async = api_c.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                set_status(&doc_async, "Installing font packs...");
+                match call_api_cmd(&api_async, "font.installPack", &JsValue::NULL).await {
+                    Ok(_) => set_status(&doc_async, "Font packs requested (status follows)"),
+                    Err(err) => set_status(&doc_async, &format!("font.installPack failed: {err}")),
+                }
+            });
+        });
+    }
+
     // Command runner
     if let Some(cmd_input) = create_el::<web_sys::HtmlInputElement>(document, "input") {
         cmd_input.set_type("text");

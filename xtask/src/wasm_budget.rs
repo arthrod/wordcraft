@@ -25,8 +25,9 @@ pub struct WasmReport {
     pub found_forbidden: Vec<String>,
 }
 
-/// Read an unsigned LEB128 u64 starting at `*pos`, advancing `*pos`.
-fn read_leb_u64(bytes: &[u8], pos: &mut usize) -> Result<u64, String> {
+/** Read an unsigned LEB128 u64 starting at `*pos`, advancing `*pos`. Shared with the
+ * wasm-attr analyzer, which needs the same bounded decoding. */
+pub(crate) fn read_leb_u64(bytes: &[u8], pos: &mut usize) -> Result<u64, String> {
     let mut result: u64 = 0;
     let mut shift = 0u32;
     loop {

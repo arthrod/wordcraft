@@ -502,3 +502,63 @@ fn a_woff2_collection_font_listing_a_table_twice_is_refused() {
     let file = woff2_collection(3, &[vec![0, 1, 2], vec![0, 1, 2]]);
     assert_ne!(decode_font_file(&file), Err(UserFontError::BadWebFont(BAD_COLLECTION.into())));
 }
+
+/// A family no bundled or installed font has, the length of "Source Sans 3" (see [`renamed`]).
+const PACKFAMILY: &str = "Packface Sans";
+
+#[test]
+fn pack_faces_install_beside_user_fonts() {
+    let db = db();
+    let gen0 = db.generation();
+    assert!(!db.has_family(PACKFAMILY));
+    let bold = renamed("SourceSans3-Bold.ttf", PACKFAMILY);
+    let faces = db.install_pack_font("PackfaceSans-Bold.9f27c1d0.ttf.br", &bold).unwrap();
+    assert_eq!(faces, vec![(PACKFAMILY.to_string(), "Bold".to_string())]);
+    // A pack face, not a user font: not listed, not removable, nothing stored.
+    assert!(db.user_fonts().is_empty());
+    assert!(matches!(db.remove_user_font(PACKFAMILY), Err(UserFontError::NotUserFont(_))));
+    assert_eq!(db.pack_fonts(), vec![(PACKFAMILY.to_string(), "Bold".to_string())]);
+    // Found like any face, and the addition bumped the generation (layouts re-run).
+    assert!(db.families().iter().any(|f| f == PACKFAMILY));
+    assert_eq!(db.styles(PACKFAMILY), vec!["Bold".to_string()]);
+    assert_eq!(db.face(PACKFAMILY, "Bold").family, PACKFAMILY);
+    assert!(db.generation() > gen0);
+    // The same file again adds no face — the shell reads that as "already there".
+    assert!(matches!(db.install_pack_font("again", &bold), Err(UserFontError::AlreadyAvailable(_))));
+    assert_eq!(db.pack_fonts().len(), 1);
+    // Junk is refused exactly like a user font, without touching the database.
+    assert!(matches!(db.install_pack_font("x", b""), Err(UserFontError::Empty)));
+    assert!(matches!(db.install_pack_font("x", b"not a font"), Err(UserFontError::NotAFont)));
+    // The pack left the user font budget alone: a user font still installs after it.
+    db.install_font("u.ttf", &renamed("SourceSans3-It.ttf", FAMILY)).unwrap();
+    assert_eq!(db.user_fonts().len(), 1);
+    assert_eq!(db.styles(FAMILY), vec!["Italic".to_string()]);
+}
+
+#[test]
+fn pack_faces_never_touch_the_user_font_folder() {
+    let dir = temp_dir("packstore");
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = db();
+    let _ = db.load_user_fonts(&dir);
+    db.install_pack_font("PackfaceSans-Bold.9f27c1d0.ttf.br", &renamed("SourceSans3-Bold.ttf", PACKFAMILY)).unwrap();
+    assert_eq!(db.pack_fonts().len(), 1);
+    assert!(std::fs::read_dir(&dir).unwrap().next().is_none(), "the pack is never stored; the browser re-fetches it");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn pack_faces_do_not_count_against_the_user_font_cap() {
+    // A full user font list refuses a user font, never a pack: the browser re-fetches packs
+    // each session, so they must not crowd out fonts the user chose.
+    let db = db();
+    {
+        let mut user = db.write_user();
+        for i in 0..MAX_USER_FONTS {
+            user.fonts.push(UserFont { file: format!("f{i}.ttf"), faces: vec![], path: None, face_ids: vec![] });
+        }
+    }
+    assert!(matches!(db.install_font("u.ttf", &renamed("SourceSans3-Regular.ttf", FAMILY)), Err(UserFontError::TooMany)));
+    db.install_pack_font("PackfaceSans-Bold.9f27c1d0.ttf.br", &renamed("SourceSans3-Bold.ttf", PACKFAMILY)).unwrap();
+    assert_eq!(db.pack_fonts(), vec![(PACKFAMILY.to_string(), "Bold".to_string())]);
+}
