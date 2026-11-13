@@ -58,9 +58,14 @@ if [[ "$BUILD_STATIC" -eq 1 ]]; then
     (cd "$ROOT/apps/wordcraft-web" && trunk build --release)
   fi
   [[ -f "$STATIC_DIST/index.html" ]] || { echo "error: missing $STATIC_DIST/index.html (build static site first)" >&2; exit 1; }
+  cat > "$STATIC_DIST/.assetsignore" << 'EOF'
+*.wasm.gz
+*.d.ts
+.trunk-lock
+EOF
   mkdir -p "$WORK/$NAME"
   /bin/cp -fR "$STATIC_DIST/"* "$WORK/$NAME/"
-  rm -f "$WORK/$NAME/.trunk-lock" "$WORK/$NAME/_headers"
+  rm -f "$WORK/$NAME/.trunk-lock" "$WORK/$NAME/_headers" "$WORK/$NAME/"*.wasm.gz "$WORK/$NAME/"*.d.ts
   /bin/cp -f "$HERE/.htaccess" "$WORK/$NAME/"
   if command -v node >/dev/null; then
     node --input-type=module -e "

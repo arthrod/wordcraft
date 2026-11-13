@@ -25,7 +25,7 @@
 <p align="center">
   <img alt="Written in Rust" src="https://img.shields.io/badge/written%20in-Rust-2b47b5?style=flat-square&logo=rust&logoColor=white">
   <img alt="npm package: wordcraft-web" src="https://img.shields.io/badge/npm-wordcraft--web-cb3837?style=flat-square&logo=npm&logoColor=white">
-  <a href="packaging/web/examples/cloudflare-pages/README.md"><img alt="Cloudflare Demo: Static and Hybrid Edge" src="https://img.shields.io/badge/Cloudflare%20Demo-Pages%20%7C%20Workers-f38020?style=flat-square&logo=cloudflare&logoColor=white"></a>
+  <a href="https://wordcraft-web-pages.pages.dev/?sample&demo=1"><img alt="Cloudflare Demo: Pages and Workers" src="https://img.shields.io/badge/Cloudflare%20Demo-Pages%20%7C%20Workers-f38020?style=flat-square&logo=cloudflare&logoColor=white"></a>
   <img alt="WASM Budget <= 7.1 MB gz" src="https://img.shields.io/badge/WASM%20budget-%3C%3D%207.1%20MB%20gz-2b47b5?style=flat-square">
   <img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-2b47b5?style=flat-square">
   <img alt="Agent-drivable over MCP" src="https://img.shields.io/badge/agents-MCP%20%C2%B7%20CLI-3b5bdb?style=flat-square">
@@ -228,8 +228,8 @@ npm install wordcraft-web      # or: pnpm add wordcraft-web / bun add wordcraft-
 
 ### Cloudflare deployments
 
-- **100% Browser Mode (Pages or Workers static assets):** [`packaging/web/examples/cloudflare-pages/`](packaging/web/examples/cloudflare-pages/README.md) — zero backend, on-demand locale TSV catalogs (`/i18n/`), and client-side `.docx` / `.md` codecs.
-- **Hybrid Edge Mode (Workers + `workers-rs`):** [`packaging/web/examples/cloudflare-workers/`](packaging/web/examples/cloudflare-workers/README.md) — serves the same static build plus an unlogged `POST /api/convert` endpoint bounded to `4 MiB` (`Cache-Control: no-store`).
+- **100% Browser Mode (Cloudflare Pages):** <https://wordcraft-web-pages.pages.dev/?sample&demo=1> ([`packaging/web/examples/cloudflare-pages/`](packaging/web/examples/cloudflare-pages/README.md)) — zero backend, on-demand locale TSV catalogs (`/i18n/`), and client-side `.docx` / `.md` codecs.
+- **Hybrid Edge Mode (Cloudflare Workers + `workers-rs`):** <https://wordcraft-web-worker.cicero-im.workers.dev/?sample&demo=1> ([`packaging/web/examples/cloudflare-workers/`](packaging/web/examples/cloudflare-workers/README.md)) — serves the same static build plus `/api/health` and an unlogged `POST /api/convert` endpoint bounded to `4 MiB` (`Cache-Control: no-store`).
 
 Local dev server: `cd apps/wordcraft-web && trunk serve`, then open <http://127.0.0.1:8771/?sample&demo=1>.
 
@@ -289,7 +289,8 @@ covers every target starting with it (`wordcraft*=debug`). The logger is
 | Budget Check | Measured (`release`) | Ceiling | Command |
 |---|---:|---:|---|
 | Raw `.wasm` | 17,685,630 B | 18.5 MB (25 MiB Cloudflare cap) | `cargo xtask wasm-budget` |
-| Gzip `.wasm` | 6,948,828 B | 7.1 MB | `cargo xtask wasm-budget` |
+| Gzip `.wasm` | 6,948,828 B (6.95 MB live CF gzip) | 7.1 MB | `cargo xtask wasm-budget` |
+| Edge Brotli / Zstd | 6.61 MB (`br`) / 6.57 MB (`zstd`) | n/a | Live Cloudflare Workers |
 | Custom `sec11` overhead | 2,602,190 B | 2.75 MB | `cargo xtask wasm-budget` |
 
 Package and verify both distributions with `./packaging/web/package.sh` (or `--npm --check` / `--static`).

@@ -55,10 +55,10 @@ const api = await start({
 
 ## Cloudflare deployments (static & hybrid)
 
-Two ready-to-deploy examples live in this directory:
+Two ready-to-deploy examples live in this directory (with `.assetsignore` excluding `.wasm.gz`, `.d.ts`, and `.trunk-lock` from static uploads so Cloudflare serves edge-compressed `.wasm` with a clean `Content-Type: application/wasm`):
 
-- **Static deployment (Cloudflare Pages):** [`examples/cloudflare-pages/`](examples/cloudflare-pages/README.md) — zero backend, serves `dist/web/` directly.
-- **Hybrid Edge deployment (Cloudflare Workers + `workers-rs`):** [`examples/cloudflare-workers/`](examples/cloudflare-workers/README.md) — serves the same browser-first static assets via `ASSETS` plus `GET /api/health` and an unlogged `POST /api/convert` endpoint bounded to `4 MiB` (`Cache-Control: no-store`).
+- **Static deployment (Cloudflare Pages):** <https://wordcraft-web-pages.pages.dev/?sample&demo=1> ([`examples/cloudflare-pages/`](examples/cloudflare-pages/README.md)) — zero backend, serves `dist/web/` directly (`6.61 MB` Brotli / `6.95 MB` Gzip transfer).
+- **Hybrid Edge deployment (Cloudflare Workers + `workers-rs`):** <https://wordcraft-web-worker.cicero-im.workers.dev/?sample&demo=1> ([`examples/cloudflare-workers/`](examples/cloudflare-workers/README.md)) — serves the same browser-first static assets via `ASSETS` (`6.61 MB` Brotli / `6.57 MB` Zstd / `6.95 MB` Gzip) plus `GET /api/health` and an unlogged `POST /api/convert` endpoint bounded to `4 MiB` (`Cache-Control: no-store`).
 
 ### Headless conversion benchmark (`wordcraft-cli`, Step 5.2a)
 
