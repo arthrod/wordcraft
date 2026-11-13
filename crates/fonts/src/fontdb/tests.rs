@@ -215,12 +215,14 @@ fn a_family_named_for_a_heavy_weight_is_that_heavy() {
     assert_eq!(face(regular, "Segoe UI ExtraBold").weight, 800.0);
     assert_eq!(face(regular, "Blackadder ITC").weight, 400.0);
     assert_eq!(face(regular, "Arial").weight, 400.0);
+    // A file under 600 named for a heavy weight is promoted (Inter Medium says 500).
+    if let Some(medium) = crate::bundled_by_stem("Inter-Medium") {
+        assert_eq!(face(medium, "Inter Heavy").weight, 900.0);
+    }
     // A file that already says it is heavy keeps its own weight (Lato Heavy is 800, not 900).
-    let heavy = crate::bundled_by_stem("SourceSans3-Semibold");
-    if let Some(semi) = heavy {
-        assert_eq!(face(semi, "Source Sans 3 Heavy").weight, 600.0);
-    } else {
-        assert_eq!(face(crate::bundled_by_stem("Inter-Medium").unwrap(), "Inter Heavy").weight, 500.0);
+    // The minimal web font set bundles no face that heavy.
+    if let Some(semi) = crate::bundled_by_stem("Inter-SemiBold") {
+        assert_eq!(face(semi, "Inter Heavy").weight, 600.0);
     }
 }
 

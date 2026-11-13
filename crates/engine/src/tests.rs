@@ -1652,7 +1652,7 @@ fn paste_special_format_availability_matches_build_support() {
     #[cfg(not(feature = "extra-formats"))]
     for params in [json!({"as": "html", "html": "<b>HTML</b>"}), json!({"as": "rtf", "rtf": r"{\rtf1 RTF}"})] {
         let e = s.run("edit.pasteSpecial", &params).unwrap_err();
-        assert!(matches!(e, crate::CmdError::Failed(m) if m == "HTML/RTF paste is not included in this build"), "{e}");
+        assert!(matches!(&e, crate::CmdError::Failed(m) if m == "HTML/RTF paste is not included in this build"), "{e}");
     }
 }
 
