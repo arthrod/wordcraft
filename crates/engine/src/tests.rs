@@ -59,6 +59,25 @@ fn doc_extension_dispatches_to_docbin() {
 }
 
 #[test]
+fn doc_docx_base64_commands_roundtrip_and_reject_invalid() {
+    let mut src = Session::new(wordcraft_doc::Document::from_text("DOCX bridge roundtrip test"));
+    let exported = src.run("doc.exportDocx", &json!({})).unwrap();
+    let b64 = exported["docxBase64"].as_str().unwrap();
+    assert!(!b64.is_empty());
+    assert!(exported["bytes"].as_u64().unwrap() > 0);
+
+    let mut dst = s();
+    let loaded = dst.run("doc.loadDocx", &json!({"docxBase64": b64})).unwrap();
+    assert_eq!(loaded["ok"], true);
+    assert!(text(&dst).contains("DOCX bridge roundtrip test"));
+
+    assert!(dst.run("doc.loadDocx", &json!({})).is_err());
+    assert!(dst.run("doc.loadDocx", &json!({"docxBase64": "%%%invalid%%%"})).is_err());
+    let junk = crate::cmd::insert::base64_encode(b"not a valid zip or docx");
+    assert!(dst.run("doc.loadDocx", &json!({"docxBase64": junk})).is_err());
+}
+
+#[test]
 fn encrypted_doc_asks_for_a_password_and_rejects_a_wrong_one() {
     // #1079: a Word 97-2003 file with the encryption flag and an RC4 header whose verifier does
     // not match any password asks for one, and a given password is reported as wrong.

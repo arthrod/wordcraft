@@ -126,11 +126,17 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new(TEXT, "Markdown Source Text", "View › Views", text)
             .params(r#"{"text"?: string (up to 2 MB), "caret"?: integer >= 0}"#)
             .when(|s| s.md_source.is_none().then_some("only in Markdown Source")),
+        CommandSpec::new(GET_MARKDOWN, "Get Markdown", "File › Export", get_markdown).pure(),
+        CommandSpec::new(SET_MARKDOWN, "Set Markdown", "File › Import", set_markdown)
+            .params(r#"{"markdown": string (up to 2 MB)}"#)
+            .when(|s| s.doc.settings.protection.is_some().then_some("not in a protected document")),
     ]
 }
 
 const TOGGLE: &str = "view.markdownSource";
 const TEXT: &str = "view.markdownSourceText";
+const GET_MARKDOWN: &str = "doc.getMarkdown";
+const SET_MARKDOWN: &str = "doc.setMarkdown";
 /// The views that replace this one: they show the document, so the text goes into it first.
 const LEAVES: [&str; 5] = ["view.printLayout", "view.webLayout", "view.draft", "view.outline", "view.readMode"];
 
@@ -209,6 +215,40 @@ fn text(s: &mut Session, v: &Value) -> CmdResult {
 /// Error message returned when Markdown Source text exceeds [`MAX_SOURCE_BYTES`].
 fn too_long() -> String {
     format!("Markdown Source takes up to {} MB of text", MAX_SOURCE_BYTES / (1024 * 1024))
+}
+
+/// Returns the current document as Markdown (or the active Markdown Source buffer if open).
+fn get_markdown(s: &mut Session, _: &Value) -> CmdResult {
+    let md = if let Some(src) = s.md_source.as_ref() {
+        src.text.clone()
+    } else if let Some(exact) = exact_text(s) {
+        exact
+    } else {
+        wordcraft_formats::markdown::export(&s.doc)
+    };
+    Ok(json!({"markdown": md, "text": md}))
+}
+
+/// Replaces the current document's content from Markdown directly without entering source view.
+fn set_markdown(s: &mut Session, v: &Value) -> CmdResult {
+    if s.doc.settings.protection.is_some() {
+        return Err(CmdError::Disabled("not in a protected document".into()));
+    }
+    let md = p::str(v, "markdown").or_else(|| p::str(v, "text")).ok_or_else(|| CmdError::Params("missing `markdown` string".into()))?;
+    if md.len() > MAX_SOURCE_BYTES {
+        return Err(CmdError::Params(too_long()));
+    }
+    s.md_source = None;
+    let doc = parse(&s.doc, md);
+    s.doc = doc;
+    s.note_body_replaced();
+    s.math = None;
+    s.touch();
+    s.clamp_selection();
+    s.md_file.latest = Some(md.to_string());
+    *s.md_file.cached_exact.borrow_mut() = Some((s.rev(), Some(md.to_string())));
+    s.dirty = true;
+    Ok(json!({"ok": true, "words": s.doc.word_count(), "paragraphs": s.doc.paragraph_count()}))
 }
 
 /// Enters Markdown Source view, preparing source text and mapping caret position.
@@ -370,6 +410,8 @@ pub(crate) fn refusal(s: &Session, id: &str, mutates: bool) -> Option<&'static s
     (s.md_source.is_some()
         && id != TOGGLE
         && id != TEXT
+        && id != GET_MARKDOWN
+        && id != SET_MARKDOWN
         && !LEAVES.contains(&id)
         && (mutates || matches!(id, "edit.undo" | "edit.undoTo" | "edit.redo" | "edit.repeat")))
     .then_some("leave Markdown Source first")
@@ -377,7 +419,7 @@ pub(crate) fn refusal(s: &Session, id: &str, mutates: bool) -> Option<&'static s
 
 /// What a command does while the text is open, before it runs (see the module's header).
 pub(crate) fn before_command(s: &mut Session, id: &str, mutates: bool) -> Result<(), CmdError> {
-    if s.md_source.is_none() || id == TOGGLE || id == TEXT {
+    if s.md_source.is_none() || matches!(id, TOGGLE | TEXT | GET_MARKDOWN | SET_MARKDOWN) {
         return Ok(());
     }
     if LEAVES.contains(&id) {
@@ -893,5 +935,31 @@ mod tests {
         let s = session(SAMPLE);
         let spec = s.registry.get(TEXT).unwrap();
         assert!(spec.mutates, "view.markdownSourceText mutates session and dirty state");
+    }
+
+    #[test]
+    fn doc_markdown_commands_roundtrip_without_md_path() {
+        let mut s = Session::new(Document::from_text("Initial body"));
+        assert!(s.path.is_none());
+        let before = s.run("doc.getMarkdown", &json!({})).unwrap();
+        assert!(before["markdown"].as_str().unwrap_or("").contains("Initial body"));
+
+        let r = s.run("doc.setMarkdown", &json!({"markdown": "# Heading One\n\nReplaced paragraph.\n"})).unwrap();
+        assert_eq!(r["ok"], true);
+        assert!(body_text(&s).contains("Replaced paragraph."));
+        assert_eq!(s.run("doc.getMarkdown", &json!({})).unwrap()["markdown"], "# Heading One\n\nReplaced paragraph.\n");
+
+        // Works even if Markdown Source view was open and is refused on missing params or protected docs.
+        s.path = Some(PathBuf::from("/tmp/doc-md-test.md"));
+        s.run(TOGGLE, &json!({"value": true})).unwrap();
+        set_text(&mut s, "# Unsaved edit\n");
+        assert!(s.run("doc.getMarkdown", &json!({})).unwrap()["markdown"].as_str().unwrap().contains("Unsaved edit"));
+        s.run("doc.setMarkdown", &json!({"markdown": "Direct replace"})).unwrap();
+        assert!(s.md_source.is_none());
+        assert!(body_text(&s).contains("Direct replace"));
+
+        assert!(matches!(s.run("doc.setMarkdown", &json!({})), Err(CmdError::Params(_))));
+        s.doc.settings.protection = Some("readOnly".into());
+        assert!(matches!(s.run("doc.setMarkdown", &json!({"markdown": "x"})), Err(CmdError::Disabled(_))));
     }
 }

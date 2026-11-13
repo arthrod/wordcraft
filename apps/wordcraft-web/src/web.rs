@@ -160,6 +160,7 @@ impl eframe::App for WebShell {
             self.app.status(msg);
         }
         self.app.logic(ctx);
+        crate::api::wake_waiters();
         // Store changed preferences straight away: a reload or closed tab runs no exit code (#2132).
         if let Some(json) = self.prefs.changed(&self.app) {
             match local_storage() {
@@ -202,6 +203,7 @@ impl eframe::App for WebShell {
             }
         }
         self.app.ui(ui);
+        crate::api::wake_waiters();
     }
 }
 
