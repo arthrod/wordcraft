@@ -40,11 +40,30 @@ pub struct WorkerCeiling {
     pub max_gzip: usize,
 }
 
-/// Measured 2026-11-14 on the release build (`trunk build --release`): 1,015,087 raw and
-/// 637,274 gzip → ~8% headroom.
-pub const WORKER_CEILINGS: &[WorkerCeiling] = &[WorkerCeiling { name: "wordcraft-worker-proof", max_raw: 1_100_000, max_gzip: 700_000 }];
+/// Measured 2026-11-14 on the release build (`trunk build --release`), each at its size plus
+/// headroom: proof 1,015,087 raw / 637,274 gzip; codecs 4,212,970 / 1,781,789; pdf 5,420,578 /
+/// 2,537,711.
+pub const WORKER_CEILINGS: &[WorkerCeiling] = &[
+    WorkerCeiling { name: "wordcraft-worker-proof", max_raw: 1_100_000, max_gzip: 700_000 },
+    WorkerCeiling { name: "wordcraft-worker-codecs", max_raw: 4_400_000, max_gzip: 1_900_000 },
+    WorkerCeiling { name: "wordcraft-worker-pdf", max_raw: 5_600_000, max_gzip: 2_650_000 },
+];
 
+/// Offloaded symbols that must not appear in the *main module's* bytes: `krilla` (PDF export
+/// lives in the PDF worker, §3.4) and `wordcraft-docbin` (legacy `.doc` lives in the codec
+/// worker, §3.3). Workers get their own lists by [`forbidden_symbols_for`] — the crate a
+/// worker exists to host is expected there, the other stays forbidden.
 pub const FORBIDDEN_SYMBOLS: &[&str] = &["krilla::", "wordcraft_docbin::"];
+
+/// The byte-scan list for one artifact, by worker stem (empty stem = the main module). The
+/// codec worker links `wordcraft-docbin` by design; the PDF worker links `krilla` by design.
+fn forbidden_symbols_for(worker_stem: &str) -> &[&str] {
+    match worker_stem {
+        "wordcraft-worker-codecs" => &["krilla::"],
+        "wordcraft-worker-pdf" => &["wordcraft_docbin::"],
+        _ => FORBIDDEN_SYMBOLS,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasmReport {
@@ -86,8 +105,9 @@ pub(crate) fn read_leb_u64(bytes: &[u8], pos: &mut usize) -> Result<u64, String>
     }
 }
 
-/// Parse WASM sections and collect code/data/custom sizes and forbidden symbol markers.
-pub fn analyze_wasm_bytes(path: PathBuf, bytes: &[u8], gzip_bytes: usize) -> Result<WasmReport, String> {
+/// Parse WASM sections and collect code/data/custom sizes and forbidden symbol markers,
+/// scanning for `forbidden` (see [`forbidden_symbols_for`]).
+pub fn analyze_wasm_bytes_with(path: PathBuf, bytes: &[u8], gzip_bytes: usize, forbidden: &[&str]) -> Result<WasmReport, String> {
     if bytes.len() < 8 || bytes.get(..8) != Some(&[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]) {
         return Err(format!("{}: not a valid WASM binary", path.display()));
     }
@@ -129,7 +149,7 @@ pub fn analyze_wasm_bytes(path: PathBuf, bytes: &[u8], gzip_bytes: usize) -> Res
     }
 
     let mut found_forbidden = Vec::new();
-    for &pat in FORBIDDEN_SYMBOLS {
+    for &pat in forbidden {
         if bytes.windows(pat.len()).any(|w| w == pat.as_bytes()) {
             found_forbidden.push(pat.to_string());
         }
@@ -146,6 +166,11 @@ pub fn analyze_wasm_bytes(path: PathBuf, bytes: &[u8], gzip_bytes: usize) -> Res
         found_forbidden,
         has_name_section,
     })
+}
+
+/// [`analyze_wasm_bytes_with`] with the main module's list ([`FORBIDDEN_SYMBOLS`]).
+pub fn analyze_wasm_bytes(path: PathBuf, bytes: &[u8], gzip_bytes: usize) -> Result<WasmReport, String> {
+    analyze_wasm_bytes_with(path, bytes, gzip_bytes, FORBIDDEN_SYMBOLS)
 }
 
 impl WasmReport {
@@ -504,7 +529,7 @@ pub fn run(root: &Path, report_only: bool) -> Result<(), String> {
         let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let gz = gzip_size(path, &bytes)?;
         let br = brotli_size(path, &bytes)?;
-        worker_reports.push(analyze_wasm_bytes(path.clone(), &bytes, gz)?.with_brotli(br));
+        worker_reports.push(analyze_wasm_bytes_with(path.clone(), &bytes, gz, forbidden_symbols_for(&worker_stem(path)))?.with_brotli(br));
     }
     if worker_reports.is_empty() {
         println!("  workers: no wordcraft-worker-*_bg.wasm in {}", dist_web.display());
@@ -662,9 +687,9 @@ mod tests {
     fn unregistered_worker_and_totals_flag() {
         // A worker with no measured ceiling row is an error, not a pass: guessed or shared
         // numbers hide growth.
-        let rep = analyze_wasm_bytes(PathBuf::from("wordcraft-worker-pdf_bg.wasm"), &minimal_wasm(1024, 512, b"safe_symbol"), 400).unwrap();
+        let rep = analyze_wasm_bytes(PathBuf::from("wordcraft-worker-future_bg.wasm"), &minimal_wasm(1024, 512, b"safe_symbol"), 400).unwrap();
         let errs = check_worker_budget(&rep);
-        assert!(errs.iter().any(|e| e.contains("no ceiling") && e.contains("wordcraft-worker-pdf")), "{errs:?}");
+        assert!(errs.iter().any(|e| e.contains("no ceiling") && e.contains("wordcraft-worker-future")), "{errs:?}");
 
         // The everything-loaded total: main + workers against the total ceilings.
         let main = analyze_wasm_bytes(PathBuf::from("m.wasm"), &minimal_wasm(1000, 100, b"x"), 500).unwrap();

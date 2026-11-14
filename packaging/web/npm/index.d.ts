@@ -49,6 +49,14 @@ export interface WordCraftApi {
    * line and page breaks.
    */
   installFonts(families?: string[]): Promise<{ installed: string[]; failed: string[] }>;
+  /**
+   * Convert between a `.docx` package and a format the build leaves out (RTF, ODT, HTML,
+   * LaTeX, legacy `.doc`, flat OPC XML; also `.docx` flavour changes) on the codec dedicated
+   * worker, started lazily by this call. Exactly one of `from`/`to` is `"docx"`; resolves to
+   * the converted bytes as a `Uint8Array`. `password` decrypts an encrypted input and encrypts
+   * the output where the format supports it.
+   */
+  convertDocument(options: { from: string; to: string; data: Uint8Array | ArrayBuffer | string; password?: string }): Promise<Uint8Array>;
 }
 
 /** Incoming CustomEvent names emitted by `<canvas data-host="page">`. */

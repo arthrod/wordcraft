@@ -17,6 +17,12 @@
        lazily `new Worker(assetBase + file, {type: "module"})`s it on the ?proof-worker flag.
        Trunk keeps worker names un-hashed (they must be named at runtime). -->
   <link data-trunk rel="rust" href="../wordcraft-worker-proof/Cargo.toml" data-bin="wordcraft-worker-proof" data-type="worker" data-bindgen-target="web" data-cargo-profile="wasm-release" data-wasm-opt="z" data-wasm-opt-params="--enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals" data-weak-refs data-loader-shim />
+  <!-- §3.3: the codec dedicated worker (extra formats ⇄ .docx off the main thread), started
+       lazily on the first conversion, never on page load. -->
+  <link data-trunk rel="rust" href="../wordcraft-worker-codecs/Cargo.toml" data-bin="wordcraft-worker-codecs" data-type="worker" data-bindgen-target="web" data-cargo-profile="wasm-release" data-wasm-opt="z" data-wasm-opt-params="--enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals" data-weak-refs data-loader-shim />
+  <!-- §3.4: the PDF export dedicated worker (krilla off the main thread), started lazily on the
+       first PDF export. -->
+  <link data-trunk rel="rust" href="../wordcraft-worker-pdf/Cargo.toml" data-bin="wordcraft-worker-pdf" data-type="worker" data-bindgen-target="web" data-cargo-profile="wasm-release" data-wasm-opt="z" data-wasm-opt-params="--enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals" data-weak-refs data-loader-shim />
   <style>
     html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #e6e6e6; font-family: system-ui, -apple-system, sans-serif; }
     #wordcraft_canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }

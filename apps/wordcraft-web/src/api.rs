@@ -194,6 +194,76 @@ fn attach_doc_helpers(api: &js_sys::Object, queue: Sender<ControlRequest>, ctx: 
     });
     let _ = js_sys::Reflect::set(api, &JsValue::from_str("installFonts"), install_fonts.as_ref().unchecked_ref());
     install_fonts.forget();
+
+    // The codec dedicated worker (plan §3.3): `convertDocument({ from, to, data, password? })`
+    // converts between `.docx` and the formats the browser build leaves out (RTF, ODT, HTML,
+    // LaTeX, legacy `.doc`, flat OPC), off the main thread. Exactly one of `from`/`to` is
+    // `docx`; the promise resolves to the converted bytes as a `Uint8Array`, or rejects with an
+    // `Error` carrying the worker's message (password problems say so in the `.docx` reader's
+    // words, so a caller's prompts can match). The worker starts lazily here — its scripts are
+    // never fetched on page load.
+    let convert_document = wasm_bindgen::closure::Closure::<dyn Fn(JsValue) -> js_sys::Promise>::new(move |val: JsValue| {
+        js_sys::Promise::new(&mut |resolve, reject| {
+            let fail = |reject: &JsValue, msg: String| {
+                let f = js_sys::Function::from(reject.clone());
+                let _ = f.call1(&wasm_bindgen::JsValue::NULL, &js_sys::Error::new(&msg));
+            };
+            let str_prop = |name: &str| -> Option<String> {
+                js_sys::Reflect::get(&val, &JsValue::from_str(name)).ok().and_then(|v| v.as_string()).filter(|s| !s.is_empty())
+            };
+            let (Some(from), Some(to)) = (str_prop("from"), str_prop("to")) else {
+                return fail(&reject, "convertDocument expects non-empty `from` and `to` format names".into());
+            };
+            let direction = match (from.eq_ignore_ascii_case("docx"), to.eq_ignore_ascii_case("docx")) {
+                (false, true) => wordcraft_worker_proto::ConvertDirection::Import,
+                (true, false) => wordcraft_worker_proto::ConvertDirection::Export,
+                _ => {
+                    return fail(
+                        &reject,
+                        "convertDocument converts between docx and one other format: exactly one of `from`/`to` must be \"docx\"".into(),
+                    );
+                }
+            };
+            // The foreign side's name: the non-docx of the two (flavor changes keep `docx`
+            // flavors too — `from: "docx", to: "docm"` rewraps the package).
+            let format = if direction == wordcraft_worker_proto::ConvertDirection::Import { from } else { to };
+            let data = js_sys::Reflect::get(&val, &JsValue::from_str("data")).unwrap_or(JsValue::UNDEFINED);
+            let input = if let Some(s) = data.as_string() {
+                base64_decode(&s).unwrap_or_default()
+            } else if data.is_instance_of::<js_sys::Uint8Array>() || data.is_instance_of::<js_sys::ArrayBuffer>() {
+                js_sys::Uint8Array::new(&data).to_vec()
+            } else {
+                return fail(&reject, "convertDocument expects `data` as Uint8Array, ArrayBuffer, or base64 string".into());
+            };
+            if input.is_empty() {
+                return fail(&reject, "convertDocument expects a non-empty `data`".into());
+            }
+            if input.len() > wordcraft_worker_proto::MAX_CONVERT_BYTES {
+                return fail(&reject, format!("the document is too large to convert in the browser ({} bytes)", input.len()));
+            }
+            let password = str_prop("password");
+            let req = wordcraft_worker_proto::ConvertRequest { format, direction, password, input };
+            let asset_base = crate::web::current_asset_base();
+            if !crate::web::codec_worker::ensure(&asset_base) {
+                return fail(&reject, "the codec worker is unavailable in this browser".into());
+            }
+            let reject_for_reply = reject.clone();
+            let sent = crate::web::codec_worker::with(|w| {
+                w.convert(&req, move |reply| match reply {
+                    Ok(bytes) => {
+                        let f = js_sys::Function::from(resolve.clone());
+                        let _ = f.call1(&wasm_bindgen::JsValue::NULL, &js_sys::Uint8Array::from(bytes.as_slice()));
+                    }
+                    Err(e) => fail(&reject_for_reply, format!("conversion failed: {}", e.message)),
+                })
+            });
+            if sent.is_none() {
+                return fail(&reject, "the codec worker is unavailable in this browser".into());
+            }
+        })
+    });
+    let _ = js_sys::Reflect::set(api, &JsValue::from_str("convertDocument"), convert_document.as_ref().unchecked_ref());
+    convert_document.forget();
 }
 
 struct ReplyFuture {

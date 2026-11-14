@@ -45,6 +45,7 @@ const DECLARED_API_METHODS: &[&str] = &[
     "exportDocx",
     "loadDocx",
     "installFonts",
+    "convertDocument",
 ];
 
 #[cfg(target_arch = "wasm32")]

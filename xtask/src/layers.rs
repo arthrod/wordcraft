@@ -58,6 +58,7 @@ pub const TABLE: &[(&str, Class)] = &[
     // Dedicated web workers use wasm-bindgen, which is forbidden below L6: they are apps (§3.1).
     ("worker-proof", Class::Exempt),
     ("worker-codecs", Class::Exempt),
+    ("worker-pdf", Class::Exempt),
     ("xtask", Class::Exempt),
 ];
 

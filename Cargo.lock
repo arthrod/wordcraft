@@ -7157,6 +7157,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "wordcraft-worker-pdf"
+version = "0.18.1"
+dependencies = [
+ "getrandom 0.3.4",
+ "js-sys",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "web-sys",
+ "wordcraft-doc",
+ "wordcraft-docx",
+ "wordcraft-fonts",
+ "wordcraft-layout",
+ "wordcraft-pdf",
+ "wordcraft-worker-proto",
+]
+
+[[package]]
 name = "wordcraft-worker-proof"
 version = "0.18.1"
 dependencies = [

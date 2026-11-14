@@ -85,6 +85,7 @@ const DOC_EXTS: &[&str] =
     &["docx", "docm", "dotx", "dotm", "doc", "dot", "odt", "ott", "fodt", "rtf", "txt", "md", "html", "htm", "mht", "mhtml", "tex", "json", "xml"];
 const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "wmf", "emf"];
 const RECIPIENT_EXTS: &[&str] = wordcraft_engine::cmd::mailings::RECIPIENT_EXTENSIONS;
+pub(crate) mod codec_worker;
 pub(crate) mod font_packs;
 mod font_store;
 mod proof_worker;
@@ -94,6 +95,15 @@ const LOADING_ID: &str = "wordcraft_loading";
 thread_local! {
     static RUNTIME_INIT: Cell<bool> = const { Cell::new(false) };
     static STARTED_CANVASES: RefCell<Vec<(web_sys::HtmlCanvasElement, js_sys::Promise)>> = const { RefCell::new(Vec::new()) };
+    /// The asset base of the latest `start()` call (the codec worker loads from it lazily,
+    /// long after the config it came from is gone). `./` until the first start.
+    static ASSET_BASE: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+/// The asset base the running app resolves runtime assets (and the codec worker) against.
+pub(crate) fn current_asset_base() -> String {
+    let base = ASSET_BASE.with(|b| b.borrow().clone());
+    if base.is_empty() { "./".to_string() } else { base }
 }
 
 struct StartConfig {
@@ -196,6 +206,7 @@ fn parse_start_config(options: &wasm_bindgen::JsValue) -> Result<StartConfig, wa
     let install_global = opt_bool_prop(options, "installGlobal")?.unwrap_or(false);
     let force_sample = opt_bool_prop(options, "sample")?;
 
+    ASSET_BASE.with(|b| *b.borrow_mut() = asset_base.clone());
     Ok(StartConfig { canvas, asset_base, host_mode, author, install_global, force_sample })
 }
 
@@ -210,14 +221,9 @@ pub fn start_default_if_present() {
     let Some(canvas) = document.get_element_by_id(CANVAS_ID).and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok()) else {
         return;
     };
-    let config = StartConfig {
-        canvas,
-        asset_base: default_asset_base(&document),
-        host_mode: None,
-        author: query_param("author"),
-        install_global: true,
-        force_sample: None,
-    };
+    let asset_base = default_asset_base(&document);
+    ASSET_BASE.with(|b| *b.borrow_mut() = asset_base.clone());
+    let config = StartConfig { canvas, asset_base, host_mode: None, author: query_param("author"), install_global: true, force_sample: None };
     let _ = launch_with_config(config);
 }
 

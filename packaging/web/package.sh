@@ -124,9 +124,11 @@ if [[ "$BUILD_NPM" -eq 1 ]]; then
   [[ -f "$NPM_TRUNK_OUT/wordcraft-web.js" ]] || { echo "error: missing $NPM_TRUNK_OUT/wordcraft-web.js" >&2; exit 1; }
   [[ -f "$NPM_TRUNK_OUT/wordcraft-web.d.ts" ]] || { echo "error: missing $NPM_TRUNK_OUT/wordcraft-web.d.ts (ensure data-typescript is on index.html)" >&2; exit 1; }
   [[ -f "$NPM_TRUNK_OUT/wordcraft-web_bg.wasm" ]] || { echo "error: missing $NPM_TRUNK_OUT/wordcraft-web_bg.wasm" >&2; exit 1; }
-  # The proofing dedicated worker (plan §3.2; the data-type="worker" link in index.html emits
-  # these three files with stable un-hashed names).
-  for f in wordcraft-worker-proof.js wordcraft-worker-proof_loader.js wordcraft-worker-proof_bg.wasm; do
+  # The dedicated workers (plans §3.2 and §3.3; the data-type="worker" links in index.html emit
+  # these files with stable un-hashed names).
+  for f in wordcraft-worker-proof.js wordcraft-worker-proof_loader.js wordcraft-worker-proof_bg.wasm \
+      wordcraft-worker-codecs.js wordcraft-worker-codecs_loader.js wordcraft-worker-codecs_bg.wasm \
+      wordcraft-worker-pdf.js wordcraft-worker-pdf_loader.js wordcraft-worker-pdf_bg.wasm; do
     [[ -f "$NPM_TRUNK_OUT/$f" ]] || { echo "error: missing $NPM_TRUNK_OUT/$f (worker link in index.html)" >&2; exit 1; }
   done
 
@@ -136,9 +138,11 @@ if [[ "$BUILD_NPM" -eq 1 ]]; then
     /bin/cp -f "$NPM_TRUNK_OUT/wordcraft-web.js" "$NPM_STAGE/"
     /bin/cp -f "$NPM_TRUNK_OUT/wordcraft-web.d.ts" "$NPM_STAGE/"
     /bin/cp -f "$NPM_TRUNK_OUT/wordcraft-web_bg.wasm" "$NPM_STAGE/"
-    /bin/cp -f "$NPM_TRUNK_OUT/wordcraft-worker-proof.js" "$NPM_STAGE/"
-    /bin/cp -f "$NPM_TRUNK_OUT/wordcraft-worker-proof_loader.js" "$NPM_STAGE/"
-    /bin/cp -f "$NPM_TRUNK_OUT/wordcraft-worker-proof_bg.wasm" "$NPM_STAGE/"
+    for w in wordcraft-worker-proof wordcraft-worker-codecs wordcraft-worker-pdf; do
+      /bin/cp -f "$NPM_TRUNK_OUT/$w.js" "$NPM_STAGE/"
+      /bin/cp -f "$NPM_TRUNK_OUT/${w}_loader.js" "$NPM_STAGE/"
+      /bin/cp -f "$NPM_TRUNK_OUT/${w}_bg.wasm" "$NPM_STAGE/"
+    done
     if [[ -d "$NPM_TRUNK_OUT/snippets" ]]; then
       /bin/cp -fR "$NPM_TRUNK_OUT/snippets" "$NPM_STAGE/"
     fi
@@ -206,6 +210,7 @@ async function check(canvas: HTMLCanvasElement, precompiled: WebAssembly.Module)
   const bytes: Uint8Array = await api.exportDocx();
   await api.loadDocx(bytes);
   const fonts: { installed: string[]; failed: string[] } = await api.installFonts(["Inter"]);
+  const rtf = new Uint8Array(await api.convertDocument({ from: "docx", to: "rtf", data: bytes })); void rtf;
   await init();
   initSync(precompiled);
   await rawInit();
@@ -231,7 +236,7 @@ EOF
     if (pkg.name !== 'wordcraft-web') throw new Error('unexpected package name: ' + pkg.name);
     if (pkg.version !== '$VERSION') throw new Error('version mismatch: ' + pkg.version);
     const paths = new Set(pkg.files.map((f) => f.path));
-    for (const req of ['index.js', 'index.d.ts', 'wordcraft-web.js', 'wordcraft-web.d.ts', 'wordcraft-web_bg.wasm', 'wordcraft-worker-proof.js', 'wordcraft-worker-proof_loader.js', 'wordcraft-worker-proof_bg.wasm', 'i18n/manifest.json', 'fonts/manifest.json', 'LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE', 'ATTRIBUTION.md', 'README.md']) {
+    for (const req of ['index.js', 'index.d.ts', 'wordcraft-web.js', 'wordcraft-web.d.ts', 'wordcraft-web_bg.wasm', 'wordcraft-worker-proof.js', 'wordcraft-worker-proof_loader.js', 'wordcraft-worker-proof_bg.wasm', 'wordcraft-worker-codecs.js', 'wordcraft-worker-codecs_loader.js', 'wordcraft-worker-codecs_bg.wasm', 'wordcraft-worker-pdf.js', 'wordcraft-worker-pdf_loader.js', 'wordcraft-worker-pdf_bg.wasm', 'i18n/manifest.json', 'fonts/manifest.json', 'LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE', 'ATTRIBUTION.md', 'README.md']) {
       if (!paths.has(req)) throw new Error('npm tarball missing required file: ' + req);
     }
     for (const p of paths) {
