@@ -7135,6 +7135,7 @@ dependencies = [
  "wordcraft-engine",
  "wordcraft-fonts",
  "wordcraft-geom",
+ "wordcraft-layout",
  "wordcraft-ui-egui",
  "wordcraft-worker-proto",
 ]

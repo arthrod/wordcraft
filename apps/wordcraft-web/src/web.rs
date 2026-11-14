@@ -88,6 +88,7 @@ const RECIPIENT_EXTS: &[&str] = wordcraft_engine::cmd::mailings::RECIPIENT_EXTEN
 pub(crate) mod codec_worker;
 pub(crate) mod font_packs;
 mod font_store;
+mod proof_squiggles;
 mod proof_worker;
 const CANVAS_ID: &str = "wordcraft_canvas";
 const LOADING_ID: &str = "wordcraft_loading";
@@ -326,9 +327,10 @@ fn launch_with_config(config: StartConfig) -> js_sys::Promise {
                     crate::prefs::restore(&mut app, stored.as_deref());
                     let asset_base = initial_asset_base;
                     font_packs::init(&asset_base, messages.clone());
-                    // §3.2: squiggles aren't wired to the UI yet, so the proofing worker is
-                    // opt-in (`?proof-worker`): it starts lazily and runs one smoke check so
-                    // the contract is exercised end to end without costing a page load.
+                    // §3.2's smoke path (`?proof-worker`): squiggles themselves are always on
+                    // (proof_squiggles::tick starts the worker lazily with the first
+                    // document); the flag only adds a known-bad check whose console line the
+                    // smoke harness waits for.
                     if query().contains("proof-worker") && proof_worker::ensure(&asset_base) {
                         proof_worker::with(|w| {
                             if let Err(e) = w.ping() {
@@ -488,6 +490,8 @@ impl eframe::App for WebShell {
         self.app.logic(ctx);
         // Wanted pack faces are recorded during layout, so drain them after the app ran.
         font_packs::drain_wanted(ctx);
+        // §3.2: worker proofing — send what changed, apply what arrived, repaint if it drew.
+        proof_squiggles::tick(&self.app.session, &self.asset_base, ctx);
         crate::api::wake_waiters();
         // Store changed preferences straight away: a reload or closed tab runs no exit code (#2132).
         if let Some(json) = self.prefs.changed(&self.app) {

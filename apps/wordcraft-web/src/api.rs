@@ -204,9 +204,8 @@ fn attach_doc_helpers(api: &js_sys::Object, queue: Sender<ControlRequest>, ctx: 
     // never fetched on page load.
     let convert_document = wasm_bindgen::closure::Closure::<dyn Fn(JsValue) -> js_sys::Promise>::new(move |val: JsValue| {
         js_sys::Promise::new(&mut |resolve, reject| {
-            let fail = |reject: &JsValue, msg: String| {
-                let f = js_sys::Function::from(reject.clone());
-                let _ = f.call1(&wasm_bindgen::JsValue::NULL, &js_sys::Error::new(&msg));
+            let fail = |reject: &js_sys::Function, msg: String| {
+                let _ = reject.call1(&wasm_bindgen::JsValue::NULL, &js_sys::Error::new(&msg));
             };
             let str_prop = |name: &str| -> Option<String> {
                 js_sys::Reflect::get(&val, &JsValue::from_str(name)).ok().and_then(|v| v.as_string()).filter(|s| !s.is_empty())
@@ -251,14 +250,13 @@ fn attach_doc_helpers(api: &js_sys::Object, queue: Sender<ControlRequest>, ctx: 
             let sent = crate::web::codec_worker::with(|w| {
                 w.convert(&req, move |reply| match reply {
                     Ok(bytes) => {
-                        let f = js_sys::Function::from(resolve.clone());
-                        let _ = f.call1(&wasm_bindgen::JsValue::NULL, &js_sys::Uint8Array::from(bytes.as_slice()));
+                        let _ = resolve.call1(&wasm_bindgen::JsValue::NULL, &js_sys::Uint8Array::from(bytes.as_slice()));
                     }
                     Err(e) => fail(&reject_for_reply, format!("conversion failed: {}", e.message)),
                 })
             });
             if sent.is_none() {
-                return fail(&reject, "the codec worker is unavailable in this browser".into());
+                fail(&reject, "the codec worker is unavailable in this browser".into());
             }
         })
     });

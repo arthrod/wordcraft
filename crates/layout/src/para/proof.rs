@@ -131,6 +131,43 @@ pub(super) fn proof_issues(
     Vec::new()
 }
 
+/// The parts a *worker* proof check of `p` needs (deferred-items plan §3.2): the proof text,
+/// the language of each byte range as a BCP 47 tag, the byte ranges left unchecked, and the
+/// list-item flag — exactly what [`paragraph_issues`] checks inline, in the same byte space, so
+/// a reply's spans are `ParaLayout::issues`-shaped and the display can draw them as-is.
+///
+/// The whole paragraph in one string, bounded like the inline check: `None` for a paragraph
+/// that is empty or past 100,000 bytes (nothing to check; a worker request would refuse it).
+#[cfg(any(feature = "inline-proof", feature = "hyphenation"))]
+pub fn check_parts(doc: &Document, p: &Paragraph) -> Option<(String, Vec<(u32, u32, String)>, Vec<(u32, u32)>, bool)> {
+    if p.text.trim().is_empty() || p.text.len() > 100_000 {
+        return None;
+    }
+    let runs = proof_runs(doc, p, None);
+    let text = proof_text(p);
+    let mut spans: Vec<(u32, u32, String)> = Vec::with_capacity(runs.len());
+    let mut skip: Vec<(u32, u32)> = Vec::new();
+    for r in &runs {
+        let (Some(start), Some(end)) = (u32::try_from(r.range.start).ok(), u32::try_from(r.range.end).ok()) else { continue };
+        if r.skip {
+            skip.push((start, end));
+        } else {
+            spans.push((start, end, r.lang.tag().to_string()));
+        }
+    }
+    // The worker applies its own `skip` filter; `overlaps` there (like the inline check's) is
+    // easiest on merged, ordered ranges.
+    skip.sort_unstable();
+    let mut merged: Vec<(u32, u32)> = Vec::with_capacity(skip.len());
+    for (s, e) in skip {
+        match merged.last_mut() {
+            Some(last) if s < last.1 => last.1 = last.1.max(e),
+            _ => merged.push((s, e)),
+        }
+    }
+    Some((text, spans, merged, is_list_item(doc, p)))
+}
+
 /// Text for proofing with the same byte offsets: inline objects and tracked deletions become
 /// U+0001 bytes (neither words nor spaces).
 pub fn proof_text(p: &wordcraft_doc::Paragraph) -> String {

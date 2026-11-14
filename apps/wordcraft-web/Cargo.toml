@@ -32,6 +32,7 @@ craft-web-api = { git = "https://github.com/storytold/craft-libs", rev = "fd5e2f
 craft-web-host = { git = "https://github.com/storytold/craft-libs", rev = "fd5e2feff6ea25bed371a99cc732b3968d621505", version = "0.1.0" }
 egui = { workspace = true }
 wordcraft-doc = { workspace = true }
+wordcraft-layout = { workspace = true, default-features = false }
 wordcraft-fonts = { workspace = true, default-features = false, features = ["minimal-wasm-fonts"] }
 wordcraft-geom = { workspace = true }
 wordcraft-worker-proto = { workspace = true }

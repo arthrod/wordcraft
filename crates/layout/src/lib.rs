@@ -29,6 +29,7 @@ pub mod kinsoku;
 pub mod math;
 pub mod outline;
 pub mod para;
+pub mod proof_overlay;
 pub mod styleref;
 mod table;
 mod textbox;

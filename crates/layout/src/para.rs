@@ -43,6 +43,8 @@ pub use model::{CellText, ClKind, Cluster, Enclosed, Glyph, Label, LabelRun, Lin
 pub use paragraph::layout_para;
 #[cfg(test)]
 pub(crate) use paragraph::word_widths;
+#[cfg(any(feature = "inline-proof", feature = "hyphenation"))]
+pub use proof::check_parts;
 #[cfg(feature = "inline-proof")]
 pub use proof::paragraph_issues;
 pub use proof::{ProofRun, is_list_item, proof_runs, proof_text};
