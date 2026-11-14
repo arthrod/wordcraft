@@ -1,8 +1,12 @@
 //! Optional Cloudflare Worker entry (`workers-rs`) for WordCraftWeb Hybrid Edge mode.
 //!
 //! Serves static assets via the `ASSETS` binding and exposes:
-//! - `GET /api/health`: runtime capability and limit metadata
+//! - `GET /api/health`: runtime capability and limit metadata (`capabilities.preview` lets a
+//!   demo button gate the preview affordance on the endpoint existing)
 //! - `POST /api/convert`: bounded, unlogged in-memory format conversion (`.md` / `.docx` / `.html` / `.txt`)
+//! - `POST /api/preview-page`: bounded PNG raster of page 1 (`.md` or `.docx`) at a fixed low
+//!   resolution through `wordcraft-layout` + `wordcraft-render` (vello_cpu) — approximate,
+//!   since the Worker carries only the four bundled font faces (plan §4.3, F6/Q2)
 //! - `GET`/`HEAD *.wasm` with `Accept-Encoding: br`: precompressed Brotli sidecars (`<name>.wasm.br`,
 //!   plan §2.2 F8) served straight through with `EncodeBody::Manual` so the runtime does not
 //!   re-compress them. Any sidecar miss falls back to the plain asset, never an error page.
@@ -20,9 +24,12 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use worker::*;
 
-/// Maximum request payload accepted by `/api/convert` (4 MiB).
-/// Chosen from the Step 5.2a benchmark so isolate memory stays well below Cloudflare's 128 MB cap.
+/// Maximum request payload accepted by `/api/convert` and `/api/preview-page` (4 MiB).
+/// Chosen from the Step 5.2a benchmark so isolate peak memory stays well below Cloudflare's 128 MB cap.
 const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
+
+/// The 413 message both endpoints share.
+const BODY_TOO_LARGE: &str = "Document exceeds 4 MiB Cloudflare edge cap; use Local WASM mode instead.";
 
 /// Formats advertised by `GET /api/health` (`supportedFormats`). Kept as a `const` so the F13
 /// test proves every advertised format really converts with the exact crate builds this Worker
@@ -94,6 +101,69 @@ struct ConvertRequest {
     content: String,
 }
 
+#[derive(Deserialize)]
+struct PreviewRequest {
+    from: String,
+    content: String,
+}
+
+/// Source formats `/api/preview-page` reads, shaped like `/api/convert`'s: `docxBase64` is a
+/// base64-wrapped `.docx`, `md` is Markdown text. Page 1 only, always.
+const PREVIEW_SOURCES: [&str; 2] = ["md", "docxBase64"];
+
+/// Preview raster resolution: 96 CSS pixels per inch against layout's page points (72/inch),
+/// fixed so a preview stays cheap (`render_page` also clamps to `MAX_SIDE`/`MAX_RASTER_PIXELS`).
+const PREVIEW_SCALE: f32 = 96.0 / 72.0;
+
+/// Read a request body through `req`'s stream, bounded by [`MAX_BODY_BYTES`] — first by the
+/// `Content-Length` header when the runtime sent one, then chunk by chunk so a lying header
+/// cannot grow the allocation. `Err((status, msg))` is what the caller turns into a JSON reply.
+async fn read_body_capped(req: &mut Request) -> std::result::Result<Vec<u8>, (u16, &'static str)> {
+    if let Ok(Some(len_hdr)) = req.headers().get("Content-Length")
+        && let Ok(len) = len_hdr.parse::<usize>()
+        && len > MAX_BODY_BYTES
+    {
+        return Err((413, BODY_TOO_LARGE));
+    }
+    let mut stream = req.stream().map_err(|_| (400, "Invalid request body"))?;
+    let mut body_bytes: Vec<u8> = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| (400, "Invalid request body"))?;
+        if body_bytes.len().saturating_add(chunk.len()) > MAX_BODY_BYTES {
+            return Err((413, BODY_TOO_LARGE));
+        }
+        body_bytes.extend_from_slice(&chunk);
+    }
+    Ok(body_bytes)
+}
+
+/// Render page 1 of `doc` at the fixed preview resolution as PNG bytes. The whole pipeline is
+/// the one the app uses for page images (`layout` → `render_page` → `to_png`), with the
+/// defaults' Print view and no proofing markup; `None` when the document produces no page or
+/// the PNG encode fails.
+fn preview_png(doc: &wordcraft_doc::Document) -> Option<Vec<u8>> {
+    let layout = wordcraft_layout::layout(doc, &mut wordcraft_layout::LayoutCache::new(), &wordcraft_layout::LayoutOptions::default());
+    let page = layout.pages.first()?;
+    let img = wordcraft_render::render_page(doc, page, PREVIEW_SCALE, &wordcraft_render::RenderOptions::default());
+    let png = img.to_png();
+    (!png.is_empty()).then_some(png)
+}
+
+/// The `GET /api/health` body. A `fn` (not an inline literal) so tests can assert every
+/// advertised capability is real.
+fn health_body() -> String {
+    serde_json::json!({
+        "ok": true,
+        "mode": "hybrid-cloudflare-worker",
+        "maxBodyBytes": MAX_BODY_BYTES,
+        "supportedFormats": ADVERTISED_FORMATS,
+        "capabilities": { "convert": true, "preview": true },
+        "preview": { "route": "/api/preview-page", "formats": PREVIEW_SOURCES, "approximate": true, "page": 1, "contentType": "image/png" },
+        "privacy": "zero-retention; document bytes are never logged or stored"
+    })
+    .to_string()
+}
+
 fn no_store_headers(content_type: &str) -> Result<Headers> {
     let headers = Headers::new();
     headers.set("Content-Type", content_type)?;
@@ -116,42 +186,65 @@ async fn main(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let path = url.path();
 
     if path == "/api/health" && req.method() == Method::Get {
-        let body = serde_json::json!({
-            "ok": true,
-            "mode": "hybrid-cloudflare-worker",
-            "maxBodyBytes": MAX_BODY_BYTES,
-            "supportedFormats": ADVERTISED_FORMATS,
-            "privacy": "zero-retention; document bytes are never logged or stored"
-        })
-        .to_string();
+        let body = health_body();
         return Ok(Response::from_body(ResponseBody::Body(body.into_bytes()))?
             .with_status(200)
             .with_headers(no_store_headers("application/json; charset=utf-8")?));
+    }
+
+    if path == "/api/preview-page" {
+        if req.method() != Method::Post {
+            return json_error(405, "POST required");
+        }
+        let body_bytes = match read_body_capped(&mut req).await {
+            Ok(b) => b,
+            Err((status, msg)) => return json_error(status, msg),
+        };
+        let parsed: PreviewRequest = match serde_json::from_slice(&body_bytes) {
+            Ok(v) => v,
+            Err(_) => return json_error(400, "Invalid JSON preview request"),
+        };
+        let input_bytes = match parsed.from.as_str() {
+            "docxBase64" => match STANDARD.decode(parsed.content.as_bytes()) {
+                Ok(b) => b,
+                Err(_) => return json_error(400, "Invalid base64 payload for docxBase64"),
+            },
+            "md" => parsed.content.into_bytes(),
+            _ => return json_error(400, "Unsupported preview format (expected md or docxBase64)"),
+        };
+        let doc = match parsed.from.as_str() {
+            "docxBase64" => match wordcraft_docx::read(&input_bytes) {
+                Ok(d) => d,
+                Err(e) => return json_error(422, &format!("DOCX import error: {e}")),
+            },
+            _ => match wordcraft_formats::import("md", &input_bytes) {
+                Some(Ok(d)) => d,
+                Some(Err(e)) => return json_error(422, &format!("Import error: {e}")),
+                None => return json_error(400, "Unsupported source format"),
+            },
+        };
+        let Some(png) = preview_png(&doc) else {
+            return json_error(422, "Document produced no previewable page");
+        };
+        let mut resp = Response::from_body(ResponseBody::Body(png))?
+            .with_status(200)
+            .with_headers(no_store_headers("image/png")?);
+        // The Worker has only the four bundled faces, so fonts the document asks for may be
+        // substituted: say so on the wire, next to the `approximate` flag in /api/health.
+        if let Err(e) = resp.headers_mut().set("X-Wordcraft-Preview", "approximate; fonts=bundled-4") {
+            console_error!("preview: cannot set header: {e}");
+        }
+        return Ok(resp);
     }
 
     if path == "/api/convert" {
         if req.method() != Method::Post {
             return json_error(405, "POST required");
         }
-        if let Some(len_hdr) = req.headers().get("Content-Length")?
-            && let Ok(len) = len_hdr.parse::<usize>()
-            && len > MAX_BODY_BYTES
-        {
-            return json_error(413, "Document exceeds 4 MiB Cloudflare edge conversion cap; use Local WASM mode instead.");
-        }
-
-        let mut stream = match req.stream() {
-            Ok(s) => s,
-            Err(_) => return json_error(400, "Invalid JSON conversion request"),
+        let body_bytes = match read_body_capped(&mut req).await {
+            Ok(b) => b,
+            Err((status, msg)) => return json_error(status, msg),
         };
-        let mut body_bytes: Vec<u8> = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            if body_bytes.len().saturating_add(chunk.len()) > MAX_BODY_BYTES {
-                return json_error(413, "Document exceeds 4 MiB Cloudflare edge conversion cap; use Local WASM mode instead.");
-            }
-            body_bytes.extend_from_slice(&chunk);
-        }
 
         let parsed: ConvertRequest = match serde_json::from_slice(&body_bytes) {
             Ok(v) => v,
@@ -293,5 +386,52 @@ mod tests {
         for (header, expected) in cases {
             assert_eq!(accepts_brotli(header), expected, "Accept-Encoding {header:?}");
         }
+    }
+
+    /// 4.3 (F6/Q2): `/api/preview-page` renders page 1 of a known sample through the same
+    /// calls the handler makes (`import`/`read` → `layout` → `render_page` → `to_png`), which
+    /// are target-agnostic, so the test runs natively. The four bundled faces are initialised
+    /// the way the wasm Worker's font set is built (no system scan).
+    #[test]
+    fn preview_page_renders_a_nonempty_png() {
+        assert!(wordcraft_fonts::FontDb::init_test_fonts(), "preview tests must initialize fixed fonts before any font lookup");
+        assert_eq!(PREVIEW_SOURCES, ["md", "docxBase64"]);
+
+        const PNG_MAGIC: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+        let md = b"# Preview\n\nHello **world**, this is page one.\n\nMore text to fill the page.\n";
+        let doc = wordcraft_formats::import("md", md)
+            .unwrap_or_else(|| panic!("import(md) unsupported"))
+            .unwrap_or_else(|e| panic!("import(md) failed: {e}"));
+        let t0 = std::time::Instant::now();
+        let png = preview_png(&doc).expect("preview_png returned None for a valid document");
+        // Rough CPU hint for the plan's Free-vs-Paid gate (native build shown; re-measure on the
+        // deployment): `cargo test --release -- --nocapture preview_page`.
+        eprintln!("preview_png(md): {:?} -> {} bytes", t0.elapsed(), png.len());
+        assert_eq!(png.get(..8), Some(PNG_MAGIC.as_slice()), "preview is not a PNG");
+        assert!(png.len() > 1_000, "page-1 PNG suspiciously small: {} bytes", png.len());
+
+        // The docxBase64 arm: the same document round-tripped through docx also renders.
+        let docx = wordcraft_docx::write(&doc).expect("docx write");
+        let reread = wordcraft_docx::read(&docx).expect("docx read");
+        let t0 = std::time::Instant::now();
+        let png2 = preview_png(&reread).expect("preview_png returned None for a docx document");
+        eprintln!("preview_png(docx): {:?} -> {} bytes", t0.elapsed(), png2.len());
+        assert_eq!(png2.get(..8), Some(PNG_MAGIC.as_slice()), "docx preview is not a PNG");
+        assert!(png2.len() > 1_000, "docx page-1 PNG suspiciously small: {} bytes", png2.len());
+    }
+
+    /// `/api/health` must only advertise what the crate builds and the routes serve: the
+    /// `preview` capability flag a demo button gates on, and the preview's real contract.
+    #[test]
+    fn health_advertises_only_real_capabilities() {
+        let v: serde_json::Value = serde_json::from_str(&health_body()).expect("health body is JSON");
+        assert_eq!(v["capabilities"]["preview"], true, "demo buttons gate on this flag");
+        assert_eq!(v["capabilities"]["convert"], true);
+        assert_eq!(v["preview"]["route"], "/api/preview-page");
+        assert_eq!(v["preview"]["formats"], serde_json::json!(PREVIEW_SOURCES));
+        assert_eq!(v["preview"]["approximate"], true, "the four bundled faces make previews approximate");
+        assert_eq!(v["maxBodyBytes"], MAX_BODY_BYTES as u64);
+        let advertised: Vec<&str> = v["supportedFormats"].as_array().expect("formats array").iter().filter_map(|f| f.as_str()).collect();
+        assert_eq!(advertised, ADVERTISED_FORMATS);
     }
 }

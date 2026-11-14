@@ -24,5 +24,15 @@ serde_json = "1.0"
 worker = "0.9"
 wordcraft-doc = { path = "../../../../crates/doc" }
 wordcraft-docx = { path = "../../../../crates/docx" }
+# The same four core faces the browser build carries: the edge preview is approximate
+# (documents asking for other fonts render through the substitutes).
+wordcraft-fonts = { path = "../../../../crates/fonts", features = ["minimal-wasm-fonts"] }
 wordcraft-formats = { path = "../../../../crates/formats", default-features = false, features = ["all-formats"] }
+wordcraft-layout = { path = "../../../../crates/layout", default-features = false }
+wordcraft-render = { path = "../../../../crates/render" }
+
+[dev-dependencies]
+# Fixed fonts (bundled faces only, no system scan) so native tests see the same faces the
+# wasm Worker does.
+wordcraft-fonts = { path = "../../../../crates/fonts", features = ["test-support"] }
 
