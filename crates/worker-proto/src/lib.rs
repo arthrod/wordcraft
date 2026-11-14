@@ -1,6 +1,6 @@
 //! The WordCraft web worker contract (deferred-items plan §3.1): one wire protocol for the
-//! dedicated workers (`apps/wordcraft-worker-proof`, later the codec and PDF workers) and the
-//! clients that drive them.
+//! dedicated workers (`apps/wordcraft-worker-proof`, `-codecs`, `-pdf`) and the clients that
+//! drive them.
 //!
 //! A message on the wire is a two-element JavaScript array `[header, payload]`:
 //!
@@ -52,8 +52,28 @@ pub const MAX_DICTIONARY_WORDS: usize = 10_000;
 /// bytes are the cheap bound here).
 pub const MAX_WORD_BYTES: usize = 256;
 
-/// The `kind` field of an [`Envelope`]. Request kinds are `check`, `cancel`, `configure` and
-/// `ping`; everything else only ever travels worker → client.
+/// Largest file the codec worker converts, in bytes (§3.3). Well below the 512 MiB open cap
+/// in `apps/wordcraft-web/src/host.rs`: the input is copied into the worker once and the
+/// converted document copies back out.
+pub const MAX_CONVERT_BYTES: usize = 64 << 20;
+/// Largest `.docx` interchange package the PDF worker renders, in bytes (§3.4).
+pub const MAX_PDF_DOC_BYTES: usize = 64 << 20;
+/// Most font copies one `renderPdf` request carries (the bundled four plus installed packs and
+/// user fonts: a document can reference many, but not hundreds).
+pub const MAX_FONT_COPIES: usize = 256;
+/// Total font bytes one `renderPdf` request carries (user fonts cap at
+/// `wordcraft_fonts::MAX_FONT_FILE_BYTES` each; this bounds the batch).
+pub const MAX_FONT_TOTAL_BYTES: usize = 128 << 20;
+/// Longest format name (`rtf`, `odt`, `docx`…) a `convert` request accepts, in bytes.
+pub const MAX_FORMAT_BYTES: usize = 32;
+/// Longest password a `convert` request carries, in bytes.
+pub const MAX_PASSWORD_BYTES: usize = 256;
+/// Most parts one binary-framed payload declares (framing sanity bound, see [`pack_binary`]).
+pub const MAX_BINARY_PARTS: usize = 1024;
+
+/// The `kind` field of an [`Envelope`]. Request kinds are `check`, `cancel`, `configure`,
+/// `convert`, `renderPdf` and `ping`; everything else only ever travels worker → client. A
+/// worker answers a request kind it doesn't implement with [`ErrorCode::UnknownKind`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Kind {
@@ -64,10 +84,19 @@ pub enum Kind {
     Cancel,
     /// Update options and the user/ignore dictionaries → [`Kind::Ack`].
     Configure,
+    /// Convert a document between a foreign format and `.docx` → [`Kind::Converted`].
+    Convert,
+    /// Lay out a `.docx` document and write it as PDF → [`Kind::Pdf`].
+    RenderPdf,
     /// Liveness probe → [`Kind::Pong`].
     Ping,
     /// [`CheckRequest`] outcome ([`CheckReply`]).
     Issues,
+    /// [`ConvertRequest`] outcome: raw converted bytes (`.docx` towards the client, the named
+    /// format away from it).
+    Converted,
+    /// [`PdfRenderRequest`] outcome: the raw `.pdf` file.
+    Pdf,
     /// `Cancel`/`Configure` accepted.
     Ack,
     /// `Ping` answer.
@@ -81,7 +110,7 @@ pub enum Kind {
 impl Kind {
     /// Whether this kind is a request (client → worker). The rest are worker → client only.
     pub fn is_request(self) -> bool {
-        matches!(self, Kind::Check | Kind::Cancel | Kind::Configure | Kind::Ping)
+        matches!(self, Kind::Check | Kind::Cancel | Kind::Configure | Kind::Convert | Kind::RenderPdf | Kind::Ping)
     }
 }
 
