@@ -66,6 +66,19 @@ fn accepts_brotli(header: &str) -> bool {
     })
 }
 
+/// Cache-Control for a wasm served through the Brotli-sidecar path (S4): the content-hashed
+/// main module is `immutable`, but Trunk keeps dedicated-worker names un-hashed (they must be
+/// named at runtime), so those follow `packaging/web/_headers`' worker rule and revalidate on
+/// every load — a worker cached past the hashed main module it talks to would fail the
+/// protocol version check for as long as the cache lives.
+fn wasm_sidecar_cache_control(path: &str) -> &'static str {
+    if path.rsplit('/').next().is_some_and(|name| name.starts_with("wordcraft-worker-")) {
+        "no-cache"
+    } else {
+        "public, max-age=31536000, immutable"
+    }
+}
+
 /// Try to serve the precompressed Brotli sidecar `<path>.br` for a `.wasm` request from the
 /// `ASSETS` binding. `None` on any failure (missing sidecar, non-200, fetch or header error) so
 /// the caller falls back to the plain asset path; this never yields an error response.
@@ -84,7 +97,7 @@ async fn brotli_wasm_sidecar(env: &Env, url: &Url, method: Method) -> Option<Res
         ("Content-Type", "application/wasm"),
         ("Content-Encoding", "br"),
         ("Vary", "Accept-Encoding"),
-        ("Cache-Control", "public, max-age=31536000, immutable"),
+        ("Cache-Control", wasm_sidecar_cache_control(url.path())),
         ("X-Content-Type-Options", "nosniff"),
     ];
     if tagged.iter().any(|(k, v)| headers.set(k, v).is_err()) {
@@ -362,6 +375,16 @@ mod tests {
                 .unwrap_or_else(|e| panic!("export({target}) of round-tripped docx failed: {e}"));
             assert!(!out.is_empty(), "export({target}) of docx produced empty output");
         }
+    }
+
+    /// S4: sidecar responses must not pin the un-hashed dedicated-worker modules for a year;
+    /// only the content-hashed main module is `immutable`. Pure function, host-testable.
+    #[test]
+    fn sidecar_cache_control_follows_hashed_vs_worker_names() {
+        assert_eq!(wasm_sidecar_cache_control("/wordcraft-web-5192d64fd8466f72_bg.wasm"), "public, max-age=31536000, immutable");
+        assert_eq!(wasm_sidecar_cache_control("/wordcraft-worker-proof_bg.wasm"), "no-cache");
+        assert_eq!(wasm_sidecar_cache_control("/wordcraft-worker-codecs_bg.wasm"), "no-cache");
+        assert_eq!(wasm_sidecar_cache_control("/wordcraft-worker-proof_bg.wasm.br"), "no-cache");
     }
 
     /// F8: the `br` decision must match the Accept-Encoding token, not a substring of another
