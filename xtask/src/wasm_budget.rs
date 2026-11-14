@@ -8,9 +8,11 @@ use base64::Engine as _;
 use sha2::{Digest as _, Sha384};
 
 /// Main-module ceilings ratchet to measured size plus a small headroom (plan §3.5); lower them
-/// whenever the artifact shrinks. Ratcheted 2026-11-13: 18,965,881 measured (font packs, locale
-/// catalogs, worker link) → 19.5 MB.
-pub const MAX_UNCOMPRESSED_BYTES: usize = 19_500_000;
+/// whenever the artifact shrinks. Ratcheted 2026-11-14 (S1) on an optimized release build
+/// (`trunk build --release`, so `wasm-opt` ran): 17,749,525 measured → 17.9 MB. The 2026-11-13
+/// ratchet to 19.5 MB had measured an artifact `wasm-opt` had not run on (a plain `trunk build`
+/// skips it outside release mode), which the `name`-section guard below now catches.
+pub const MAX_UNCOMPRESSED_BYTES: usize = 17_900_000;
 pub const MAX_GZIPPED_BYTES: usize = 7_100_000;
 pub const MAX_DATA_SECTION_BYTES: usize = 2_750_000;
 pub const CLOUDFLARE_MAX_FILE_BYTES: usize = 25 * 1024 * 1024;
@@ -33,6 +35,11 @@ pub struct WasmReport {
     pub data_bytes: usize,
     pub custom_bytes: usize,
     pub found_forbidden: Vec<String>,
+    /// Whether the module carries a `name` custom section. Guard (plan S1): Trunk runs
+    /// `wasm-opt` only in release mode, and `wasm-opt` drops the `name` section, so a module
+    /// that still has one was built unoptimized — it must not be measured against a ratcheted
+    /// ceiling (which would then fit only unoptimized builds) or shipped.
+    pub has_name_section: bool,
 }
 
 /** Read an unsigned LEB128 u64 starting at `*pos`, advancing `*pos`. Shared with the
@@ -63,6 +70,7 @@ pub fn analyze_wasm_bytes(path: PathBuf, bytes: &[u8], gzip_bytes: usize) -> Res
     let mut code_bytes = 0usize;
     let mut data_bytes = 0usize;
     let mut custom_bytes = 0usize;
+    let mut has_name_section = false;
 
     while pos < bytes.len() {
         let id = *bytes.get(pos).ok_or_else(|| "unexpected EOF reading section id".to_string())?;
@@ -74,7 +82,20 @@ pub fn analyze_wasm_bytes(path: PathBuf, bytes: &[u8], gzip_bytes: usize) -> Res
             return Err(format!("truncated WASM section id={id}"));
         }
         match id {
-            0 => custom_bytes = custom_bytes.saturating_add(len),
+            0 => {
+                custom_bytes = custom_bytes.saturating_add(len);
+                // A custom section is `name_len name contents…`; a `name` section means the
+                // module skipped `wasm-opt` (see `WasmReport::has_name_section`). The LEB read
+                // starts inside the section (`pos < end`) and the name must fit inside it, so an
+                // empty or truncated custom section can never read the next section's bytes.
+                if pos < end
+                    && let Ok(name_len) = read_leb_u64(bytes, &mut pos)
+                    && end.checked_sub(pos).is_some_and(|avail| avail >= name_len as usize)
+                    && bytes.get(pos..pos + name_len as usize) == Some(b"name")
+                {
+                    has_name_section = true;
+                }
+            }
             10 => code_bytes = code_bytes.saturating_add(len),
             11 => data_bytes = data_bytes.saturating_add(len),
             _ => {}
@@ -89,11 +110,14 @@ pub fn analyze_wasm_bytes(path: PathBuf, bytes: &[u8], gzip_bytes: usize) -> Res
         }
     }
 
-    Ok(WasmReport { path, total_bytes: bytes.len(), gzip_bytes, code_bytes, data_bytes, custom_bytes, found_forbidden })
+    Ok(WasmReport { path, total_bytes: bytes.len(), gzip_bytes, code_bytes, data_bytes, custom_bytes, found_forbidden, has_name_section })
 }
 
 pub fn check_budget(r: &WasmReport) -> Vec<String> {
     let mut errs = Vec::new();
+    if r.has_name_section {
+        errs.push(String::from("module carries a `name` custom section: `wasm-opt` did not run (build with `trunk build --release`; Trunk only optimizes release builds), so this artifact is unoptimized and cannot be measured or shipped"));
+    }
     if r.total_bytes > MAX_UNCOMPRESSED_BYTES {
         errs.push(format!("uncompressed .wasm {} bytes > ceiling {} bytes", r.total_bytes, MAX_UNCOMPRESSED_BYTES));
     }
@@ -165,6 +189,9 @@ fn worker_report_line(r: &WasmReport) -> String {
 fn check_worker_budget(r: &WasmReport) -> Vec<String> {
     let name = r.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     let mut errs = Vec::new();
+    if r.has_name_section {
+        errs.push(format!("worker {name} carries a `name` custom section: `wasm-opt` did not run (build with `trunk build --release`), so this artifact is unoptimized and cannot be measured or shipped"));
+    }
     if r.total_bytes > MAX_WORKER_UNCOMPRESSED_BYTES {
         errs.push(format!("worker {name} uncompressed {} bytes > ceiling {} bytes", r.total_bytes, MAX_WORKER_UNCOMPRESSED_BYTES));
     }
@@ -354,6 +381,9 @@ pub fn run(root: &Path, report_only: bool) -> Result<(), String> {
     let report = analyze_wasm_bytes(wasm_path, &bytes, gz)?;
 
     println!("WordCraft Web WASM Budget Report ({}):", report.path.display());
+    if report.has_name_section {
+        println!("  WARNING: module carries a `name` custom section (`wasm-opt` did not run)");
+    }
     println!("  uncompressed: {:>10} bytes (budget {:>10})", report.total_bytes, MAX_UNCOMPRESSED_BYTES);
     println!("  gzip -9:      {:>10} bytes (budget {:>10})", report.gzip_bytes, MAX_GZIPPED_BYTES);
     println!("  code (sec10): {:>10} bytes", report.code_bytes);
@@ -532,6 +562,49 @@ mod tests {
             forbidden_crates_in_tree(dirty),
             vec!["krilla".to_string(), "wordcraft-docbin".to_string(), "wgpu".to_string(), "naga".to_string()]
         );
+    }
+
+    /// A custom section with a proper `name_len name contents` payload, the way a real module
+    /// frames its `name`/`producers` sections.
+    fn named_custom_section(name: &str) -> Vec<u8> {
+        let mut payload = vec![u8::try_from(name.len()).unwrap_or(255)];
+        payload.extend_from_slice(name.as_bytes());
+        payload
+    }
+
+    #[test]
+    fn name_section_marks_an_unoptimized_module_and_fails_the_budget() {
+        // A `name` custom section (function names survive a cargo build that `wasm-opt` never
+        // ran) fails the budget for the main module and for a worker alike.
+        let with_name = minimal_wasm(1024, 512, &named_custom_section("name"));
+        let rep = analyze_wasm_bytes(PathBuf::from("test.wasm"), &with_name, 400).unwrap();
+        assert!(rep.has_name_section);
+        let errs = check_budget(&rep);
+        assert!(errs.iter().any(|e| e.contains("`name` custom section")), "{errs:?}");
+        let rep = analyze_wasm_bytes(PathBuf::from("wordcraft-worker-proof_bg.wasm"), &with_name, 400).unwrap();
+        assert!(check_worker_budget(&rep).iter().any(|e| e.contains("`name` custom section")));
+
+        // The sections an optimized release build does keep (`producers` only) stay fine.
+        let optimized = minimal_wasm(1024, 512, &named_custom_section("producers"));
+        let rep = analyze_wasm_bytes(PathBuf::from("test.wasm"), &optimized, 400).unwrap();
+        assert!(!rep.has_name_section);
+        assert!(check_budget(&rep).is_empty(), "{:?}", check_budget(&rep));
+
+        // The guard never reads past a hostile section: an empty custom section, and one whose
+        // name length runs past the section end, are not `name` sections and never panic.
+        let empty = minimal_wasm(1024, 512, &[]);
+        let rep = analyze_wasm_bytes(PathBuf::from("test.wasm"), &empty, 400).unwrap();
+        assert!(!rep.has_name_section);
+        let mut overrun = named_custom_section("producers");
+        overrun[0] = 200; // declares 200 name bytes where the section holds eight
+        let rep = analyze_wasm_bytes(PathBuf::from("test.wasm"), &minimal_wasm(1024, 512, &overrun), 400).unwrap();
+        assert!(!rep.has_name_section);
+
+        // The raw-payload custom sections the older tests used (no framing) are not `name`
+        // sections either — even when they literally contain the bytes "name".
+        let unframed = minimal_wasm(1024, 512, b"name");
+        let rep = analyze_wasm_bytes(PathBuf::from("test.wasm"), &unframed, 400).unwrap();
+        assert!(!rep.has_name_section);
     }
 
     #[test]
