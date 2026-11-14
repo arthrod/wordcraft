@@ -60,13 +60,14 @@ Plan note Q3 flags this stretch of the D1 exception for review.
 
 ## Results
 
-Last local run (2026-11-13, Chrome 157, `wordcraft-web` 0.18.1):
+Last local run (2026-11-14, Chrome 157, `wordcraft-web` 0.18.1, package staged from the
+three-worker build and packed as `wordcraft-web.tgz`):
 
 | Bundler | wasm found (no config) | start() | locale (fr) | font pack | proof worker | console errors |
 |---|---|---|---|---|---|---|
-| vite | — | — | — | — | — | not run yet |
-| webpack | — | — | — | — | — | not run yet |
-| esbuild | — | — | — | — | — | not run yet |
+| vite | yes | yes | yes | yes | yes | none |
+| webpack | yes | yes | yes | yes | yes | none |
+| esbuild | no (explicit `wasmUrl` fallback) | yes | yes | yes | yes | none |
 
 `run.sh` overwrites `results/report.md` with the measured table — update this
 one from it.

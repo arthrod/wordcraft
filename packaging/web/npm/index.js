@@ -64,5 +64,15 @@ export async function start(options = {}) {
  * @returns {Worker}
  */
 export function createProofWorker() {
-  return new Worker(new URL("./wordcraft-worker-proof_loader.js", import.meta.url), { type: "module" });
+  return workerFrom("./wordcraft-worker-proof_loader.js");
+}
+
+// The URL is resolved in one statement and the Worker constructed in the next: bundlers
+// rewrite only the literal `new Worker(new URL(..., import.meta.url), ...)` expression
+// (Vite/rolldown re-bundle it as an iife worker, whose format rejects the Trunk loader's
+// top-level `await init()`), and a plain string URL stays a same-origin module worker that
+// the browser loads straight from the package's files.
+function workerFrom(specifier) {
+  const url = new URL(specifier, import.meta.url);
+  return new Worker(url.href, { type: "module" });
 }

@@ -77,6 +77,8 @@ stage_complete() {
     index.js index.d.ts package.json \
     wordcraft-web.js wordcraft-web.d.ts wordcraft-web_bg.wasm \
     wordcraft-worker-proof.js wordcraft-worker-proof_loader.js wordcraft-worker-proof_bg.wasm \
+    wordcraft-worker-codecs.js wordcraft-worker-codecs_loader.js wordcraft-worker-codecs_bg.wasm \
+    wordcraft-worker-pdf.js wordcraft-worker-pdf_loader.js wordcraft-worker-pdf_bg.wasm \
     i18n/manifest.json fonts/manifest.json; do
     [[ -f "$dir/$f" ]] || return 1
   done
@@ -97,8 +99,10 @@ seed_stage_from_static() {
   /bin/cp -f "$src/$glue" "$dest/wordcraft-web.js"
   /bin/cp -f "$src/$wasm" "$dest/wordcraft-web_bg.wasm"
   /bin/cp -f "$src/$dts" "$dest/wordcraft-web.d.ts"
-  for f in wordcraft-worker-proof.js wordcraft-worker-proof_loader.js wordcraft-worker-proof_bg.wasm; do
-    [[ -f "$src/$f" ]] || { echo "error: $src/$f missing (static build predates the worker)" >&2; return 1; }
+  for f in wordcraft-worker-proof.js wordcraft-worker-proof_loader.js wordcraft-worker-proof_bg.wasm \
+      wordcraft-worker-codecs.js wordcraft-worker-codecs_loader.js wordcraft-worker-codecs_bg.wasm \
+      wordcraft-worker-pdf.js wordcraft-worker-pdf_loader.js wordcraft-worker-pdf_bg.wasm; do
+    [[ -f "$src/$f" ]] || { echo "error: $src/$f missing (static build predates the workers)" >&2; return 1; }
     /bin/cp -f "$src/$f" "$dest/"
   done
   for d in snippets i18n samples fonts; do
@@ -151,7 +155,12 @@ prepare_tarball() {
 build_fixture() {
   local name="$1" dir="$FIXTURES_DIR/$name"
   echo "=== fixture: $name"
-  (cd "$dir" && pnpm install --reporter=append-only && pnpm run build)
+  # --allow-build: pnpm 12 makes unapproved dependency build scripts a hard error; esbuild's
+  # postinstall is the only one the matrix pulls (its platform binary; the settings files in
+  # fixtures/esbuild record the same approval for interactive installs).
+  local install_args=()
+  [[ "$name" == "esbuild" ]] && install_args+=(--allow-build=esbuild)
+  (cd "$dir" && pnpm install --reporter=append-only "${install_args[@]}" && pnpm run build)
   [[ -f "$dir/dist/index.html" ]] || { echo "error: $name build produced no dist/index.html" >&2; return 1; }
 }
 

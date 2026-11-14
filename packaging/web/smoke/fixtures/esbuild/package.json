@@ -10,5 +10,10 @@
   },
   "scripts": {
     "build": "esbuild src/main.js --bundle --format=esm --target=es2022 --outfile=dist/bundle.js && /bin/cp -f index.html dist/index.html"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
   }
 }
