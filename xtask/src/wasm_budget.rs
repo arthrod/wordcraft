@@ -14,8 +14,8 @@ use sha2::{Digest as _, Sha384};
 /// (`trunk build --release`, so `wasm-opt` ran): 17,749,525 measured → 17.9 MB. The 2026-11-13
 /// ratchet to 19.5 MB had measured an artifact `wasm-opt` had not run on (a plain `trunk build`
 /// skips it outside release mode), which the `name`-section guard below now catches.
-pub const MAX_UNCOMPRESSED_BYTES: usize = 17_900_000;
-pub const MAX_GZIPPED_BYTES: usize = 7_100_000;
+pub const MAX_UNCOMPRESSED_BYTES: usize = 16_500_000;
+pub const MAX_GZIPPED_BYTES: usize = 6_750_000;
 pub const MAX_DATA_SECTION_BYTES: usize = 2_750_000;
 pub const CLOUDFLARE_MAX_FILE_BYTES: usize = 25 * 1024 * 1024;
 
@@ -24,8 +24,10 @@ pub const CLOUDFLARE_MAX_FILE_BYTES: usize = 25 * 1024 * 1024;
 /// document model, so the total grows as workers land even while the main module shrinks —
 /// this is the row that catches a sum that quietly drifts past the platform's 25 MiB file
 /// limit (still enforced per file by [`check_static_file_sizes`]) or the story the size work
-/// tells. Ratcheted 2026-11-14 from the release build: 17,749,525 + 1,015,087 = 18,764,612
-/// raw and 6,973,466 + 637,274 = 7,610,740 gzip measured.
+/// tells. First cut 2026-11-14 from the two-artifact build (18,764,612 raw / 7,610,740 gzip);
+/// with all three workers the measured totals are 26,827,570 raw / 11,599,922 gzip, which
+/// exceeds these ceilings — raising them is a recorded owner decision (the deferred plan's
+/// Waiting on Owner), so they stand until then and the budget reports the failure.
 pub const MAX_TOTAL_UNCOMPRESSED_BYTES: usize = 19_000_000;
 pub const MAX_TOTAL_GZIPPED_BYTES: usize = 7_750_000;
 
@@ -40,13 +42,13 @@ pub struct WorkerCeiling {
     pub max_gzip: usize,
 }
 
-/// Measured 2026-11-14 on the release build (`trunk build --release`), each at its size plus
-/// headroom: proof 1,015,087 raw / 637,274 gzip; codecs 4,212,970 / 1,781,789; pdf 5,420,578 /
-/// 2,537,711.
+/// Measured 2026-11-14 on the SIMD release build (`trunk build --release` with
+/// `-C target-feature=+simd128`, plan §4.2), each at its size plus headroom: proof 1,012,294
+/// raw / 636,246 gzip; codecs 4,164,394 / 1,766,120; pdf 5,394,070 / 2,525,902.
 pub const WORKER_CEILINGS: &[WorkerCeiling] = &[
     WorkerCeiling { name: "wordcraft-worker-proof", max_raw: 1_100_000, max_gzip: 700_000 },
-    WorkerCeiling { name: "wordcraft-worker-codecs", max_raw: 4_400_000, max_gzip: 1_900_000 },
-    WorkerCeiling { name: "wordcraft-worker-pdf", max_raw: 5_600_000, max_gzip: 2_650_000 },
+    WorkerCeiling { name: "wordcraft-worker-codecs", max_raw: 4_300_000, max_gzip: 1_850_000 },
+    WorkerCeiling { name: "wordcraft-worker-pdf", max_raw: 5_550_000, max_gzip: 2_625_000 },
 ];
 
 /// Offloaded symbols that must not appear in the *main module's* bytes: `krilla` (PDF export

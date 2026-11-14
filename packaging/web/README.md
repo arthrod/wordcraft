@@ -14,6 +14,17 @@
 | `samples/` | Pre-bundled `.md` showcase documents (`welcome.md`, `spec.md`, `letter.md`). |
 | `_headers`, `.htaccess` | Sample header rules for Cloudflare Pages/Workers static assets, Netlify, and Apache. |
 
+
+## Browser floor (WebAssembly SIMD)
+
+The shipped modules are built with `-C target-feature=+simd128` (`.cargo/config.toml`) and
+`wasm-opt --enable-simd` (`apps/wordcraft-web/index.html`), adopted after measuring (2026-11-14,
+plan §4.2): laying out a 235 KB Markdown document went from 204 ms to 115 ms and the module got
+8.5% smaller — 16,256,770 B raw against 17,758,276 B scalar (gzip 6,671,547 vs 6,977,543;
+Brotli q11 4,862,005 vs 5,021,646); page raster was unchanged. Every engine with WebAssembly
+SIMD support compiles it: Chrome 91+, Safari 16.4+, Firefox 89+. A browser without SIMD cannot
+compile the module, and there is no fallback build.
+
 ## Quick start via npm (`wordcraft-web`)
 
 ```bash

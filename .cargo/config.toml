@@ -1,2 +1,10 @@
 [alias]
 xtask = "run --package xtask --"
+
+# The web build targets browsers with WebAssembly SIMD (measured 2026-11-14, plan §4.2: layout
+# 43% faster on a 235 KB document, module 8.5% smaller — v128 code is denser than the scalar
+# sequences it replaces). wasm-opt gets --enable-simd for the same reason in
+# apps/wordcraft-web/index.html. Browser floor: every engine with SIMD (Chrome 91+, Safari 16.4+,
+# Firefox 89+); a browser without it cannot compile the module and there is no fallback build.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]
