@@ -8,8 +8,8 @@
 //!   other field a request or reply needs travels in the payload.
 //! - `payload` is an `ArrayBuffer`, transferred (never copied, never embedded in the JSON as
 //!   base64). Its contents depend on `kind`: request and reply payloads are the JSON-encoded
-//!   types below; binary kinds (codec input, rendered output) carry raw bytes whose framing is
-//!   the kind's own.
+//!   types below; binary kinds (codec input, rendered output) carry raw bytes framed by
+//!   [`pack_binary`].
 //!
 //! `id` is a `u32` counter per worker ([`RequestIds`]), always below 2^53 so it crosses to
 //! JavaScript and back as an exact number. `revision` is the document revision the request was
@@ -279,6 +279,231 @@ pub struct ConfigureRequest {
     pub ignore_words: Vec<String>,
 }
 
+/// Which side of a `convert` job `.docx` is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConvertDirection {
+    /// The named foreign format → `.docx` (the Open direction; the `converted` reply is a
+    /// `.docx` package).
+    Import,
+    /// `.docx` → the named foreign format (Save As; the `converted` reply is that format's
+    /// bytes).
+    Export,
+}
+
+/// `convert` payload (§3.3): convert `input` between `.docx` and the format `format` names.
+///
+/// On the wire the payload is a [`pack_binary`] frame of two parts — the JSON metadata
+/// (`{format, direction, password}`) and the raw `input` bytes — so a file of up to
+/// [`MAX_CONVERT_BYTES`] never has to survive JSON.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConvertRequest {
+    /// Format of the non-`.docx` side, as a lower-case extension (`rtf`, `odt`, `doc`, `html`,
+    /// `xml`…), at most [`MAX_FORMAT_BYTES`]. `.docx` and its sibling flavors (`.docm`, `.dotx`,
+    /// `.dotm`) are also accepted, for flavor changes and (re)encryption.
+    pub format: String,
+    pub direction: ConvertDirection,
+    /// Password for an encrypted input, or for an encrypted output where the format supports
+    /// one (Word packages, ODT, `.doc`); at most [`MAX_PASSWORD_BYTES`].
+    pub password: Option<String>,
+    /// The file to convert, at most [`MAX_CONVERT_BYTES`].
+    pub input: Vec<u8>,
+}
+
+/// One font the client sends the PDF worker (§3.4): the file's bytes plus the family and style
+/// the document resolves it under.
+///
+/// `family` names what the face answers to once installed — a substitute copy (a
+/// metric-compatible replacement for a family the browser can't install) answers to the name
+/// the document uses, the same rule a `.docx` file's embedded fonts follow
+/// (`FontDb::add_document_fonts`). `style` is advisory: the faces inside the file carry their
+/// own style names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FontCopy {
+    pub family: String,
+    pub style: String,
+    /// TTF, OTF, TTC, WOFF or WOFF2 file bytes.
+    pub bytes: Vec<u8>,
+}
+
+/// `renderPdf` payload (§3.4): lay out `docx` and write it as PDF.
+///
+/// On the wire the payload is a [`pack_binary`] frame of `[metaJson, docxBytes, font0Bytes, …]`
+/// where `metaJson` is `{"fonts":[{family, style}, …]}` listing `fonts` in order; each font's
+/// raw bytes are the part at the same index after the `.docx`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PdfRenderRequest {
+    /// The document as a `.docx` interchange package, at most [`MAX_PDF_DOC_BYTES`].
+    pub docx: Vec<u8>,
+    /// Font copies to install before layout: at most [`MAX_FONT_COPIES`], totalling at most
+    /// [`MAX_FONT_TOTAL_BYTES`].
+    pub fonts: Vec<FontCopy>,
+}
+
+/// The JSON part of a `convert` payload (everything but `input`).
+#[derive(Serialize, Deserialize)]
+struct ConvertMeta {
+    format: String,
+    direction: ConvertDirection,
+    #[serde(default)]
+    password: Option<String>,
+}
+
+/// The JSON part of a `renderPdf` payload: the fonts' names, in `fonts` order.
+#[derive(Serialize, Deserialize)]
+struct PdfMeta {
+    fonts: Vec<FontMeta>,
+}
+
+/// One font's names inside [`PdfMeta`]; its bytes ride as a binary part.
+#[derive(Serialize, Deserialize)]
+struct FontMeta {
+    family: String,
+    style: String,
+}
+
+/// Magic at the head of a [`pack_binary`] frame: `WCB` plus the framing version byte `1`.
+const BINARY_MAGIC: [u8; 4] = *b"WCB\x01";
+
+/// Pack byte parts into one binary-framed payload: `WCB\x01`, a `u32` part count, a `u32`
+/// length per part (little-endian), then the part bytes in order.
+///
+/// The binary kinds (`convert`, `renderPdf`) use this so multi-part payloads — a JSON metadata
+/// part beside raw document and font bytes — travel without JSON or base64 overhead. The
+/// `converted` and `pdf` replies carry a single output unframed: the envelope's `kind` already
+/// says what the bytes are. At most [`MAX_BINARY_PARTS`] parts; each part below 4 GiB.
+pub fn pack_binary(parts: &[&[u8]]) -> Result<Vec<u8>, ProtoError> {
+    if parts.len() > MAX_BINARY_PARTS {
+        return Err(ProtoError::TooLarge { limit: MAX_BINARY_PARTS, got: parts.len() });
+    }
+    let head = BINARY_MAGIC.len() + 4 + parts.len().saturating_mul(4);
+    let body = parts.iter().fold(0usize, |a, p| a.saturating_add(p.len()));
+    let mut out = Vec::with_capacity(head.saturating_add(body));
+    out.extend_from_slice(&BINARY_MAGIC);
+    out.extend_from_slice(&(parts.len() as u32).to_le_bytes());
+    for part in parts {
+        let len = u32::try_from(part.len()).map_err(|_| ProtoError::TooLarge { limit: u32::MAX as usize, got: part.len() })?;
+        out.extend_from_slice(&len.to_le_bytes());
+    }
+    for part in parts {
+        out.extend_from_slice(part);
+    }
+    Ok(out)
+}
+
+/// The parts of a [`pack_binary`] frame, or [`ProtoError::Decode`] for anything malformed:
+/// wrong magic, a truncated length table, a part running past the frame, trailing bytes, or
+/// more than [`MAX_BINARY_PARTS`] parts ([`ProtoError::TooLarge`]).
+pub fn unpack_binary(bytes: &[u8]) -> Result<Vec<&[u8]>, ProtoError> {
+    fn bad(m: &str) -> ProtoError {
+        ProtoError::Decode(format!("bad binary frame: {m}"))
+    }
+    let rest = bytes.strip_prefix(&BINARY_MAGIC[..]).ok_or_else(|| bad("wrong magic"))?;
+    let (count_b, rest) = rest.split_at_checked(4).ok_or_else(|| bad("truncated part count"))?;
+    let count = u32::from_le_bytes([count_b[0], count_b[1], count_b[2], count_b[3]]) as usize;
+    if count > MAX_BINARY_PARTS {
+        return Err(ProtoError::TooLarge { limit: MAX_BINARY_PARTS, got: count });
+    }
+    let table_len = count.checked_mul(4).ok_or_else(|| bad("part table overflows"))?;
+    let (table, mut rest) = rest.split_at_checked(table_len).ok_or_else(|| bad("truncated part table"))?;
+    let mut parts = Vec::with_capacity(count);
+    for len_b in table.chunks_exact(4) {
+        let len = u32::from_le_bytes([len_b[0], len_b[1], len_b[2], len_b[3]]) as usize;
+        let (part, tail) = rest.split_at_checked(len).ok_or_else(|| bad("part overruns the frame"))?;
+        parts.push(part);
+        rest = tail;
+    }
+    if !rest.is_empty() {
+        return Err(bad("trailing bytes after the last part"));
+    }
+    Ok(parts)
+}
+
+/// Encode a `convert` payload: a two-part [`pack_binary`] frame, JSON metadata then `input`.
+pub fn encode_convert_request(req: &ConvertRequest) -> Result<Vec<u8>, ProtoError> {
+    let meta = encode_payload(&ConvertMeta {
+        format: req.format.clone(),
+        direction: req.direction,
+        password: req.password.clone(),
+    })?;
+    pack_binary(&[&meta, &req.input])
+}
+
+/// Decode a `convert` payload. Framing and JSON structure only; [`convert_request_error`]
+/// applies the bounds.
+pub fn decode_convert_request(bytes: &[u8]) -> Result<ConvertRequest, ProtoError> {
+    let parts = unpack_binary(bytes)?;
+    let [meta, input] = parts.as_slice() else {
+        return Err(ProtoError::Decode(format!("convert payload has {} parts, expected 2", parts.len())));
+    };
+    let meta: ConvertMeta = decode_payload(meta)?;
+    Ok(ConvertRequest { format: meta.format, direction: meta.direction, password: meta.password, input: input.to_vec() })
+}
+
+/// Encode a `renderPdf` payload: `[metaJson, docx, font0, font1, …]`.
+pub fn encode_pdf_request(req: &PdfRenderRequest) -> Result<Vec<u8>, ProtoError> {
+    let meta = encode_payload(&PdfMeta {
+        fonts: req.fonts.iter().map(|f| FontMeta { family: f.family.clone(), style: f.style.clone() }).collect(),
+    })?;
+    let mut parts: Vec<&[u8]> = Vec::with_capacity(req.fonts.len().saturating_add(2));
+    parts.push(&meta);
+    parts.push(&req.docx);
+    parts.extend(req.fonts.iter().map(|f| f.bytes.as_slice()));
+    pack_binary(&parts)
+}
+
+/// Decode a `renderPdf` payload. Framing, part/font-count agreement and JSON structure only;
+/// [`pdf_request_error`] applies the bounds.
+pub fn decode_pdf_request(bytes: &[u8]) -> Result<PdfRenderRequest, ProtoError> {
+    let parts = unpack_binary(bytes)?;
+    if parts.len() < 2 {
+        return Err(ProtoError::Decode(format!("renderPdf payload has {} parts, expected at least 2", parts.len())));
+    }
+    let meta: PdfMeta = decode_payload(parts[0])?;
+    if meta.fonts.len() != parts.len() - 2 {
+        return Err(ProtoError::Decode(format!("renderPdf declares {} fonts but carries {} font parts", meta.fonts.len(), parts.len() - 2)));
+    }
+    Ok(PdfRenderRequest {
+        docx: parts[1].to_vec(),
+        fonts: meta
+            .fonts
+            .into_iter()
+            .zip(&parts[2..])
+            .map(|(f, bytes)| FontCopy { family: f.family, style: f.style, bytes: bytes.to_vec() })
+            .collect(),
+    })
+}
+
+/// Validate a [`ConvertRequest`] against the protocol bounds before a worker runs it, like
+/// [`check_request_error`]: `TooLarge` past [`MAX_FORMAT_BYTES`], [`MAX_PASSWORD_BYTES`] or
+/// [`MAX_CONVERT_BYTES`], `BadRequest` for an empty format name.
+pub fn convert_request_error(req: &ConvertRequest) -> Option<ErrorCode> {
+    if req.format.len() > MAX_FORMAT_BYTES
+        || req.password.as_deref().is_some_and(|p| p.len() > MAX_PASSWORD_BYTES)
+        || req.input.len() > MAX_CONVERT_BYTES
+    {
+        return Some(ErrorCode::TooLarge);
+    }
+    if req.format.is_empty() {
+        return Some(ErrorCode::BadRequest);
+    }
+    None
+}
+
+/// Validate a [`PdfRenderRequest`] against the protocol bounds before a worker runs it, like
+/// [`check_request_error`]: `TooLarge` past [`MAX_PDF_DOC_BYTES`], [`MAX_FONT_COPIES`] or
+/// [`MAX_FONT_TOTAL_BYTES`], `BadRequest` for an empty package.
+pub fn pdf_request_error(req: &PdfRenderRequest) -> Option<ErrorCode> {
+    let font_total = req.fonts.iter().fold(0usize, |a, f| a.saturating_add(f.bytes.len()));
+    if req.docx.len() > MAX_PDF_DOC_BYTES || req.fonts.len() > MAX_FONT_COPIES || font_total > MAX_FONT_TOTAL_BYTES {
+        return Some(ErrorCode::TooLarge);
+    }
+    if req.docx.is_empty() {
+        return Some(ErrorCode::BadRequest);
+    }
+    None
+}
+
 /// Why an `error` reply was sent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -535,11 +760,146 @@ mod tests {
 
     #[test]
     fn kinds_split_requests_from_replies() {
-        for k in [Kind::Check, Kind::Cancel, Kind::Configure, Kind::Ping] {
+        for k in [Kind::Check, Kind::Cancel, Kind::Configure, Kind::Convert, Kind::RenderPdf, Kind::Ping] {
             assert!(k.is_request(), "{k:?}");
         }
-        for k in [Kind::Issues, Kind::Ack, Kind::Pong, Kind::Ready, Kind::Error] {
+        for k in [Kind::Issues, Kind::Converted, Kind::Pdf, Kind::Ack, Kind::Pong, Kind::Ready, Kind::Error] {
             assert!(!k.is_request(), "{k:?}");
         }
+    }
+
+    fn sample_convert() -> ConvertRequest {
+        ConvertRequest {
+            format: "rtf".into(),
+            direction: ConvertDirection::Import,
+            password: Some("open-sesame".into()),
+            input: b"{\\rtf1 hi}".to_vec(),
+        }
+    }
+
+    #[test]
+    fn binary_frame_roundtrip() {
+        let parts: [&[u8]; 3] = [b"meta", &[0x50, 0x4b, 1, 2, 3, 4], &[]];
+        let packed = pack_binary(&parts).unwrap();
+        assert_eq!(&packed[..4], b"WCB\x01");
+        assert_eq!(unpack_binary(&packed).unwrap(), parts);
+        // An empty payload is a valid zero-part frame.
+        assert_eq!(unpack_binary(&pack_binary(&[]).unwrap()).unwrap(), Vec::<&[u8]>::new());
+    }
+
+    #[test]
+    fn binary_frame_rejects_junk_without_panicking() {
+        for junk in [
+            &b""[..],
+            b"WCB",
+            b"WCB\x02\x00\x00\x00\x00",                         // wrong framing version
+            b"WCB\x01\x03\x00\x00",                              // truncated count
+            b"WCB\x01\x02\x00\x00\x00\x04\x00\x00\x00",          // truncated length table
+            b"WCB\x01\x01\x00\x00\x00\xff\xff\xff\xffpartial",   // part overruns the frame
+            b"WCB\x01\x00\x00\x00\x00leftover",                  // trailing bytes
+        ] {
+            assert!(unpack_binary(junk).is_err(), "{junk:?}");
+        }
+        // A part count beyond the sanity bound is TooLarge, not an allocation.
+        let mut over = b"WCB\x01".to_vec();
+        over.extend_from_slice(&(MAX_BINARY_PARTS as u32 + 1).to_le_bytes());
+        over.extend_from_slice(&vec![0u8; (MAX_BINARY_PARTS + 1) * 4]);
+        assert!(matches!(unpack_binary(&over), Err(ProtoError::TooLarge { .. })));
+    }
+
+    #[test]
+    fn convert_request_roundtrip() {
+        let req = sample_convert();
+        let bytes = encode_convert_request(&req).unwrap();
+        // The wire frame is [metaJson, inputBytes]: the file bytes are raw, not JSON.
+        let parts = unpack_binary(&bytes).unwrap();
+        assert_eq!(parts.len(), 2);
+        let meta: serde_json::Value = serde_json::from_slice(parts[0]).unwrap();
+        assert_eq!(meta["format"], "rtf");
+        assert_eq!(meta["direction"], "import");
+        assert_eq!(parts[1], req.input.as_slice());
+        assert_eq!(decode_convert_request(&bytes).unwrap(), req);
+
+        let req = ConvertRequest { password: None, ..sample_convert() };
+        let meta: serde_json::Value = serde_json::from_slice(&unpack_binary(&encode_convert_request(&req).unwrap()).unwrap()[0]).unwrap();
+        assert_eq!(meta["password"], serde_json::Value::Null);
+        assert_eq!(decode_convert_request(&encode_convert_request(&req).unwrap()).unwrap(), req);
+    }
+
+    #[test]
+    fn convert_request_rejects_bad_shapes() {
+        // Not a frame at all.
+        assert!(matches!(decode_convert_request(b"{}"), Err(ProtoError::Decode(_))));
+        // One part (metadata only, no input bytes).
+        let meta = encode_payload(&serde_json::json!({"format": "rtf", "direction": "import"})).unwrap();
+        assert!(matches!(decode_convert_request(&pack_binary(&[&meta]).unwrap()), Err(ProtoError::Decode(_))));
+        // Two parts but a broken metadata part.
+        assert!(matches!(decode_convert_request(&pack_binary(&[b"{broken", b"x"]).unwrap()), Err(ProtoError::Decode(_))));
+    }
+
+    #[test]
+    fn pdf_request_roundtrip() {
+        let req = PdfRenderRequest {
+            docx: b"PK\x03\x04 fake package".to_vec(),
+            fonts: vec![
+                FontCopy { family: "Inter".into(), style: "Regular".into(), bytes: vec![0, 1, 0, 0, 9] },
+                FontCopy { family: "Liter".into(), style: "Italic".into(), bytes: vec![0, 1, 0, 0, 8, 8, 8] },
+            ],
+        };
+        let bytes = encode_pdf_request(&req).unwrap();
+        let parts = unpack_binary(&bytes).unwrap();
+        assert_eq!(parts.len(), 4);
+        let meta: serde_json::Value = serde_json::from_slice(parts[0]).unwrap();
+        assert_eq!(meta["fonts"][0]["family"], "Inter");
+        assert_eq!(meta["fonts"][1]["style"], "Italic");
+        assert_eq!(parts[1], req.docx.as_slice());
+        assert_eq!(parts[2], req.fonts[0].bytes.as_slice());
+        assert_eq!(parts[3], req.fonts[1].bytes.as_slice());
+        assert_eq!(decode_pdf_request(&bytes).unwrap(), req);
+        // A request without fonts is meta + docx and nothing else.
+        let bare = PdfRenderRequest { fonts: Vec::new(), ..req };
+        assert_eq!(decode_pdf_request(&encode_pdf_request(&bare).unwrap()).unwrap(), bare);
+    }
+
+    #[test]
+    fn pdf_request_rejects_font_count_mismatch() {
+        // Two font parts but a metadata part naming one.
+        let meta = encode_payload(&serde_json::json!({"fonts": [{"family": "A", "style": "B"}]})).unwrap();
+        let frame = pack_binary(&[&meta, b"docx", b"font0", b"font1"]).unwrap();
+        assert!(matches!(decode_pdf_request(&frame), Err(ProtoError::Decode(_))));
+    }
+
+    #[test]
+    fn convert_and_pdf_request_bounds() {
+        let ok = sample_convert();
+        assert_eq!(convert_request_error(&ok), None);
+        assert_eq!(convert_request_error(&ConvertRequest { format: "x".repeat(MAX_FORMAT_BYTES + 1), ..ok.clone() }), Some(ErrorCode::TooLarge));
+        assert_eq!(
+            convert_request_error(&ConvertRequest { password: Some("p".repeat(MAX_PASSWORD_BYTES + 1)), ..ok.clone() }),
+            Some(ErrorCode::TooLarge)
+        );
+        assert_eq!(convert_request_error(&ConvertRequest { input: vec![0; MAX_CONVERT_BYTES + 1], ..ok.clone() }), Some(ErrorCode::TooLarge));
+        assert_eq!(convert_request_error(&ConvertRequest { format: String::new(), ..ok.clone() }), Some(ErrorCode::BadRequest));
+
+        let ok = PdfRenderRequest { docx: b"PK".to_vec(), fonts: vec![FontCopy { family: "a".into(), style: "b".into(), bytes: vec![1; 8] }] };
+        assert_eq!(pdf_request_error(&ok), None);
+        assert_eq!(pdf_request_error(&PdfRenderRequest { docx: vec![0; MAX_PDF_DOC_BYTES + 1], fonts: Vec::new() }), Some(ErrorCode::TooLarge));
+        assert_eq!(
+            pdf_request_error(&PdfRenderRequest {
+                fonts: (0..MAX_FONT_COPIES + 1).map(|_| FontCopy { family: String::new(), style: String::new(), bytes: Vec::new() }).collect(),
+                ..ok.clone()
+            }),
+            Some(ErrorCode::TooLarge)
+        );
+        assert_eq!(
+            pdf_request_error(&PdfRenderRequest { fonts: vec![FontCopy { bytes: vec![0; MAX_FONT_TOTAL_BYTES], ..ok.fonts[0].clone() }], ..ok.clone() }),
+            None,
+            "a font batch at the limit fits"
+        );
+        assert_eq!(
+            pdf_request_error(&PdfRenderRequest { fonts: vec![FontCopy { bytes: vec![0; MAX_FONT_TOTAL_BYTES + 1], ..ok.fonts[0].clone() }], ..ok.clone() }),
+            Some(ErrorCode::TooLarge)
+        );
+        assert_eq!(pdf_request_error(&PdfRenderRequest { docx: Vec::new(), fonts: Vec::new() }), Some(ErrorCode::BadRequest));
     }
 }
