@@ -11,3 +11,6 @@ plan/
 /craft-fonts/
 /open-docs/
 /apps/wordcraft-web/target-assets/
+
+# wrangler local state (deploy logs, caches)
+.wrangler/
