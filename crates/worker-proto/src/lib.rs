@@ -407,8 +407,9 @@ pub fn unpack_binary(bytes: &[u8]) -> Result<Vec<&[u8]>, ProtoError> {
     let table_len = count.checked_mul(4).ok_or_else(|| bad("part table overflows"))?;
     let (table, mut rest) = rest.split_at_checked(table_len).ok_or_else(|| bad("truncated part table"))?;
     let mut parts = Vec::with_capacity(count);
-    for len_b in table.chunks_exact(4) {
-        let len = u32::from_le_bytes([len_b[0], len_b[1], len_b[2], len_b[3]]) as usize;
+    let (lens, _) = table.as_chunks::<4>();
+    for len_b in lens {
+        let len = u32::from_le_bytes(*len_b) as usize;
         let (part, tail) = rest.split_at_checked(len).ok_or_else(|| bad("part overruns the frame"))?;
         parts.push(part);
         rest = tail;
@@ -421,11 +422,7 @@ pub fn unpack_binary(bytes: &[u8]) -> Result<Vec<&[u8]>, ProtoError> {
 
 /// Encode a `convert` payload: a two-part [`pack_binary`] frame, JSON metadata then `input`.
 pub fn encode_convert_request(req: &ConvertRequest) -> Result<Vec<u8>, ProtoError> {
-    let meta = encode_payload(&ConvertMeta {
-        format: req.format.clone(),
-        direction: req.direction,
-        password: req.password.clone(),
-    })?;
+    let meta = encode_payload(&ConvertMeta { format: req.format.clone(), direction: req.direction, password: req.password.clone() })?;
     pack_binary(&[&meta, &req.input])
 }
 
@@ -442,9 +439,7 @@ pub fn decode_convert_request(bytes: &[u8]) -> Result<ConvertRequest, ProtoError
 
 /// Encode a `renderPdf` payload: `[metaJson, docx, font0, font1, …]`.
 pub fn encode_pdf_request(req: &PdfRenderRequest) -> Result<Vec<u8>, ProtoError> {
-    let meta = encode_payload(&PdfMeta {
-        fonts: req.fonts.iter().map(|f| FontMeta { family: f.family.clone(), style: f.style.clone() }).collect(),
-    })?;
+    let meta = encode_payload(&PdfMeta { fonts: req.fonts.iter().map(|f| FontMeta { family: f.family.clone(), style: f.style.clone() }).collect() })?;
     let mut parts: Vec<&[u8]> = Vec::with_capacity(req.fonts.len().saturating_add(2));
     parts.push(&meta);
     parts.push(&req.docx);
@@ -792,11 +787,11 @@ mod tests {
         for junk in [
             &b""[..],
             b"WCB",
-            b"WCB\x02\x00\x00\x00\x00",                         // wrong framing version
-            b"WCB\x01\x03\x00\x00",                              // truncated count
-            b"WCB\x01\x02\x00\x00\x00\x04\x00\x00\x00",          // truncated length table
-            b"WCB\x01\x01\x00\x00\x00\xff\xff\xff\xffpartial",   // part overruns the frame
-            b"WCB\x01\x00\x00\x00\x00leftover",                  // trailing bytes
+            b"WCB\x02\x00\x00\x00\x00",                        // wrong framing version
+            b"WCB\x01\x03\x00\x00",                            // truncated count
+            b"WCB\x01\x02\x00\x00\x00\x04\x00\x00\x00",        // truncated length table
+            b"WCB\x01\x01\x00\x00\x00\xff\xff\xff\xffpartial", // part overruns the frame
+            b"WCB\x01\x00\x00\x00\x00leftover",                // trailing bytes
         ] {
             assert!(unpack_binary(junk).is_err(), "{junk:?}");
         }
@@ -821,7 +816,7 @@ mod tests {
         assert_eq!(decode_convert_request(&bytes).unwrap(), req);
 
         let req = ConvertRequest { password: None, ..sample_convert() };
-        let meta: serde_json::Value = serde_json::from_slice(&unpack_binary(&encode_convert_request(&req).unwrap()).unwrap()[0]).unwrap();
+        let meta: serde_json::Value = serde_json::from_slice(unpack_binary(&encode_convert_request(&req).unwrap()).unwrap()[0]).unwrap();
         assert_eq!(meta["password"], serde_json::Value::Null);
         assert_eq!(decode_convert_request(&encode_convert_request(&req).unwrap()).unwrap(), req);
     }
@@ -892,12 +887,18 @@ mod tests {
             Some(ErrorCode::TooLarge)
         );
         assert_eq!(
-            pdf_request_error(&PdfRenderRequest { fonts: vec![FontCopy { bytes: vec![0; MAX_FONT_TOTAL_BYTES], ..ok.fonts[0].clone() }], ..ok.clone() }),
+            pdf_request_error(&PdfRenderRequest {
+                fonts: vec![FontCopy { bytes: vec![0; MAX_FONT_TOTAL_BYTES], ..ok.fonts[0].clone() }],
+                ..ok.clone()
+            }),
             None,
             "a font batch at the limit fits"
         );
         assert_eq!(
-            pdf_request_error(&PdfRenderRequest { fonts: vec![FontCopy { bytes: vec![0; MAX_FONT_TOTAL_BYTES + 1], ..ok.fonts[0].clone() }], ..ok.clone() }),
+            pdf_request_error(&PdfRenderRequest {
+                fonts: vec![FontCopy { bytes: vec![0; MAX_FONT_TOTAL_BYTES + 1], ..ok.fonts[0].clone() }],
+                ..ok.clone()
+            }),
             Some(ErrorCode::TooLarge)
         );
         assert_eq!(pdf_request_error(&PdfRenderRequest { docx: Vec::new(), fonts: Vec::new() }), Some(ErrorCode::BadRequest));
