@@ -72,6 +72,9 @@ export function createProofWorker() {
 // (Vite/rolldown re-bundle it as an iife worker, whose format rejects the Trunk loader's
 // top-level `await init()`), and a plain string URL stays a same-origin module worker that
 // the browser loads straight from the package's files.
+/**
+ * @param {string} specifier
+ */
 function workerFrom(specifier) {
   const url = new URL(specifier, import.meta.url);
   return new Worker(url.href, { type: "module" });

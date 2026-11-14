@@ -1,3 +1,5 @@
+allowBuilds:
+  esbuild: true
 # Settings-only file (no packages: this fixture is not a workspace). esbuild's
 # install script is a no-op fallback when the platform package
 # (@esbuild/<os>-<arch>) resolves, which pnpm installs as an optional dep.

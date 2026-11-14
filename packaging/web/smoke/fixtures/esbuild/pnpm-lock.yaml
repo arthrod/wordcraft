@@ -180,7 +180,7 @@ packages:
     hasBin: true
 
   wordcraft-web@file:../../tarball/wordcraft-web.tgz:
-    resolution: {integrity: sha512-+qZapDzNSbcFBJ9iMU74R3EeuvIvK7fcxxNxnW065YkzXJND6DOQafI8R6z0YjvwbGJhdHKJLhRODd7GxBD+dg==, tarball: file:../../tarball/wordcraft-web.tgz}
+    resolution: {integrity: sha512-wvK/TP8OsXx0isAXZFHHQqf8XxOkNXCi87UOLUhjDN4usbF8vodyWjg58U0LEcD8jTISuOREF687TYEZdKZgjA==, tarball: file:../../tarball/wordcraft-web.tgz}
     version: 0.18.1
 
 snapshots:
