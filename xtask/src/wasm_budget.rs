@@ -1,6 +1,8 @@
-//! `cargo xtask wasm-budget`: inspect `dist/web/wordcraft-web*_bg.wasm`, report section
-//! sizes and compressed size, and enforce size + symbol ceilings.
+//! `cargo xtask wasm-budget`: inspect `dist/web/wordcraft-web*_bg.wasm` and every
+//! `dist/web/wordcraft-worker-*_bg.wasm`, report section sizes and the gzip/Brotli sizes, and
+//! enforce size + symbol ceilings per artifact and for everything loaded together.
 
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -17,12 +19,30 @@ pub const MAX_GZIPPED_BYTES: usize = 7_100_000;
 pub const MAX_DATA_SECTION_BYTES: usize = 2_750_000;
 pub const CLOUDFLARE_MAX_FILE_BYTES: usize = 25 * 1024 * 1024;
 
-/// Per-dedicated-worker ceilings (plan §3.5), shared by every `apps/wordcraft-worker-*`
-/// artifact until each is measured on a real build — provisional, so each worker's limit
-/// ratchets down to its measured size plus headroom once numbers exist. The 25 MiB per-file
-/// platform ceiling applies to every dist file regardless ([`check_static_file_sizes`]).
-pub const MAX_WORKER_UNCOMPRESSED_BYTES: usize = 12_000_000;
-pub const MAX_WORKER_GZIPPED_BYTES: usize = 4_000_000;
+/// "Everything loaded" ceilings (plan §3.5): the main module plus every dedicated worker a
+/// session may fetch, raw and gzipped. Each worker links its own copy of std, alloc and the
+/// document model, so the total grows as workers land even while the main module shrinks —
+/// this is the row that catches a sum that quietly drifts past the platform's 25 MiB file
+/// limit (still enforced per file by [`check_static_file_sizes`]) or the story the size work
+/// tells. Ratcheted 2026-11-14 from the release build: 17,749,525 + 1,015,087 = 18,764,612
+/// raw and 6,973,466 + 637,274 = 7,610,740 gzip measured.
+pub const MAX_TOTAL_UNCOMPRESSED_BYTES: usize = 19_000_000;
+pub const MAX_TOTAL_GZIPPED_BYTES: usize = 7_750_000;
+
+/// One dedicated worker's ceilings, at the artifact's measured size plus headroom (plan §3.5:
+/// workers get their own rows, not a shared provisional number). A worker artifact with no
+/// row fails the budget — add one from a real build's measurements, never by copying another
+/// worker's numbers. Ceilings ratchet down; raising one is a recorded decision in the plan.
+pub struct WorkerCeiling {
+    /// The artifact's file stem (`wordcraft-worker-proof` for `wordcraft-worker-proof_bg.wasm`).
+    pub name: &'static str,
+    pub max_raw: usize,
+    pub max_gzip: usize,
+}
+
+/// Measured 2026-11-14 on the release build (`trunk build --release`): 1,015,087 raw and
+/// 637,274 gzip → ~8% headroom.
+pub const WORKER_CEILINGS: &[WorkerCeiling] = &[WorkerCeiling { name: "wordcraft-worker-proof", max_raw: 1_100_000, max_gzip: 700_000 }];
 
 pub const FORBIDDEN_SYMBOLS: &[&str] = &["krilla::", "wordcraft_docbin::"];
 
@@ -31,6 +51,11 @@ pub struct WasmReport {
     pub path: PathBuf,
     pub total_bytes: usize,
     pub gzip_bytes: usize,
+    /// Brotli quality 11, lgwin 24 — the `.wasm.br` sidecar size when one exists and matches
+    /// (plan §2.2), else a fresh compression. Reported for every artifact (plan §3.5); the
+    /// ceilings stay on raw and gzip because Brotli quality 11 takes ~50 s on the main module
+    /// and a budget gate must stay runnable.
+    pub brotli_bytes: usize,
     pub code_bytes: usize,
     pub data_bytes: usize,
     pub custom_bytes: usize,
@@ -110,7 +135,26 @@ pub fn analyze_wasm_bytes(path: PathBuf, bytes: &[u8], gzip_bytes: usize) -> Res
         }
     }
 
-    Ok(WasmReport { path, total_bytes: bytes.len(), gzip_bytes, code_bytes, data_bytes, custom_bytes, found_forbidden, has_name_section })
+    Ok(WasmReport {
+        path,
+        total_bytes: bytes.len(),
+        gzip_bytes,
+        brotli_bytes: 0,
+        code_bytes,
+        data_bytes,
+        custom_bytes,
+        found_forbidden,
+        has_name_section,
+    })
+}
+
+impl WasmReport {
+    /// Fill in the Brotli column (plan §3.5); measured beside the report, not inside the
+    /// section walk.
+    pub fn with_brotli(mut self, brotli_bytes: usize) -> WasmReport {
+        self.brotli_bytes = brotli_bytes;
+        self
+    }
 }
 
 pub fn check_budget(r: &WasmReport) -> Vec<String> {
@@ -176,30 +220,61 @@ pub fn find_worker_wasms(dist_web: &Path) -> Vec<PathBuf> {
     matches
 }
 
+/// The `wordcraft-worker-<name>_bg.wasm` stem a [`WorkerCeiling`] is looked up by.
+fn worker_stem(path: &Path) -> String {
+    path.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_suffix("_bg.wasm")).unwrap_or_default().to_string()
+}
+
 /// One row of the worker section of the budget report (plan §3.5's per-artifact table:
-/// raw + gzip, with the per-file platform ceiling enforced by [`check_static_file_sizes`]).
+/// raw, gzip and Brotli, against that worker's own measured ceiling; the per-file platform
+/// ceiling is enforced by [`check_static_file_sizes`]).
 fn worker_report_line(r: &WasmReport) -> String {
-    let name = r.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let stem = worker_stem(&r.path);
+    let (raw_budget, gz_budget) = WORKER_CEILINGS
+        .iter()
+        .find(|c| c.name == stem)
+        .map(|c| (format!("{}", c.max_raw), format!("{}", c.max_gzip)))
+        .unwrap_or_else(|| ("UNREGISTERED".into(), "UNREGISTERED".into()));
     format!(
-        "  worker {name}: uncompressed {:>10} bytes (budget {:>10}), gzip -9 {:>10} bytes (budget {:>10})",
-        r.total_bytes, MAX_WORKER_UNCOMPRESSED_BYTES, r.gzip_bytes, MAX_WORKER_GZIPPED_BYTES
+        "  worker {stem}: uncompressed {:>10} bytes (budget {:>10}), gzip -9 {:>10} bytes (budget {:>10}), brotli q11 {:>10} bytes",
+        r.total_bytes, raw_budget, r.gzip_bytes, gz_budget, r.brotli_bytes
     )
 }
 
 fn check_worker_budget(r: &WasmReport) -> Vec<String> {
-    let name = r.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let stem = worker_stem(&r.path);
+    let Some(ceiling) = WORKER_CEILINGS.iter().find(|c| c.name == stem) else {
+        return vec![format!(
+            "worker {stem} has no ceiling in WORKER_CEILINGS: measure it on a release build and add a row at measured size plus headroom (a shared or guessed number hides growth)"
+        )];
+    };
     let mut errs = Vec::new();
     if r.has_name_section {
-        errs.push(format!("worker {name} carries a `name` custom section: `wasm-opt` did not run (build with `trunk build --release`), so this artifact is unoptimized and cannot be measured or shipped"));
+        errs.push(format!("worker {stem} carries a `name` custom section: `wasm-opt` did not run (build with `trunk build --release`), so this artifact is unoptimized and cannot be measured or shipped"));
     }
-    if r.total_bytes > MAX_WORKER_UNCOMPRESSED_BYTES {
-        errs.push(format!("worker {name} uncompressed {} bytes > ceiling {} bytes", r.total_bytes, MAX_WORKER_UNCOMPRESSED_BYTES));
+    if r.total_bytes > ceiling.max_raw {
+        errs.push(format!("worker {stem} uncompressed {} bytes > ceiling {} bytes", r.total_bytes, ceiling.max_raw));
     }
-    if r.gzip_bytes > MAX_WORKER_GZIPPED_BYTES {
-        errs.push(format!("worker {name} gzipped {} bytes > ceiling {} bytes", r.gzip_bytes, MAX_WORKER_GZIPPED_BYTES));
+    if r.gzip_bytes > ceiling.max_gzip {
+        errs.push(format!("worker {stem} gzipped {} bytes > ceiling {} bytes", r.gzip_bytes, ceiling.max_gzip));
     }
     if !r.found_forbidden.is_empty() {
-        errs.push(format!("forbidden offloaded symbols found in worker {name}: {}", r.found_forbidden.join(", ")));
+        errs.push(format!("forbidden offloaded symbols found in worker {stem}: {}", r.found_forbidden.join(", ")));
+    }
+    errs
+}
+
+/// The "everything loaded" totals (plan §3.5): the main module plus every worker, raw and
+/// gzipped, against [`MAX_TOTAL_UNCOMPRESSED_BYTES`] / [`MAX_TOTAL_GZIPPED_BYTES`].
+fn check_total_budget(main: &WasmReport, workers: &[WasmReport]) -> Vec<String> {
+    let raw: usize = std::iter::once(main.total_bytes).chain(workers.iter().map(|w| w.total_bytes)).fold(0usize, usize::saturating_add);
+    let gzip: usize = std::iter::once(main.gzip_bytes).chain(workers.iter().map(|w| w.gzip_bytes)).fold(0usize, usize::saturating_add);
+    let mut errs = Vec::new();
+    if raw > MAX_TOTAL_UNCOMPRESSED_BYTES {
+        errs.push(format!("everything loaded: {raw} uncompressed bytes (main + workers) > ceiling {MAX_TOTAL_UNCOMPRESSED_BYTES}"));
+    }
+    if gzip > MAX_TOTAL_GZIPPED_BYTES {
+        errs.push(format!("everything loaded: {gzip} gzipped bytes (main + workers) > ceiling {MAX_TOTAL_GZIPPED_BYTES}"));
     }
     errs
 }
@@ -252,6 +327,32 @@ fn gzip_size(path: &Path, wasm_bytes: &[u8]) -> Result<usize, String> {
         return Err(format!("gzip exited with {}", out.status));
     }
     Ok(out.stdout.len())
+}
+
+/// Whether the Brotli sidecar at `br_path` decompresses to exactly `wasm_bytes`.
+fn br_sidecar_matches_wasm(br_path: &Path, wasm_bytes: &[u8]) -> bool {
+    let Ok(file) = std::fs::File::open(br_path) else { return false };
+    let mut reader = brotli::Decompressor::new(file, 1 << 16);
+    let mut out = Vec::with_capacity(wasm_bytes.len());
+    reader.read_to_end(&mut out).is_ok() && out == wasm_bytes
+}
+
+/// Brotli quality 11, lgwin 24 — the same numbers `xtask/src/brotli.rs` writes sidecars with
+/// (plan §2.2). A matching `<path>.br` sidecar answers directly; otherwise the artifact is
+/// compressed in-process (slow at this quality on the main module, but the sidecar is what a
+/// release build leaves behind and the number must not be a lie).
+fn brotli_size(path: &Path, wasm_bytes: &[u8]) -> Result<usize, String> {
+    let br_path = PathBuf::from(format!("{}.br", path.display()));
+    if br_path.is_file()
+        && let Ok(meta) = std::fs::metadata(&br_path)
+        && br_sidecar_matches_wasm(&br_path, wasm_bytes)
+    {
+        return usize::try_from(meta.len()).map_err(|_| "brotli file too large".to_string());
+    }
+    let params = brotli::enc::BrotliEncoderParams { quality: 11, lgwin: 24, ..brotli::enc::BrotliEncoderParams::default() };
+    let mut out = Vec::new();
+    brotli::BrotliCompress(&mut &wasm_bytes[..], &mut out, &params).map_err(|e| format!("brotli compress: {e}"))?;
+    Ok(out.len())
 }
 
 fn extract_attr<'a>(tag: &'a str, attr: &str) -> Option<&'a str> {
@@ -378,7 +479,8 @@ pub fn run(root: &Path, report_only: bool) -> Result<(), String> {
     let wasm_path = find_core_wasm(&dist_web)?;
     let bytes = std::fs::read(&wasm_path).map_err(|e| format!("{}: {e}", wasm_path.display()))?;
     let gz = gzip_size(&wasm_path, &bytes)?;
-    let report = analyze_wasm_bytes(wasm_path, &bytes, gz)?;
+    let br = brotli_size(&wasm_path, &bytes)?;
+    let report = analyze_wasm_bytes(wasm_path, &bytes, gz)?.with_brotli(br);
 
     println!("WordCraft Web WASM Budget Report ({}):", report.path.display());
     if report.has_name_section {
@@ -386,6 +488,7 @@ pub fn run(root: &Path, report_only: bool) -> Result<(), String> {
     }
     println!("  uncompressed: {:>10} bytes (budget {:>10})", report.total_bytes, MAX_UNCOMPRESSED_BYTES);
     println!("  gzip -9:      {:>10} bytes (budget {:>10})", report.gzip_bytes, MAX_GZIPPED_BYTES);
+    println!("  brotli q11:   {:>10} bytes (sidecar size when it matches; report column, no ceiling)", report.brotli_bytes);
     println!("  code (sec10): {:>10} bytes", report.code_bytes);
     println!("  data (sec11): {:>10} bytes (budget {:>10})", report.data_bytes, MAX_DATA_SECTION_BYTES);
     println!("  custom (sec0):{:>10} bytes", report.custom_bytes);
@@ -400,7 +503,8 @@ pub fn run(root: &Path, report_only: bool) -> Result<(), String> {
     for path in &worker_wasms {
         let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let gz = gzip_size(path, &bytes)?;
-        worker_reports.push(analyze_wasm_bytes(path.clone(), &bytes, gz)?);
+        let br = brotli_size(path, &bytes)?;
+        worker_reports.push(analyze_wasm_bytes(path.clone(), &bytes, gz)?.with_brotli(br));
     }
     if worker_reports.is_empty() {
         println!("  workers: no wordcraft-worker-*_bg.wasm in {}", dist_web.display());
@@ -408,6 +512,12 @@ pub fn run(root: &Path, report_only: bool) -> Result<(), String> {
     for r in &worker_reports {
         println!("{}", worker_report_line(r));
     }
+    let total_raw: usize =
+        std::iter::once(report.total_bytes).chain(worker_reports.iter().map(|w| w.total_bytes)).fold(0usize, usize::saturating_add);
+    let total_gz: usize = std::iter::once(report.gzip_bytes).chain(worker_reports.iter().map(|w| w.gzip_bytes)).fold(0usize, usize::saturating_add);
+    println!(
+        "  everything loaded: {total_raw:>10} bytes raw (budget {MAX_TOTAL_UNCOMPRESSED_BYTES:>10}), {total_gz:>10} gzip (budget {MAX_TOTAL_GZIPPED_BYTES:>10})"
+    );
 
     let sri_res = verify_sri_digests(&dist_web);
     match &sri_res {
@@ -434,6 +544,7 @@ pub fn run(root: &Path, report_only: bool) -> Result<(), String> {
     for r in &worker_reports {
         errs.extend(check_worker_budget(r));
     }
+    errs.extend(check_total_budget(&report, &worker_reports));
     if let Err(e) = sri_res {
         errs.push(e);
     }
@@ -533,12 +644,36 @@ mod tests {
 
     #[test]
     fn worker_budget_flags_over_limit_and_forbidden() {
+        let ceiling = WORKER_CEILINGS.iter().find(|c| c.name == "wordcraft-worker-proof").expect("the proofing worker is registered");
         let bytes = minimal_wasm(1024, 512, b"krilla::Page");
-        let rep = analyze_wasm_bytes(PathBuf::from("wordcraft-worker-proof_bg.wasm"), &bytes, MAX_WORKER_GZIPPED_BYTES + 1).unwrap();
+        let rep = analyze_wasm_bytes(PathBuf::from("wordcraft-worker-proof_bg.wasm"), &bytes, ceiling.max_gzip + 1).unwrap();
         let errs = check_worker_budget(&rep);
         assert!(errs.iter().any(|e| e.contains("gzipped")) && errs.iter().any(|e| e.contains("forbidden")), "{errs:?}");
+        // Over the raw ceiling: a padded module, since sizes come from the bytes.
+        let padded = minimal_wasm(ceiling.max_raw + 1, 512, b"safe_symbol");
+        let rep = analyze_wasm_bytes(PathBuf::from("wordcraft-worker-proof_bg.wasm"), &padded, 400).unwrap();
+        let errs = check_worker_budget(&rep);
+        assert!(errs.iter().any(|e| e.contains("uncompressed")), "{errs:?}");
         let ok = analyze_wasm_bytes(PathBuf::from("wordcraft-worker-proof_bg.wasm"), &minimal_wasm(1024, 512, b"safe_symbol"), 400).unwrap();
         assert!(check_worker_budget(&ok).is_empty());
+    }
+
+    #[test]
+    fn unregistered_worker_and_totals_flag() {
+        // A worker with no measured ceiling row is an error, not a pass: guessed or shared
+        // numbers hide growth.
+        let rep = analyze_wasm_bytes(PathBuf::from("wordcraft-worker-pdf_bg.wasm"), &minimal_wasm(1024, 512, b"safe_symbol"), 400).unwrap();
+        let errs = check_worker_budget(&rep);
+        assert!(errs.iter().any(|e| e.contains("no ceiling") && e.contains("wordcraft-worker-pdf")), "{errs:?}");
+
+        // The everything-loaded total: main + workers against the total ceilings.
+        let main = analyze_wasm_bytes(PathBuf::from("m.wasm"), &minimal_wasm(1000, 100, b"x"), 500).unwrap();
+        let w = analyze_wasm_bytes(PathBuf::from("wordcraft-worker-proof_bg.wasm"), &minimal_wasm(1000, 100, b"x"), 500).unwrap();
+        assert!(check_total_budget(&main, std::slice::from_ref(&w)).is_empty());
+        let huge_main = WasmReport { total_bytes: MAX_TOTAL_UNCOMPRESSED_BYTES, gzip_bytes: MAX_TOTAL_GZIPPED_BYTES, ..main.clone() };
+        let worker = WasmReport { total_bytes: 1, gzip_bytes: 1, ..w };
+        let errs = check_total_budget(&huge_main, &[worker]);
+        assert!(errs.iter().any(|e| e.contains("uncompressed")) && errs.iter().any(|e| e.contains("gzipped")), "{errs:?}");
     }
 
     #[test]
