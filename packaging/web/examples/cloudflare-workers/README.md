@@ -46,6 +46,18 @@ Measured on release `wordcraft-cli convert`:
 
 Because PDF pagination/font-subsetting on large documents exceeds Cloudflare's 128 MB isolate memory cap, `/api/convert` limits payloads to `4 MiB` (`413 Payload Too Large`) and scopes edge conversions to lightweight format codecs (`md`, `html`, `txt`, `docx`), while client-side WebAssembly handles arbitrary full-document editing locally without uploads.
 
+### `/api/preview-page` gate (4.3, measured 2026-11-14)
+
+The page-1 PNG preview needs the Paid plan's CPU budget; it does not fit the Free plan's
+10 ms per request, so the Demo Bar button stays unwired while the Worker is on Free.
+
+| Measurement (deployed Worker, wrangler tail) | Value |
+| :-- | :-- |
+| Worker bundle | 12,758.94 KiB (gzip 4,843.01 KiB) |
+| Worker startup | 6-7 ms (limit 1 s) |
+| `POST /api/preview-page`, 1 page, first request (cold isolate) | **151 ms CPU** |
+| same, warm | **36 ms CPU** |
+
 ## Privacy & Rate Limiting
 
 - **Default Local Mode**: In `100% Browser (Local WASM)` mode, no document bytes leave the browser.
