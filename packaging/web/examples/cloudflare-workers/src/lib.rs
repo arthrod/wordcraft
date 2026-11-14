@@ -72,16 +72,19 @@ fn accepts_brotli(header: &str) -> bool {
 /// every load — a worker cached past the hashed main module it talks to would fail the
 /// protocol version check for as long as the cache lives.
 fn wasm_sidecar_cache_control(path: &str) -> &'static str {
-    if path.rsplit('/').next().is_some_and(|name| name.starts_with("wordcraft-worker-")) {
-        "no-cache"
-    } else {
-        "public, max-age=31536000, immutable"
-    }
+    if path.rsplit('/').next().is_some_and(|name| name.starts_with("wordcraft-worker-")) { "no-cache" } else { "public, max-age=31536000, immutable" }
 }
 
 /// Try to serve the precompressed Brotli sidecar `<path>.br` for a `.wasm` request from the
 /// `ASSETS` binding. `None` on any failure (missing sidecar, non-200, fetch or header error) so
 /// the caller falls back to the plain asset path; this never yields an error response.
+///
+/// The binding's response carries *immutable* headers (workerd guards responses fetched through
+/// a binding: mutating them throws "Can't modify immutable headers"), so the sidecar cannot be
+/// tagged in place — verified live 2026-11-14, and the reason this path silently fell through to
+/// the plain asset before. Instead the body is taken out (`bytes()` buffers it, ≈5 MB, far
+/// under the isolate's 128 MB) and a fresh response carries the tags, with `EncodeBody::Manual`
+/// so the runtime does not compress the already-Brotli body again.
 async fn brotli_wasm_sidecar(env: &Env, url: &Url, method: Method) -> Option<Response> {
     let mut br_url = url.clone();
     br_url.set_path(&format!("{}.br", url.path()));
@@ -92,7 +95,8 @@ async fn brotli_wasm_sidecar(env: &Env, url: &Url, method: Method) -> Option<Res
     if resp.status_code() != 200 {
         return None;
     }
-    let headers = resp.headers_mut();
+    let body = resp.bytes().await.ok()?;
+    let headers = Headers::new();
     let tagged = [
         ("Content-Type", "application/wasm"),
         ("Content-Encoding", "br"),
@@ -103,8 +107,7 @@ async fn brotli_wasm_sidecar(env: &Env, url: &Url, method: Method) -> Option<Res
     if tagged.iter().any(|(k, v)| headers.set(k, v).is_err()) {
         return None;
     }
-    // The body is already Brotli: stop the runtime compressing it again.
-    Some(resp.with_encode_body(EncodeBody::Manual))
+    Some(Response::from_bytes(body).ok()?.with_headers(headers).with_encode_body(EncodeBody::Manual))
 }
 
 #[derive(Deserialize)]
