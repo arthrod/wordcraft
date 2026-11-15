@@ -145,6 +145,12 @@ pub(crate) fn read_package(bytes: &[u8], chunks: Option<ChunkImporter>) -> Resul
     read_opened(&Package::open(bytes)?, chunks)
 }
 
+/// [`read_package`] with the caller's decompression budgets ([`crate::package::MAX_PART`] and
+/// [`crate::package::MAX_TOTAL`] unless it has tighter ones, e.g. a Worker isolate).
+pub(crate) fn read_package_limited(bytes: &[u8], chunks: Option<ChunkImporter>, max_part: u64, max_total: u64) -> Result<Document, DocxError> {
+    read_opened(&Package::open_limited(bytes, max_part, max_total)?, chunks)
+}
+
 /// Read a package whose parts are already unpacked (from a zip, a Flat OPC file or a converted
 /// Word 2003 XML document).
 pub(crate) fn read_opened(pkg: &Package, chunks: Option<ChunkImporter>) -> Result<Document, DocxError> {

@@ -28,6 +28,13 @@ use worker::*;
 /// Chosen from the Step 5.2a benchmark so isolate peak memory stays well below Cloudflare's 128 MB cap.
 const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
 
+/// Decompression budgets for request-supplied `.docx` input, passed to `wordcraft_docx::read_limited`.
+/// The 4 MiB body cap bounds the *compressed* package only; without these a small zip could inflate
+/// to the crate defaults (256 MiB per part, 512 MiB total) and blow the isolate's 128 MB. 64 MiB
+/// total leaves ample room for the document model, layout and the page-1 raster on top.
+const DOCX_MAX_PART_BYTES: u64 = 32 * 1024 * 1024;
+const DOCX_MAX_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
+
 /// The 413 message both endpoints share.
 const BODY_TOO_LARGE: &str = "Document exceeds 4 MiB Cloudflare edge cap; use Local WASM mode instead.";
 
@@ -229,7 +236,7 @@ async fn main(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
             _ => return json_error(400, "Unsupported preview format (expected md or docxBase64)"),
         };
         let doc = match parsed.from.as_str() {
-            "docxBase64" => match wordcraft_docx::read(&input_bytes) {
+            "docxBase64" => match wordcraft_docx::read_limited(&input_bytes, DOCX_MAX_PART_BYTES, DOCX_MAX_TOTAL_BYTES) {
                 Ok(d) => d,
                 Err(e) => return json_error(422, &format!("DOCX import error: {e}")),
             },
@@ -277,7 +284,7 @@ async fn main(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
         };
 
         let doc = match parsed.from.as_str() {
-            "docxBase64" => match wordcraft_docx::read(&input_bytes) {
+            "docxBase64" => match wordcraft_docx::read_limited(&input_bytes, DOCX_MAX_PART_BYTES, DOCX_MAX_TOTAL_BYTES) {
                 Ok(d) => d,
                 Err(e) => return json_error(422, &format!("DOCX import error: {e}")),
             },

@@ -51,7 +51,7 @@ const docxBytes = await api.exportDocx();
 ### Bundler recipes (`Vite`, `Webpack`, `esbuild`)
 
 - **Vite:** exclude `"wordcraft-web"` from dependency pre-bundling (`optimizeDeps: { exclude: ["wordcraft-web"] }`) so `new URL("./wordcraft-web_bg.wasm", import.meta.url)` and `./i18n/` / `./samples/` relative URLs remain intact.
-- **CDN / custom asset paths:** serve `wordcraft-web_bg.wasm`, `i18n/`, and `samples/` from your public path and pass `{ wasmUrl, assetBase }`:
+- **CDN / custom asset paths:** serve `wordcraft-web_bg.wasm`, `i18n/`, `samples/`, `fonts/`, and all of the `wordcraft-worker-*` files (the `wordcraft-worker-{proof,codecs,pdf}_loader.js` workers and the `wordcraft-worker-*.js` / `wordcraft-worker-*_bg.wasm` files they load) from your public path and pass `{ wasmUrl, assetBase }`:
 
 ```js
 const api = await start({

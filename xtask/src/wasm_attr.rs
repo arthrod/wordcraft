@@ -8,10 +8,11 @@
 //! artifact under `target/wasm32-unknown-unknown/wasm-release/`, not the wasm-bindgen
 //! output in `dist/` (which renames and post-processes functions).
 //!
-//! Parsing is done here, without a wasmparser dependency: only two sections matter —
-//! the code section (id 10) for per-function encoded sizes, and the `name` custom
-//! section's function-name subsection for the symbol to attribute each size to. Every
-//! read is bounded; malformed input is an error, never a panic.
+//! Parsing is done here, without a wasmparser dependency: three sections matter —
+//! the import section (id 2) for the function-import count, the code section (id 10)
+//! for per-function encoded sizes, and the `name` custom section's function-name
+//! subsection for the symbol to attribute each size to. Every read is bounded;
+//! malformed input is an error, never a panic.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -90,6 +91,56 @@ fn parse_code_section(bytes: &[u8], start: usize, end: usize) -> Result<Vec<usiz
         return Err("trailing bytes after the last function body in code section".into());
     }
     Ok(sizes)
+}
+
+/// Skip a `limits` descriptor (`<flags> <min> [<max>]`); used by table and memory imports.
+fn skip_limits(bytes: &[u8], pos: &mut usize) -> Result<(), String> {
+    let flags = *bytes.get(*pos).ok_or_else(|| "truncated limits flags".to_string())?;
+    *pos += 1;
+    read_leb_u64(bytes, pos)?;
+    if flags & 0x01 != 0 {
+        read_leb_u64(bytes, pos)?;
+    }
+    Ok(())
+}
+
+/// The import section payload: `<count> <module name> <field name> <kind> <desc>*`.
+/// Function indices in the `name` section count imported functions first, so the
+/// code section's bodies need this count as an offset into the name map.
+fn count_function_imports(bytes: &[u8], start: usize, end: usize) -> Result<u64, String> {
+    let mut pos = start;
+    let count = read_leb_u64(bytes, &mut pos)?;
+    let mut funcs = 0u64;
+    for _ in 0..count {
+        let _module = read_name(bytes, &mut pos, end)?;
+        let _field = read_name(bytes, &mut pos, end)?;
+        let kind = *bytes.get(pos).ok_or_else(|| "truncated import kind".to_string())?;
+        pos += 1;
+        match kind {
+            0x00 => {
+                funcs = funcs.saturating_add(1);
+                read_leb_u64(bytes, &mut pos)?; // type index
+            }
+            0x01 => {
+                pos += 1; // element type
+                skip_limits(bytes, &mut pos)?;
+            }
+            0x02 => skip_limits(bytes, &mut pos)?,
+            0x03 => pos = pos.checked_add(2).ok_or_else(|| "import offset overflow".to_string())?,
+            0x04 => {
+                pos += 1; // tag attribute
+                read_leb_u64(bytes, &mut pos)?; // type index
+            }
+            other => return Err(format!("unknown import kind {other:#04x}")),
+        }
+        if pos > end {
+            return Err("import entry runs past the import section".into());
+        }
+    }
+    if pos != end {
+        return Err("trailing bytes in import section".into());
+    }
+    Ok(funcs)
 }
 
 /// Subsection 1 of the `name` custom section: a name-map of `<count> <funcidx, name>*`.
@@ -228,16 +279,20 @@ fn bucket_for_name(mangled: &str) -> String {
 
 /// Attribute each function entry to a bucket by its name in the function-name map;
 /// functions without a name entry (or with an unusable one) go to `other`.
-pub fn attribute(sizes: &[usize], names: &[(u32, String)]) -> Vec<Bucket> {
+/// `imported_funcs` is the number of imported functions: the name map's indices cover
+/// imports first, while `sizes` holds only the code section's defined-function bodies,
+/// so body `i` is function index `i + imported_funcs`.
+pub fn attribute(sizes: &[usize], names: &[(u32, String)], imported_funcs: u64) -> Vec<Bucket> {
     let mut map: BTreeMap<u32, &str> = BTreeMap::new();
     for (idx, name) in names {
         map.insert(*idx, name.as_str());
     }
     let mut buckets: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     for (i, &size) in sizes.iter().enumerate() {
-        // Function indices come from a u32 count in the code section, so try_from cannot
-        // fail in practice — but hostile bytes never get to panic on the conversion.
-        let idx = u32::try_from(i).ok();
+        // Function indices come from a u32 count in the code section plus the import
+        // count, so try_from cannot fail in practice — but hostile bytes never get to
+        // panic on the conversion.
+        let idx = u64::try_from(i).ok().and_then(|i| i.checked_add(imported_funcs)).and_then(|i| u32::try_from(i).ok());
         let bucket = idx.and_then(|idx| map.get(&idx)).map_or_else(|| "other".to_string(), |n| bucket_for_name(n));
         let entry = buckets.entry(bucket).or_insert((0, 0));
         entry.0 = entry.0.saturating_add(size);
@@ -267,6 +322,7 @@ pub fn analyze(path: PathBuf, bytes: &[u8]) -> Result<Attribution, String> {
     }
     let mut pos = 8usize;
     let mut code: Option<(usize, usize)> = None;
+    let mut imports: Option<(usize, usize)> = None;
     let mut names: Option<Vec<(u32, String)>> = None;
     while pos < bytes.len() {
         let id = *bytes.get(pos).ok_or_else(|| "unexpected EOF reading section id".to_string())?;
@@ -281,6 +337,12 @@ pub fn analyze(path: PathBuf, bytes: &[u8]) -> Result<Attribution, String> {
                 if let Some(parsed) = parse_custom_section(bytes, pos, end)? {
                     names = Some(parsed);
                 }
+            }
+            2 => {
+                if imports.is_some() {
+                    return Err(format!("{}: duplicate import section", path.display()));
+                }
+                imports = Some((pos, end));
             }
             10 => {
                 if code.is_some() {
@@ -298,10 +360,14 @@ pub fn analyze(path: PathBuf, bytes: &[u8]) -> Result<Attribution, String> {
     let Some(names) = names else {
         return Err(strip_error(&path));
     };
+    let imported_funcs = match imports {
+        Some((start, end)) => count_function_imports(bytes, start, end)?,
+        None => 0,
+    };
     let sizes = parse_code_section(bytes, code_start, code_end)?;
     let functions = sizes.len();
     let function_bytes = sizes.iter().fold(0usize, |acc, s| acc.saturating_add(*s));
-    let buckets = attribute(&sizes, &names);
+    let buckets = attribute(&sizes, &names, imported_funcs);
     Ok(Attribution { path, wasm_bytes: bytes.len(), code_section_bytes: code_end.saturating_sub(code_start), function_bytes, functions, buckets })
 }
 
@@ -504,6 +570,21 @@ mod tests {
         section(0, &payload)
     }
 
+    /// An import section with one function import (`env`.`imp`, kind 0x00, typeidx 0)
+    /// and one memory import (`env`.`mem`, kind 0x02, limits flags 0 min 1).
+    fn import_section() -> Vec<u8> {
+        let mut p = leb(2);
+        for (field, kind, desc) in [("imp", 0x00u8, vec![0x00]), ("mem", 0x02, vec![0x00, 0x01])] {
+            p.extend(leb(3));
+            p.extend_from_slice(b"env");
+            p.extend(leb(field.len() as u64));
+            p.extend_from_slice(field.as_bytes());
+            p.push(kind);
+            p.extend(desc);
+        }
+        section(2, &p)
+    }
+
     fn sample(names: &[(u32, &str)]) -> Vec<u8> {
         wasm_bytes(&[section(10, &code_payload(&[10, 20, 5])), name_section(names)])
     }
@@ -581,6 +662,32 @@ mod tests {
         assert_eq!(bucket_for_name("<usize as core::ops::Add>::add"), "other");
         assert_eq!(bucket_for_name(""), "other");
         assert_eq!(bucket_for_name("__rust_alloc"), "other");
+    }
+
+    /// Imported functions occupy the first function indices, so the name map's indices
+    /// are offset by the import count relative to the code section's body order.
+    #[test]
+    fn imported_functions_offset_the_name_map_indices() {
+        // One function import takes index 0; the three defined bodies are indices 1-3.
+        let bytes = wasm_bytes(&[
+            import_section(),
+            section(10, &code_payload(&[10, 20, 5])),
+            name_section(&[
+                (0, "wordcraft_doc::imported"),
+                (1, "wordcraft_engine::x::f"),
+                (2, "core::fmt::g"),
+                (3, "egui::ui::h"),
+            ]),
+        ]);
+        let a = analyze(PathBuf::from("t.wasm"), &bytes).unwrap();
+        assert_eq!(a.functions, 3);
+        assert_eq!(a.function_bytes, 11 + 21 + 6);
+        let bucket = |n: &str| a.buckets.iter().find(|b| b.name == n);
+        assert_eq!(bucket("wordcraft-engine").map(|b| (b.bytes, b.funcs)), Some((11, 1)));
+        assert_eq!(bucket("rust-std").map(|b| (b.bytes, b.funcs)), Some((21, 1)));
+        assert_eq!(bucket("egui").map(|b| (b.bytes, b.funcs)), Some((6, 1)));
+        // the import's own name is never attributed to a body
+        assert!(a.buckets.iter().all(|b| b.funcs == 1), "{:?}", a.buckets);
     }
 
     #[test]
