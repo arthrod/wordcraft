@@ -426,14 +426,29 @@ pub fn encode_convert_request(req: &ConvertRequest) -> Result<Vec<u8>, ProtoErro
     pack_binary(&[&meta, &req.input])
 }
 
-/// Decode a `convert` payload. Framing and JSON structure only; [`convert_request_error`]
-/// applies the bounds.
+/// Decode a `convert` payload. Framing, JSON structure and the [`convert_request_error`]
+/// bounds, checked on the borrowed frame slices so an over-limit request is rejected before
+/// `input` is copied.
 pub fn decode_convert_request(bytes: &[u8]) -> Result<ConvertRequest, ProtoError> {
     let parts = unpack_binary(bytes)?;
     let [meta, input] = parts.as_slice() else {
         return Err(ProtoError::Decode(format!("convert payload has {} parts, expected 2", parts.len())));
     };
     let meta: ConvertMeta = decode_payload(meta)?;
+    if meta.format.len() > MAX_FORMAT_BYTES {
+        return Err(ProtoError::TooLarge { limit: MAX_FORMAT_BYTES, got: meta.format.len() });
+    }
+    if let Some(password) = meta.password.as_deref()
+        && password.len() > MAX_PASSWORD_BYTES
+    {
+        return Err(ProtoError::TooLarge { limit: MAX_PASSWORD_BYTES, got: password.len() });
+    }
+    if input.len() > MAX_CONVERT_BYTES {
+        return Err(ProtoError::TooLarge { limit: MAX_CONVERT_BYTES, got: input.len() });
+    }
+    if meta.format.is_empty() {
+        return Err(ProtoError::Decode("convert payload has an empty format".into()));
+    }
     Ok(ConvertRequest { format: meta.format, direction: meta.direction, password: meta.password, input: input.to_vec() })
 }
 
@@ -447,8 +462,9 @@ pub fn encode_pdf_request(req: &PdfRenderRequest) -> Result<Vec<u8>, ProtoError>
     pack_binary(&parts)
 }
 
-/// Decode a `renderPdf` payload. Framing, part/font-count agreement and JSON structure only;
-/// [`pdf_request_error`] applies the bounds.
+/// Decode a `renderPdf` payload. Framing, part/font-count agreement, JSON structure and the
+/// [`pdf_request_error`] bounds, checked on the borrowed frame slices so an over-limit request
+/// is rejected before its parts are copied.
 pub fn decode_pdf_request(bytes: &[u8]) -> Result<PdfRenderRequest, ProtoError> {
     let parts = unpack_binary(bytes)?;
     if parts.len() < 2 {
@@ -458,8 +474,22 @@ pub fn decode_pdf_request(bytes: &[u8]) -> Result<PdfRenderRequest, ProtoError> 
     if meta.fonts.len() != parts.len() - 2 {
         return Err(ProtoError::Decode(format!("renderPdf declares {} fonts but carries {} font parts", meta.fonts.len(), parts.len() - 2)));
     }
+    let docx = parts[1];
+    if docx.len() > MAX_PDF_DOC_BYTES {
+        return Err(ProtoError::TooLarge { limit: MAX_PDF_DOC_BYTES, got: docx.len() });
+    }
+    if meta.fonts.len() > MAX_FONT_COPIES {
+        return Err(ProtoError::TooLarge { limit: MAX_FONT_COPIES, got: meta.fonts.len() });
+    }
+    let font_total = parts[2..].iter().fold(0usize, |a, p| a.saturating_add(p.len()));
+    if font_total > MAX_FONT_TOTAL_BYTES {
+        return Err(ProtoError::TooLarge { limit: MAX_FONT_TOTAL_BYTES, got: font_total });
+    }
+    if docx.is_empty() {
+        return Err(ProtoError::Decode("renderPdf payload has an empty .docx".into()));
+    }
     Ok(PdfRenderRequest {
-        docx: parts[1].to_vec(),
+        docx: docx.to_vec(),
         fonts: meta
             .fonts
             .into_iter()
@@ -862,6 +892,28 @@ mod tests {
         let meta = encode_payload(&serde_json::json!({"fonts": [{"family": "A", "style": "B"}]})).unwrap();
         let frame = pack_binary(&[&meta, b"docx", b"font0", b"font1"]).unwrap();
         assert!(matches!(decode_pdf_request(&frame), Err(ProtoError::Decode(_))));
+    }
+
+    #[test]
+    fn decode_rejects_over_limit_before_copying() {
+        // The bounds run on the borrowed frame slices: an over-limit part fails in decode
+        // itself (TooLarge), before `to_vec` copies it — same limits `*_request_error` reports.
+        let big = vec![0u8; MAX_PDF_DOC_BYTES + 1];
+        let meta = encode_payload(&serde_json::json!({"fonts": []})).unwrap();
+        let frame = pack_binary(&[&meta, &big]).unwrap();
+        assert!(matches!(decode_pdf_request(&frame), Err(ProtoError::TooLarge { limit: MAX_PDF_DOC_BYTES, .. })));
+
+        let meta = encode_payload(&serde_json::json!({"format": "rtf", "direction": "import"})).unwrap();
+        let frame = pack_binary(&[&meta, &big]).unwrap();
+        assert!(matches!(decode_convert_request(&frame), Err(ProtoError::TooLarge { limit: MAX_CONVERT_BYTES, .. })));
+
+        // Empty bodies fail as decode errors, matching the BadRequest the request checks give.
+        let pdf_meta = encode_payload(&serde_json::json!({"fonts": []})).unwrap();
+        let frame = pack_binary(&[&pdf_meta, &[][..]]).unwrap();
+        assert!(matches!(decode_pdf_request(&frame), Err(ProtoError::Decode(_))));
+        let convert_meta = encode_payload(&serde_json::json!({"format": "", "direction": "import"})).unwrap();
+        let frame = pack_binary(&[&convert_meta, b"x"]).unwrap();
+        assert!(matches!(decode_convert_request(&frame), Err(ProtoError::Decode(_))));
     }
 
     #[test]

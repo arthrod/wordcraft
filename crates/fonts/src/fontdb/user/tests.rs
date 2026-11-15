@@ -503,6 +503,27 @@ fn a_woff2_collection_font_listing_a_table_twice_is_refused() {
     assert_ne!(decode_font_file(&file), Err(UserFontError::BadWebFont(BAD_COLLECTION.into())));
 }
 
+/// Two different fonts as one TrueType collection (`a` first, then `b`).
+fn collection2(a: &[u8], b: &[u8]) -> Vec<u8> {
+    let mut out = b"ttcf\0\x01\0\0".to_vec();
+    out.extend_from_slice(&2u32.to_be_bytes());
+    let off_a = 12 + 8;
+    let off_b = off_a + a.len();
+    out.extend_from_slice(&(off_a as u32).to_be_bytes());
+    out.extend_from_slice(&(off_b as u32).to_be_bytes());
+    for (font, base) in [(a, off_a), (b, off_b)] {
+        let mut font = font.to_vec();
+        let tables = u16::from_be_bytes([font[4], font[5]]) as usize;
+        for i in 0..tables {
+            let at = 12 + 16 * i + 8;
+            let offset = u32::from_be_bytes(font[at..at + 4].try_into().unwrap()) + base as u32;
+            font[at..at + 4].copy_from_slice(&offset.to_be_bytes());
+        }
+        out.extend(font);
+    }
+    out
+}
+
 /// A family no bundled or installed font has, the length of "Source Sans 3" (see [`renamed`]).
 const PACKFAMILY: &str = "Packface Sans";
 
@@ -561,4 +582,28 @@ fn pack_faces_do_not_count_against_the_user_font_cap() {
     assert!(matches!(db.install_font("u.ttf", &renamed("SourceSans3-Regular.ttf", FAMILY)), Err(UserFontError::TooMany)));
     db.install_pack_font("PackfaceSans-Bold.9f27c1d0.ttf.br", &renamed("SourceSans3-Bold.ttf", PACKFAMILY)).unwrap();
     assert_eq!(db.pack_fonts(), vec![(PACKFAMILY.to_string(), "Bold".to_string())]);
+}
+
+#[test]
+fn a_pack_past_the_face_cap_is_refused_before_any_face_is_added() {
+    let db = db();
+    // Two slots left under the cap.
+    {
+        let mut packs = db.write_packs();
+        for i in 0..crate::packs::MAX_INSTALLED_PACK_FACES - 2 {
+            packs.installed.push((i as u32, format!("Pack {i}"), "Regular".to_string()));
+        }
+    }
+    // A two-face pack fills it exactly: the whole file's faces are counted and recorded.
+    let pair = collection2(&renamed("SourceSans3-Semibold.ttf", "Packfont Sans"), &renamed("SourceSans3-It.ttf", "Packface Mono"));
+    assert_eq!(db.install_pack_font("pair.ttc.br", &pair).unwrap().len(), 2);
+    assert_eq!(db.pack_fonts().len(), crate::packs::MAX_INSTALLED_PACK_FACES);
+    // The next pack would pass the cap: refused whole — no face committed, nothing recorded,
+    // and the generation (which re-runs layouts) doesn't move.
+    let gen0 = db.generation();
+    let err = db.install_pack_font("one.ttf.br", &renamed("SourceSans3-Bold.ttf", PACKFAMILY)).unwrap_err();
+    assert!(matches!(err, UserFontError::TooManyPacks), "{err}");
+    assert_eq!(db.generation(), gen0);
+    assert_eq!(db.pack_fonts().len(), crate::packs::MAX_INSTALLED_PACK_FACES);
+    assert!(!db.has_family(PACKFAMILY), "a refused pack commits no face");
 }

@@ -101,7 +101,10 @@ fn cancel(payload: &[u8]) -> Result<(Kind, Vec<u8>), (ErrorCode, String)> {
 /// One conversion: the binary-framed [`ConvertRequest`] in, the converted bytes out as the raw
 /// `converted` payload (the envelope's `kind` already says what the bytes are).
 fn convert(payload: &[u8]) -> Result<(Kind, Vec<u8>), (ErrorCode, String)> {
-    let req = proto::decode_convert_request(payload).map_err(|e| (ErrorCode::BadRequest, e.to_string()))?;
+    let req = proto::decode_convert_request(payload).map_err(|e| {
+        let code = if matches!(e, proto::ProtoError::TooLarge { .. }) { ErrorCode::TooLarge } else { ErrorCode::BadRequest };
+        (code, e.to_string())
+    })?;
     if let Some(code) = proto::convert_request_error(&req) {
         return error(code, format!("convert request failed validation ({code:?})"));
     }
@@ -176,19 +179,21 @@ fn export_document(ext: &str, doc: &Document, password: Option<&str>) -> Result<
             None => Ok(plain),
         };
     }
-    let bytes = if let Some(flavor) = wordcraft_docx::Flavor::from_ext(ext) {
-        // .docx/.docm/.dotx/.dotm: the extension picks the package flavour Word expects.
-        wordcraft_docx::write_as(doc, flavor).map_err(|e| e.to_string())?
-    } else {
-        match ext {
-            // Flat OPC (the engine's `xml` without the Word 2003 option, which the protocol
-            // carries no option for).
-            "xml" => wordcraft_docx::write_flat(doc).map_err(|e| e.to_string())?,
-            other => wordcraft_formats::export_with(other, doc, &wordcraft_formats::ExportOptions::default())
-                .unwrap_or_else(|| Err(format!("`.{other}` is not a format this worker converts")))?,
-        }
-    };
-    encrypt_word_package(bytes, password)
+    if let Some(flavor) = wordcraft_docx::Flavor::from_ext(ext) {
+        // .docx/.docm/.dotx/.dotm: the extension picks the package flavour Word expects, and a
+        // password encrypts the package ([MS-OFFCRYPTO] agile), like the engine's
+        // `save_bytes_with`. Every other format's bytes go out unchanged — encrypting RTF or
+        // HTML would hand back bytes no reader of that format can open.
+        let package = wordcraft_docx::write_as(doc, flavor).map_err(|e| e.to_string())?;
+        return encrypt_word_package(package, password);
+    }
+    match ext {
+        // Flat OPC (the engine's `xml` without the Word 2003 option, which the protocol
+        // carries no option for).
+        "xml" => wordcraft_docx::write_flat(doc).map_err(|e| e.to_string()),
+        other => wordcraft_formats::export_with(other, doc, &wordcraft_formats::ExportOptions::default())
+            .unwrap_or_else(|| Err(format!("`.{other}` is not a format this worker converts"))),
+    }
 }
 
 /// A Word package written with a password is saved encrypted ([MS-OFFCRYPTO] agile), the way the
@@ -220,13 +225,25 @@ fn serve() {
     post(&scope, &header, &[]);
 }
 
-/// The `[headerJson, payloadBuffer]` pair a message carries (crate docs); a missing or wrong
-/// shape unpacks to empty bytes, which `handle_message` answers with a typed `error`.
+/// The `[headerJson, payloadBuffer]` pair a message carries (crate docs). Anything else —
+/// not an array, a non-string header, a payload that is not bytes — unpacks to empty parts,
+/// which `handle_message` answers with a typed `error`: a malformed message must never throw
+/// out of `onmessage` and go unanswered.
 #[cfg(target_arch = "wasm32")]
 fn unpack(data: &wasm_bindgen::JsValue) -> (Vec<u8>, Vec<u8>) {
+    use wasm_bindgen::JsCast as _;
+
+    if !js_sys::Array::is_array(data) {
+        return (Vec::new(), Vec::new());
+    }
     let arr = js_sys::Array::from(data);
     let header = arr.get(0).as_string().unwrap_or_default().into_bytes();
-    let payload = js_sys::Uint8Array::new(&arr.get(1)).to_vec();
+    let payload = arr.get(1);
+    let payload = if payload.is_instance_of::<js_sys::ArrayBuffer>() || payload.is_instance_of::<js_sys::Uint8Array>() {
+        js_sys::Uint8Array::new(&payload).to_vec()
+    } else {
+        Vec::new()
+    };
     (header, payload)
 }
 
@@ -302,6 +319,16 @@ mod tests {
             let text = String::from_utf8_lossy(&out);
             assert!(text.contains(needle), "{format}: {text}");
         }
+    }
+
+    #[test]
+    fn export_to_rtf_is_not_encrypted() {
+        // A password decrypts the input and must not wrap the *output* unless the output is a
+        // Word package: RTF bytes come back as RTF, not an encrypted Office package.
+        let locked = wordcraft_docx::encrypt(&sample_docx(), "open-sesame").expect("encrypts");
+        let req = ConvertRequest { format: "rtf".into(), direction: ConvertDirection::Export, password: Some("open-sesame".into()), input: locked };
+        let out = convert_reply(&req).expect("rtf export");
+        assert!(out.starts_with(b"{\\rtf1"), "rtf export came back encrypted or garbled: {:?}", &out[..out.len().min(16)]);
     }
 
     #[test]

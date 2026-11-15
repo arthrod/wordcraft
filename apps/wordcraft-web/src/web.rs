@@ -89,23 +89,13 @@ pub(crate) mod codec_worker;
 pub(crate) mod font_packs;
 mod font_store;
 pub(crate) mod pdf_worker;
-mod proof_squiggles;
-mod proof_worker;
+pub(crate) mod proof_worker;
 const CANVAS_ID: &str = "wordcraft_canvas";
 const LOADING_ID: &str = "wordcraft_loading";
 
 thread_local! {
     static RUNTIME_INIT: Cell<bool> = const { Cell::new(false) };
     static STARTED_CANVASES: RefCell<Vec<(web_sys::HtmlCanvasElement, js_sys::Promise)>> = const { RefCell::new(Vec::new()) };
-    /// The asset base of the latest `start()` call (the codec worker loads from it lazily,
-    /// long after the config it came from is gone). `./` until the first start.
-    static ASSET_BASE: RefCell<String> = const { RefCell::new(String::new()) };
-}
-
-/// The asset base the running app resolves runtime assets (and the codec worker) against.
-pub(crate) fn current_asset_base() -> String {
-    let base = ASSET_BASE.with(|b| b.borrow().clone());
-    if base.is_empty() { "./".to_string() } else { base }
 }
 
 struct StartConfig {
@@ -208,7 +198,6 @@ fn parse_start_config(options: &wasm_bindgen::JsValue) -> Result<StartConfig, wa
     let install_global = opt_bool_prop(options, "installGlobal")?.unwrap_or(false);
     let force_sample = opt_bool_prop(options, "sample")?;
 
-    ASSET_BASE.with(|b| *b.borrow_mut() = asset_base.clone());
     Ok(StartConfig { canvas, asset_base, host_mode, author, install_global, force_sample })
 }
 
@@ -224,7 +213,6 @@ pub fn start_default_if_present() {
         return;
     };
     let asset_base = default_asset_base(&document);
-    ASSET_BASE.with(|b| *b.borrow_mut() = asset_base.clone());
     let config = StartConfig { canvas, asset_base, host_mode: None, author: query_param("author"), install_global: true, force_sample: None };
     let _ = launch_with_config(config);
 }
@@ -317,7 +305,7 @@ fn launch_with_config(config: StartConfig) -> js_sys::Promise {
                     if let Some(bridge) = &app_bridge {
                         bridge.connect(&mut services, inbox.clone(), cc.egui_ctx.clone());
                     }
-                    let (control, api_obj) = crate::api::install_with_global(cc.egui_ctx.clone(), install_global);
+                    let (control, api_obj) = crate::api::install_with_global(cc.egui_ctx.clone(), install_global, &initial_asset_base);
                     *created_api_slot.borrow_mut() = Some(api_obj);
                     let mut app = WordApp::new(session, services).with_control(control);
                     // Pasted pictures wait apart from dropped files: the app inserts one only when the page is the edit target (#1349).
@@ -492,7 +480,7 @@ impl eframe::App for WebShell {
         // Wanted pack faces are recorded during layout, so drain them after the app ran.
         font_packs::drain_wanted(ctx);
         // §3.2: worker proofing — send what changed, apply what arrived, repaint if it drew.
-        proof_squiggles::tick(&self.app.session, &self.asset_base, ctx);
+        crate::proof_squiggles::tick(&self.app.session, &self.asset_base, ctx);
         crate::api::wake_waiters();
         // Store changed preferences straight away: a reload or closed tab runs no exit code (#2132).
         if let Some(json) = self.prefs.changed(&self.app) {

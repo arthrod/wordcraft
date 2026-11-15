@@ -1720,8 +1720,10 @@ version = "0.18.1"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
+ "js-sys",
  "serde",
  "serde_json",
+ "wasm-bindgen",
  "wordcraft-doc",
  "wordcraft-docx",
  "wordcraft-fonts",

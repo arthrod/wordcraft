@@ -281,7 +281,14 @@ pub(crate) fn drain_wanted(ctx: &egui::Context) {
         }
     });
     let Some(m) = manifest() else {
-        if PENDING_WANTED.with(|p| !p.borrow().is_empty()) {
+        if MANIFEST_FAILED.with(|c| c.get()) {
+            // Automatic installs stay off once the manifest failed; wanted faces queued for
+            // `ensure_manifest` would never run, so drop them and settle the waiters
+            // (`installFonts()` promises wait on an empty `PENDING_WANTED`). A manual ask still
+            // retries through `install_families`, which clears the flag first.
+            PENDING_WANTED.with(|p| p.borrow_mut().clear());
+            flush_waiters();
+        } else if PENDING_WANTED.with(|p| !p.borrow().is_empty()) {
             ensure_manifest(ctx.clone());
         }
         return;

@@ -29,6 +29,12 @@ mod host;
 #[cfg(target_arch = "wasm32")]
 mod web;
 
+// The squiggle scheduler lives beside the other web modules but has no wasm-only dependencies
+// of its own, so host tests can compile and drive it (`tick` itself stays wasm-only).
+#[cfg(any(target_arch = "wasm32", test))]
+#[path = "web/proof_squiggles.rs"]
+mod proof_squiggles;
+
 #[cfg(any(target_arch = "wasm32", test))]
 mod font_pack_manifest;
 

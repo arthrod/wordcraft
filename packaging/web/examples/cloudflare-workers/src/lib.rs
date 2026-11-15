@@ -82,6 +82,27 @@ fn wasm_sidecar_cache_control(path: &str) -> &'static str {
     if path.rsplit('/').next().is_some_and(|name| name.starts_with("wordcraft-worker-")) { "no-cache" } else { "public, max-age=31536000, immutable" }
 }
 
+/// Pick the `Accept-Encoding` offer to honour: Cloudflare exposes the client's original offer
+/// as `cf.clientAcceptEncoding` because the edge may rewrite the request's `Accept-Encoding`
+/// header before the Worker sees it; the header is only a fallback for runtimes without `cf`.
+fn accept_encoding_offer<'a>(cf_client_accept_encoding: Option<&'a str>, header: Option<&'a str>) -> Option<&'a str> {
+    cf_client_accept_encoding.or(header)
+}
+
+/// `cf.clientAcceptEncoding` off the raw incoming request object. The typed `worker::Cf` API
+/// does not surface it, so it is read through `Reflect`; anything missing or non-string is
+/// `None` and the caller falls back to the header.
+#[cfg(target_arch = "wasm32")]
+fn cf_client_accept_encoding(req: &Request) -> Option<String> {
+    let cf = js_sys::Reflect::get(req.inner(), &wasm_bindgen::JsValue::from_str("cf")).ok()?;
+    js_sys::Reflect::get(&cf, &wasm_bindgen::JsValue::from_str("clientAcceptEncoding")).ok()?.as_string()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn cf_client_accept_encoding(_req: &Request) -> Option<String> {
+    None
+}
+
 /// Try to serve the precompressed Brotli sidecar `<path>.br` for a `.wasm` request from the
 /// `ASSETS` binding. `None` on any failure (missing sidecar, non-200, fetch or header error) so
 /// the caller falls back to the plain asset path; this never yields an error response.
@@ -328,7 +349,7 @@ async fn main(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
     if matches!(req.method(), Method::Get | Method::Head)
         && path.ends_with(".wasm")
         && matches!(req.headers().get("Range"), Ok(None))
-        && matches!(&req.headers().get("Accept-Encoding"), Ok(Some(v)) if accepts_brotli(v))
+        && matches!(accept_encoding_offer(cf_client_accept_encoding(&req).as_deref(), req.headers().get("Accept-Encoding").ok().flatten().as_deref()), Some(v) if accepts_brotli(v))
         && let Some(resp) = brotli_wasm_sidecar(&env, &url, req.method()).await
     {
         return Ok(resp);
@@ -419,6 +440,27 @@ mod tests {
         for (header, expected) in cases {
             assert_eq!(accepts_brotli(header), expected, "Accept-Encoding {header:?}");
         }
+    }
+
+    /// The edge may rewrite `Accept-Encoding`; `cf.clientAcceptEncoding` carries the client's
+    /// real offer and wins when present, so a rewritten `br` header cannot force Brotli on a
+    /// client that never asked for it — the decision then falls through to the plain asset.
+    #[test]
+    fn client_offer_prefers_cf_over_rewritten_header() {
+        // Original offer and rewritten header differ: cf wins in both directions.
+        assert_eq!(accept_encoding_offer(Some("gzip"), Some("br")), Some("gzip"));
+        assert!(!accepts_brotli(accept_encoding_offer(Some("gzip"), Some("br")).unwrap()));
+        assert_eq!(accept_encoding_offer(Some("br"), Some("gzip")), Some("br"));
+        assert!(accepts_brotli(accept_encoding_offer(Some("br"), Some("gzip")).unwrap()));
+        // A `q=0` refusal in the original offer still wins over a rewritten `br` header.
+        assert!(!accepts_brotli(accept_encoding_offer(Some("br;q=0"), Some("br")).unwrap()));
+        // No cf property (local tooling, other runtimes): the request header decides.
+        assert_eq!(accept_encoding_offer(None, Some("br")), Some("br"));
+        assert!(accepts_brotli(accept_encoding_offer(None, Some("br")).unwrap()));
+        // Neither source: no offer, so the plain asset path is preserved.
+        assert_eq!(accept_encoding_offer(None, None), None);
+        assert_eq!(accept_encoding_offer(Some(""), None), Some(""));
+        assert!(!accepts_brotli(accept_encoding_offer(Some(""), None).unwrap()));
     }
 
     /// 4.3 (F6/Q2): `/api/preview-page` renders page 1 of a known sample through the same

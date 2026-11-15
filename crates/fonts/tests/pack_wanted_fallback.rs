@@ -24,3 +24,22 @@ fn fallback_list_notes_the_skipped_pack_family() {
         "the skipped preferred pack family stays wanted: {wanted:?}"
     );
 }
+
+/// The same skip through a charset alias: "JetBrains Mono CE" names JetBrains Mono, so its want
+/// is recorded under the pack family's canonical name rather than dropped.
+#[test]
+fn fallback_list_notes_the_skipped_pack_family_alias() {
+    assert!(FontDb::init_test_fonts());
+    let db = FontDb::global();
+    db.take_wanted_packs();
+
+    let r = resolve("JetBrains Mono CE;Source Sans 3", false, false);
+    assert!(!r.substituted, "Source Sans 3 is bundled: {:?}", r.face.family);
+    assert_eq!(r.face.family, "Source Sans 3");
+
+    let wanted = db.take_wanted_packs();
+    assert!(
+        wanted.iter().any(|w| w.family == "JetBrains Mono" && !w.bold && !w.italic),
+        "the skipped alias records the JetBrains Mono want: {wanted:?}"
+    );
+}

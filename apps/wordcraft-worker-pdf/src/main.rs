@@ -90,7 +90,10 @@ fn cancel(payload: &[u8]) -> Result<(Kind, Vec<u8>), (ErrorCode, String)> {
 /// out with the PDF export's own options and write the PDF. The reply payload is the raw file,
 /// unframed (the envelope's `kind` already says what the bytes are).
 fn render_pdf(payload: &[u8]) -> Result<(Kind, Vec<u8>), (ErrorCode, String)> {
-    let req = proto::decode_pdf_request(payload).map_err(|e| (ErrorCode::BadRequest, e.to_string()))?;
+    let req = proto::decode_pdf_request(payload).map_err(|e| {
+        let code = if matches!(e, proto::ProtoError::TooLarge { .. }) { ErrorCode::TooLarge } else { ErrorCode::BadRequest };
+        (code, e.to_string())
+    })?;
     if let Some(code) = proto::pdf_request_error(&req) {
         return error(code, format!("renderPdf request failed validation ({code:?})"));
     }
@@ -138,12 +141,24 @@ fn serve() {
 }
 
 /// The `[headerJson, payloadBuffer]` pair a message carries; a missing or wrong shape unpacks
-/// to empty bytes, which `handle_message` answers with a typed `error`.
+/// to empty bytes, which `handle_message` answers with a typed `error`. Anything else — not an
+/// array, a non-string header, a payload that is not bytes — must never throw out of
+/// `onmessage` and go unanswered.
 #[cfg(target_arch = "wasm32")]
 fn unpack(data: &wasm_bindgen::JsValue) -> (Vec<u8>, Vec<u8>) {
+    use wasm_bindgen::JsCast as _;
+
+    if !js_sys::Array::is_array(data) {
+        return (Vec::new(), Vec::new());
+    }
     let arr = js_sys::Array::from(data);
     let header = arr.get(0).as_string().unwrap_or_default().into_bytes();
-    let payload = js_sys::Uint8Array::new(&arr.get(1)).to_vec();
+    let payload = arr.get(1);
+    let payload = if payload.is_instance_of::<js_sys::ArrayBuffer>() || payload.is_instance_of::<js_sys::Uint8Array>() {
+        js_sys::Uint8Array::new(&payload).to_vec()
+    } else {
+        Vec::new()
+    };
     (header, payload)
 }
 

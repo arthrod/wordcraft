@@ -456,7 +456,14 @@ pub(crate) fn before_command(s: &mut Session, id: &str, mutates: bool) -> Result
         s.run(TOGGLE, &json!({"value": false}))?;
     } else if let Some(why) = refusal(s, id, mutates) {
         return Err(CmdError::Disabled(format!("{id}: {why}")));
-    } else if !id.starts_with("caret.") && !id.starts_with("select.") && !id.starts_with("view.") && id != "edit.redo" {
+    } else if !id.starts_with("caret.")
+        && !id.starts_with("select.")
+        && !id.starts_with("view.")
+        && id != "edit.redo"
+        && !s.md_source.as_ref().is_some_and(|src| src.restored_by_undo())
+    {
+        // A buffer Undo restored is a Redo offer, not pending edits: reads must not apply it
+        // (applying would checkpoint and clear the redo stack it belongs to).
         apply(s);
     }
     Ok(())
@@ -519,6 +526,32 @@ mod tests {
         s.run("edit.undo", &json!({})).unwrap();
         assert!(s.doc.same_content(&before), "one undo restores the document");
         assert!(s.can_redo());
+    }
+
+    /// A read command between Undo and Redo must not apply the buffer Undo restored: applying it
+    /// would checkpoint (clearing the redo stack) and spend the Redo offer.
+    #[test]
+    fn a_read_command_between_undo_and_redo_leaves_the_restored_buffer_alone() {
+        let mut s = session(SAMPLE);
+        s.run(TOGGLE, &json!({})).unwrap();
+        set_text(&mut s, "# Pending\n");
+        // `doc.setMarkdown` keeps the pending buffer in its undo step, then replaces the document.
+        s.run(SET_MARKDOWN, &json!({"markdown": "# Replaced\n"})).unwrap();
+        assert!(s.md_source.is_none());
+        let replaced = s.doc.clone();
+        s.run("edit.undo", &json!({})).unwrap();
+        let src = s.md_source.as_ref().unwrap();
+        assert!(src.restored_by_undo() && src.is_pending());
+        let doc = s.doc.clone();
+        let redo_label = s.redo_label().map(str::to_string);
+        s.run("file.info", &json!({})).unwrap();
+        assert!(s.doc.same_content(&doc), "a read command applies nothing");
+        let src = s.md_source.as_ref().unwrap();
+        assert!(src.restored_by_undo() && src.is_pending() && src.text == "# Pending\n");
+        assert!(s.can_redo() && s.redo_label() == redo_label.as_deref(), "the redo offer survives");
+        s.run("edit.redo", &json!({})).unwrap();
+        assert!(s.doc.same_content(&replaced));
+        assert!(s.md_source.is_none());
     }
 
     static TEST_DIR_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

@@ -62,14 +62,24 @@ fi
 # sidecars and SRI below run after this).
 rebuild_workers_scalar() {
   local dist="$1" w tmp
-  local wb
   # Trunk's own pinned copy first: the CLI version must match the crates' wasm-bindgen exactly,
-  # and another wasm-bindgen on PATH (0.2.100, say) fails against a 0.2.129 build.
-  for c in "$HOME/Library/Caches/dev.trunkrs.trunk"/wasm-bindgen-*/wasm-bindgen; do
-    [[ -x "$c" ]] && wb="$c"
+  # and another wasm-bindgen on PATH (0.2.100, say) fails against a 0.2.129 build. Resolve the
+  # version Trunk.toml pins, then accept only an executable that reports that version —
+  # Trunk's versioned cache dir or a matching binary on PATH; never glob-order luck.
+  local wb_ver
+  wb_ver="$(sed -n 's/^[[:space:]]*wasm_bindgen[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$ROOT/apps/wordcraft-web/Trunk.toml" | head -n1)"
+  local wb="" cand
+  for cand in \
+      "$HOME/Library/Caches/dev.trunkrs.trunk/wasm-bindgen-$wb_ver/wasm-bindgen" \
+      "$HOME/.cache/trunk/wasm-bindgen-$wb_ver/wasm-bindgen" \
+      "$(command -v wasm-bindgen || true)"; do
+    [[ -n "$cand" && -x "$cand" ]] || continue
+    if [[ -z "$wb_ver" || "$wb_ver" == "latest" ]] || "$cand" --version 2>/dev/null | grep -qF "wasm-bindgen $wb_ver"; then
+      wb="$cand"
+      break
+    fi
   done
-  wb="${wb:-$(command -v wasm-bindgen || true)}"
-  [[ -n "$wb" ]] || { echo "error: wasm-bindgen not found for the scalar worker rebuild" >&2; exit 1; }
+  [[ -n "$wb" ]] || { echo "error: wasm-bindgen $wb_ver not found for the scalar worker rebuild" >&2; exit 1; }
   for w in wordcraft-worker-proof wordcraft-worker-codecs wordcraft-worker-pdf; do
     tmp="$(mktemp -d)"
     (cd "$ROOT" && CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS="-C debuginfo=0" \

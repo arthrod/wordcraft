@@ -115,7 +115,14 @@ prepare_tarball() {
   mkdir -p "$TARBALL_DIR"
   if [[ -n "$USE_TARBALL" ]]; then
     [[ -f "$USE_TARBALL" ]] || { echo "error: tarball $USE_TARBALL not found" >&2; exit 1; }
-    /bin/cp -f "$USE_TARBALL" "$TARBALL"
+    # --tarball may already name our own tarball path; copying a file onto itself fails,
+    # so skip the copy when both resolve to the same file.
+    local src_abs dst_abs
+    src_abs="$(cd "$(dirname "$USE_TARBALL")" && pwd)/$(basename "$USE_TARBALL")"
+    dst_abs="$(cd "$TARBALL_DIR" && pwd)/$(basename "$TARBALL")"
+    if [[ "$src_abs" != "$dst_abs" ]]; then
+      /bin/cp -f "$USE_TARBALL" "$TARBALL"
+    fi
     echo "reusing $USE_TARBALL"
     # Still need an unpacked stage to serve at /wordcraft-web/ as assetBase.
     rm -rf "$SMOKE_DIST/npm"

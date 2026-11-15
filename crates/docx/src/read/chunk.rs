@@ -126,8 +126,9 @@ impl Reader<'_> {
             log::warn!("docx: alternative format chunks nest deeper than {MAX_CHUNK_NESTING}; the inner ones are left out");
             return None;
         }
-        let pkg =
-            Package::open_limited(bytes, MAX_PART, self.chunks.bytes).map_err(|e| log::warn!("docx: unreadable nested document chunk: {e}")).ok()?;
+        let pkg = Package::open_limited(bytes, self.chunks.part, self.chunks.bytes)
+            .map_err(|e| log::warn!("docx: unreadable nested document chunk: {e}"))
+            .ok()?;
         self.chunks.bytes = self.chunks.bytes.saturating_sub(pkg.size());
         let mut state = ChunkState { nesting: self.chunks.nesting + 1, depth: depth + 1, ..self.chunks };
         let res = super::read_opened_in(&pkg, &mut state);
@@ -157,6 +158,9 @@ pub(crate) struct ChunkState<'a> {
     pub left: usize,
     /// Chunk bytes (nested packages unpacked) left in the file's budget.
     pub bytes: u64,
+    /// The per-part decompression cap nested WordprocessingML chunks are opened under: the
+    /// caller's `max_part` ([`MAX_PART`] unless it set a tighter one).
+    pub part: u64,
     /// Graphic work left in the file's budget ([`super::MAX_GRAPHIC_WORK`]): nested documents'
     /// charts and diagrams count against it too.
     pub graphic: usize,
@@ -169,7 +173,7 @@ pub(crate) struct ChunkState<'a> {
 
 impl<'a> ChunkState<'a> {
     pub fn new(import: Option<ChunkImporter<'a>>) -> Self {
-        ChunkState { left: MAX_CHUNKS, bytes: MAX_TOTAL, graphic: super::MAX_GRAPHIC_WORK, nesting: 0, depth: 0, import }
+        ChunkState { left: MAX_CHUNKS, bytes: MAX_TOTAL, part: MAX_PART, graphic: super::MAX_GRAPHIC_WORK, nesting: 0, depth: 0, import }
     }
 }
 
@@ -229,6 +233,37 @@ mod tests {
         assert!(left < super::super::MAX_GRAPHIC_WORK, "the nested chart's work is the file's");
         // With the file's budget spent, the nested document doesn't get one of its own.
         assert_eq!(read(0), (false, 0));
+    }
+
+    /// A nested WordprocessingML chunk is a package of its own: it unpacks under the budgets the
+    /// caller gave the file (`read_limited`), charged against what the file's budget has left —
+    /// not the desktop defaults.
+    #[test]
+    fn a_nested_package_is_held_to_the_callers_decompression_budget() {
+        let ns = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#;
+        let rels =
+            |inner: &str| format!(r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{inner}</Relationships>"#);
+        let rel = |id: &str, ty: &str, target: &str| {
+            format!(r#"<Relationship Id="{id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{ty}" Target="{target}"/>"#)
+        };
+        // ~300 KB of text deflates to a few hundred bytes: the inner package fits any compressed
+        // budget but inflates well past a 64 KiB total.
+        let body = format!(r#"<w:document {ns}><w:body><w:p><w:r><w:t>INNER-MARKER {}</w:t></w:r></w:p></w:body></w:document>"#, "x".repeat(300_000));
+        let inner = crate::package::zip_entries(&[
+            ("_rels/.rels".to_string(), rels(&rel("rId1", "officeDocument", "word/document.xml")).into_bytes()),
+            ("word/document.xml".to_string(), body.into_bytes()),
+        ])
+        .unwrap();
+        let outer = package(r#"<w:altChunk r:id="rIdC"/>"#, ("rIdC", "aFChunk", "afchunk.docx"), ("word/afchunk.docx", &inner));
+        let text = |d: &Document| d.plain_text(wordcraft_doc::StoryRef::Body);
+        // The desktop defaults read the chunk; the caller's 64 KiB total doesn't.
+        let doc = super::super::read_package_limited(&outer, None, crate::package::MAX_PART, crate::package::MAX_TOTAL).unwrap();
+        assert!(text(&doc).contains("INNER-MARKER"));
+        let doc = super::super::read_package_limited(&outer, None, crate::package::MAX_PART, 64 * 1024).unwrap();
+        assert!(!text(&doc).contains("INNER-MARKER"), "the nested package must not outspend the caller's budget");
+        // A per-part cap tighter than the inner document part refuses it the same way.
+        let doc = super::super::read_package_limited(&outer, None, 128 * 1024, crate::package::MAX_TOTAL).unwrap();
+        assert!(!text(&doc).contains("INNER-MARKER"));
     }
 
     #[test]

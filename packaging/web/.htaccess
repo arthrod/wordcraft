@@ -11,7 +11,9 @@ AddType text/javascript .js
 <IfModule mod_rewrite.c>
   <IfModule mod_headers.c>
     RewriteEngine On
-    RewriteCond %{HTTP:Accept-Encoding} \bbr\b
+    # `br` only counts with a quality above zero: `br;q=0` / `br;q=0.000` must fall back to
+    # the plain .wasm, so the token's optional q value must contain a nonzero digit.
+    RewriteCond %{HTTP:Accept-Encoding} "(^|,)\s*br\s*(;\s*q=\s*0*\.?0*[1-9][0-9]*)?\s*(,|$)" [NC]
     RewriteCond %{HTTP:Range} !^.
     RewriteCond %{REQUEST_FILENAME}.br -f
     RewriteRule ^(.+\.wasm)$ $1.br [L]
@@ -45,7 +47,7 @@ AddType text/javascript .js
   # worker older than the module would fail the protocol version check for the window's whole
   # duration. One revalidation per load (a 304 when unchanged) closes the window entirely.
   # FilesMatch blocks apply in order, so this later `Header set` overrides the generic one.
-  <FilesMatch "^wordcraft-worker-.*\.(wasm|js)$">
+  <FilesMatch "^wordcraft-worker-.*\.(wasm\.br|wasm|js)$">
     Header set Cache-Control "no-cache"
   </FilesMatch>
 </IfModule>

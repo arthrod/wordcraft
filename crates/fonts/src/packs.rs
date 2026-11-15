@@ -83,6 +83,9 @@ pub struct WantedPackFace {
     pub family: String,
     pub bold: bool,
     pub italic: bool,
+    /// The family already has a face resolution could draw with. When it doesn't, any pack face
+    /// of it is worth fetching — the real family with a synthesized style beats a substitute.
+    pub available: bool,
 }
 
 /// Most wants remembered between the host's polls. The real packs offer 9 faces × 4
@@ -110,7 +113,7 @@ fn record_wanted(w: WantedPackFace) {
 /// in `word::resolve` for the two rules that fire it.
 pub(crate) fn note_wanted(family: &str, bold: bool, italic: bool) {
     if let Some(family) = pack_family(family) {
-        record_wanted(WantedPackFace { family: family.to_string(), bold, italic });
+        record_wanted(WantedPackFace { family: family.to_string(), bold, italic, available: FontDb::global().has_family(family) });
     }
 }
 
@@ -122,26 +125,30 @@ pub(crate) fn note_wanted(family: &str, bold: bool, italic: bool) {
 pub struct PackFonts {
     /// At most [`MAX_INSTALLED_PACK_FACES`]: the real packs are nine faces, and the bound keeps
     /// a host that installs arbitrary files from growing the record without end.
-    installed: Vec<(u32, String, String)>,
+    pub(crate) installed: Vec<(u32, String, String)>,
 }
 
 /// Most pack faces one database records (see [`PackFonts`]).
-const MAX_INSTALLED_PACK_FACES: usize = 1024;
+pub(crate) const MAX_INSTALLED_PACK_FACES: usize = 1024;
 
 impl FontDb {
     /// Install a font file the host downloaded as a pack (see [`PACK_FACES`]): checked and added
     /// like [`FontDb::install_font`], but a separate origin — not kept in the user font list or
     /// folder, not counted against the user font cap, not removable ([`FontDb::remove_user_font`]
     /// refuses it) and not listed by [`FontDb::user_fonts`]. Returns the faces added as
-    /// (family, style). `name` names the pack in diagnostics only; it is never stored.
+    /// (family, style). `name` names the pack in diagnostics only; it is never stored. A file
+    /// whose faces wouldn't fit under [`MAX_INSTALLED_PACK_FACES`] is refused before any face is
+    /// added ([`UserFontError::TooManyPacks`]): the database and its generation stay untouched.
     pub fn install_pack_font(&self, name: &str, bytes: &[u8]) -> Result<Vec<(String, String)>, UserFontError> {
-        let added = self.add_pack_faces(decode_font_file(bytes)?)?;
-        {
+        let sfnt = decode_font_file(bytes)?;
+        // The record is held across the check and the update, so two installs can't both pass a
+        // count the other then exceeds.
+        let added = {
             let mut packs = self.write_packs();
-            if packs.installed.len() < MAX_INSTALLED_PACK_FACES {
-                packs.installed.extend(added.iter().map(|f| (f.id(), f.family.clone(), f.style.clone())));
-            }
-        }
+            let added = self.add_pack_faces(&mut packs, sfnt)?;
+            packs.installed.extend(added.iter().map(|f| (f.id(), f.family.clone(), f.style.clone())));
+            added
+        };
         log::debug!("installed the font pack {name:?}: {} face(s)", added.len());
         Ok(added.iter().map(|f| (f.family.clone(), f.style.clone())).collect())
     }
@@ -168,13 +175,18 @@ impl FontDb {
 /// closest to the wanted weight (700 for bold, else 400) with the heavier face winning ties.
 /// `None` when no face of the family qualifies: fetching a face that still synthesizes (bold
 /// italic Source Sans 3 has no bold italic face, only a 400-weight italic) would download bytes
-/// without drawing the text any truer, so the text keeps its synthesized face instead.
+/// without drawing the text any truer, so the text keeps its synthesized face instead. The
+/// bold-weight rule relaxes only when the family has no face at all (`wanted.available` false):
+/// the real family under a synthesized style is still better than the substitute resolution
+/// settled on, so the closest pack face is fetched and bold stays synthesized.
 pub fn pick_pack_face(faces: &[impl PackFaceLike], wanted: &WantedPackFace) -> Option<usize> {
     let target: i32 = if wanted.bold { 700 } else { 400 };
     faces
         .iter()
         .enumerate()
-        .filter(|(_, f)| f.family().eq_ignore_ascii_case(&wanted.family) && f.italic() == wanted.italic && (!wanted.bold || f.weight() >= 600))
+        .filter(|(_, f)| {
+            f.family().eq_ignore_ascii_case(&wanted.family) && f.italic() == wanted.italic && (!wanted.bold || !wanted.available || f.weight() >= 600)
+        })
         .min_by(|(_, a), (_, b)| {
             (i32::from(a.weight()) - target).abs().cmp(&(i32::from(b.weight()) - target).abs()).then(b.weight().cmp(&a.weight()))
         })
@@ -250,7 +262,7 @@ mod tests {
     /// stops the synthesis it's wanted for.
     #[test]
     fn pick_pack_face_prefers_the_face_that_stops_the_synthesis() {
-        let want = |family: &str, bold: bool, italic: bool| WantedPackFace { family: family.to_string(), bold, italic };
+        let want = |family: &str, bold: bool, italic: bool| WantedPackFace { family: family.to_string(), bold, italic, available: true };
         let stem = |w: &WantedPackFace| pick_pack_face(PACK_FACES, w).map(|i| PACK_FACES[i].stem);
         assert_eq!(stem(&want("Source Sans 3", true, false)), Some("SourceSans3-Bold"), "the bold face, not the semibold");
         assert_eq!(stem(&want("Inter", true, false)), Some("Inter-SemiBold"), "Inter's only bold-enough pack face");
@@ -264,6 +276,13 @@ mod tests {
         assert_eq!(stem(&want("source serif 4", false, true)), Some("SourceSerif4-It"));
         assert_eq!(stem(&want("Inter", false, true)), None);
         assert_eq!(stem(&want("Calibri", true, false)), None);
+        // A family with no face at all still gets its closest pack face for a bold want: the
+        // real family under synthesized bold beats the substitute resolution settled on. The
+        // strict rule is kept once the family is available (above).
+        let missing = WantedPackFace { family: "JetBrains Mono".to_string(), bold: true, italic: false, available: false };
+        assert_eq!(pick_pack_face(PACK_FACES, &missing).map(|i| PACK_FACES[i].stem), Some("JetBrainsMono-Regular"));
+        let missing_it = WantedPackFace { family: "JetBrains Mono".to_string(), bold: false, italic: true, available: false };
+        assert_eq!(pick_pack_face(PACK_FACES, &missing_it), None, "no italic face exists to fetch");
     }
 
     #[test]
@@ -316,7 +335,7 @@ mod tests {
         assert!(!has(&again, "Source Sans 3", true, false) && !has(&again, "JetBrains Mono", false, false));
         // Past the cap, new wants are dropped rather than growing the record.
         for i in 0..(MAX_WANTED_PACKS + 10) {
-            record_wanted(WantedPackFace { family: format!("Fam {i}"), bold: i % 2 == 0, italic: i % 3 == 0 });
+            record_wanted(WantedPackFace { family: format!("Fam {i}"), bold: i % 2 == 0, italic: i % 3 == 0, available: false });
         }
         assert_eq!(FontDb::global().take_wanted_packs().len(), MAX_WANTED_PACKS);
     }

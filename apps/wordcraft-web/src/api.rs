@@ -47,12 +47,14 @@ fn js_err(msg: &str) -> JsValue {
 /// `WordApp::with_control`). An existing `window.wordcraft` keeps the functions it already has.
 #[allow(dead_code)]
 pub fn install(ctx: egui::Context) -> Receiver<ControlRequest> {
-    install_with_global(ctx, true).0
+    install_with_global(ctx, true, "./").0
 }
 
 /// Build the `WordCraftApi` object over the app control channel, optionally publishing it at
-/// `window.wordcraft` when `install_global` is true.
-pub fn install_with_global(ctx: egui::Context, install_global: bool) -> (Receiver<ControlRequest>, js_sys::Object) {
+/// `window.wordcraft` when `install_global` is true. `asset_base` is the launching instance's
+/// asset base: the codec/pdf helpers resolve their lazy workers against it for this instance's
+/// lifetime, whatever later `start` calls do.
+pub fn install_with_global(ctx: egui::Context, install_global: bool, asset_base: &str) -> (Receiver<ControlRequest>, js_sys::Object) {
     let (queue, requests) = channel::<ControlRequest>();
     let req_queue = queue.clone();
     let req_ctx = ctx.clone();
@@ -89,7 +91,7 @@ pub fn install_with_global(ctx: egui::Context, install_global: bool) -> (Receive
         }
     }
 
-    attach_doc_helpers(&api_obj, queue, ctx);
+    attach_doc_helpers(&api_obj, queue, ctx, asset_base);
     (requests, api_obj)
 }
 
@@ -116,7 +118,8 @@ fn json_to_js(v: &Value) -> JsValue {
     js_sys::JSON::parse(&v.to_string()).unwrap_or(JsValue::NULL)
 }
 
-fn attach_doc_helpers(api: &js_sys::Object, queue: Sender<ControlRequest>, ctx: egui::Context) {
+fn attach_doc_helpers(api: &js_sys::Object, queue: Sender<ControlRequest>, ctx: egui::Context, asset_base: &str) {
+    let asset_base = asset_base.to_string();
     let q_get = queue.clone();
     let c_get = ctx.clone();
     let get_md = wasm_bindgen::closure::Closure::<dyn Fn() -> js_sys::Promise>::new(move || {
@@ -205,6 +208,7 @@ fn attach_doc_helpers(api: &js_sys::Object, queue: Sender<ControlRequest>, ctx: 
     // `Error` carrying the worker's message (password problems say so in the `.docx` reader's
     // words, so a caller's prompts can match). The worker starts lazily here — its scripts are
     // never fetched on page load.
+    let asset_base_convert = asset_base.clone();
     let convert_document = wasm_bindgen::closure::Closure::<dyn Fn(JsValue) -> js_sys::Promise>::new(move |val: JsValue| {
         js_sys::Promise::new(&mut |resolve, reject| {
             let fail = |reject: &js_sys::Function, msg: String| {
@@ -245,7 +249,7 @@ fn attach_doc_helpers(api: &js_sys::Object, queue: Sender<ControlRequest>, ctx: 
             }
             let password = str_prop("password");
             let req = wordcraft_worker_proto::ConvertRequest { format, direction, password, input };
-            let asset_base = crate::web::current_asset_base();
+            let asset_base = asset_base_convert.clone();
             if !crate::web::codec_worker::ensure(&asset_base) {
                 return fail(&reject, "the codec worker is unavailable in this browser".into());
             }
@@ -273,9 +277,11 @@ fn attach_doc_helpers(api: &js_sys::Object, queue: Sender<ControlRequest>, ctx: 
     // lazily here, never on page load. Resolves to the PDF bytes as a `Uint8Array`; rejects
     // with an `Error` carrying the worker's message (a password-protected session exports an
     // encrypted package the worker cannot read, and its error says so).
+    let asset_base_pdf = asset_base.clone();
     let export_pdf = wasm_bindgen::closure::Closure::<dyn Fn(JsValue) -> js_sys::Promise>::new(move |val: JsValue| {
         let q = queue_for_pdf.clone();
         let c = ctx_for_pdf.clone();
+        let asset_base = asset_base_pdf.clone();
         future_to_promise(async move {
             let mut params = json!({});
             if js_sys::Reflect::get(&val, &JsValue::from_str("markup")).ok().and_then(|v| v.as_bool()) == Some(true) {
@@ -306,7 +312,6 @@ fn attach_doc_helpers(api: &js_sys::Object, queue: Sender<ControlRequest>, ctx: 
                 fonts.push(wordcraft_worker_proto::FontCopy { family, style, bytes: (*bytes).clone() });
             }
             let req = wordcraft_worker_proto::PdfRenderRequest { docx, fonts };
-            let asset_base = crate::web::current_asset_base();
             if !crate::web::pdf_worker::ensure(&asset_base) {
                 return Err(js_err("the pdf worker is unavailable in this browser"));
             }

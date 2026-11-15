@@ -745,7 +745,9 @@ fn note_wanted_pack(db: &FontDb, family: &str, resolved: &str, bold: bool, itali
     if !r.substituted {
         if family.contains(';') {
             for cand in skipped_list_candidates(family, resolved) {
-                crate::packs::note_wanted(cand, bold, italic);
+                // Charset aliases ("JetBrains Mono CE") name the pack family too: record the
+                // canonical name or the want is dropped as a non-pack family.
+                crate::packs::note_wanted(charset_base_family(cand), bold, italic);
             }
         }
         return;
@@ -1175,6 +1177,22 @@ mod tests {
         // bounded prefix rather than nothing.
         assert!(skipped_list_candidates("A;B", "A").is_empty());
         assert_eq!(skipped_list_candidates("A;B", "Z"), ["A", "B"]);
+    }
+
+    /// A skipped candidate that is a charset alias of a pack family still records the want under
+    /// the pack family's canonical name ("JetBrains Mono CE" → JetBrains Mono).
+    #[test]
+    fn a_skipped_charset_alias_records_its_pack_family() {
+        let db = FontDb::global();
+        db.take_wanted_packs();
+        let face = db.face("Source Sans 3", "Regular");
+        let r = Resolved { face: FaceRef::of(&face), synth_bold: false, synth_italic: false, substituted: false };
+        note_wanted_pack(db, "JetBrains Mono CE;Source Sans 3", "Source Sans 3", false, false, &r);
+        let taken = db.take_wanted_packs();
+        assert!(
+            taken.iter().any(|w| w.family == "JetBrains Mono" && !w.bold && !w.italic),
+            "the skipped alias must record the JetBrains Mono want: {taken:?}"
+        );
     }
 
     /// Fallback lists longer than `FAMILY_KEY_MAX` still select a later installed family and

@@ -672,12 +672,7 @@ mod tests {
         let bytes = wasm_bytes(&[
             import_section(),
             section(10, &code_payload(&[10, 20, 5])),
-            name_section(&[
-                (0, "wordcraft_doc::imported"),
-                (1, "wordcraft_engine::x::f"),
-                (2, "core::fmt::g"),
-                (3, "egui::ui::h"),
-            ]),
+            name_section(&[(0, "wordcraft_doc::imported"), (1, "wordcraft_engine::x::f"), (2, "core::fmt::g"), (3, "egui::ui::h")]),
         ]);
         let a = analyze(PathBuf::from("t.wasm"), &bytes).unwrap();
         assert_eq!(a.functions, 3);

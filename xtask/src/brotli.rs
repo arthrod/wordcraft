@@ -7,9 +7,9 @@
 //! may not ship) keeps the pipeline on the `brotli` crate that `crates/fonts/build.rs` already
 //! uses for the minimal font set.
 
-use std::fs::File;
+use std::fs::{self, File, Metadata};
 use std::io::{BufReader, BufWriter, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Brotli's maximum quality. Sidecars are built once per release, so the slowest (and densest)
 /// setting is the right trade here. `lgwin: 24` is the largest window, which also suits the
@@ -34,6 +34,42 @@ fn ratio_str(input_bytes: usize, output_bytes: usize) -> String {
     format!("{pct:.1}% of input")
 }
 
+/// `path` resolved to its canonical location even when it doesn't exist yet: canonicalize the
+/// file itself, else canonicalize the parent and re-append the name (resolving `.`/`..` and
+/// symlinked directories). Falls back to the raw path when nothing resolves.
+fn canonicalish(path: &Path) -> PathBuf {
+    if let Ok(c) = fs::canonicalize(path) {
+        return c;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(dir), Some(name)) => fs::canonicalize(dir).map(|d| d.join(name)).unwrap_or_else(|_| path.to_path_buf()),
+        _ => path.to_path_buf(),
+    }
+}
+
+/// Whether two file metadata records describe the same file (hard links included): device and
+/// inode on Unix, volume serial and file index on Windows.
+fn same_file(a: &Metadata, b: &Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        a.dev() == b.dev() && a.ino() == b.ino()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        a.volume_serial_number().is_some()
+            && a.volume_serial_number() == b.volume_serial_number()
+            && a.file_index().is_some()
+            && a.file_index() == b.file_index()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (a, b);
+        false
+    }
+}
+
 pub fn run(args: &[&str]) -> Result<(), String> {
     let [input, output] = args else {
         return Err(
@@ -43,10 +79,17 @@ pub fn run(args: &[&str]) -> Result<(), String> {
     };
     let input_path = Path::new(input);
     let output_path = Path::new(output);
-    let input_bytes = usize::try_from(std::fs::metadata(input_path).map_err(|e| format!("{}: {e}", input_path.display()))?.len())
-        .map_err(|_| format!("{}: file too large", input_path.display()))?;
+    let input_meta = fs::metadata(input_path).map_err(|e| format!("{}: {e}", input_path.display()))?;
+    let input_bytes = usize::try_from(input_meta.len()).map_err(|_| format!("{}: file too large", input_path.display()))?;
 
     let in_file = File::open(input_path).map_err(|e| format!("{}: {e}", input_path.display()))?;
+    // Refuse to truncate the input: identical or aliased paths (symlinks, `..`, hard links)
+    // would otherwise destroy the file being compressed.
+    let output_is_input =
+        canonicalish(input_path) == canonicalish(output_path) || fs::metadata(output_path).is_ok_and(|m| same_file(&input_meta, &m));
+    if output_is_input {
+        return Err(format!("{}: output refers to the input file", output_path.display()));
+    }
     let out_file = File::create(output_path).map_err(|e| format!("{}: {e}", output_path.display()))?;
     compress(&mut BufReader::new(in_file), &mut BufWriter::new(out_file))?;
 
@@ -98,5 +141,24 @@ mod tests {
     fn ratio_str_guards_empty_input() {
         assert_eq!(ratio_str(0, 0), "n/a (empty input)");
         assert_eq!(ratio_str(200, 50), "25.0% of input");
+    }
+
+    #[test]
+    fn run_refuses_to_truncate_its_input() {
+        let dir = std::env::temp_dir().join(format!("wordcraft-xtask-brotli-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("in.bin");
+        std::fs::write(&input, b"payload").unwrap();
+        let input_s = input.to_str().unwrap().to_string();
+
+        // The identical path string.
+        assert!(run(&[input_s.as_str(), input_s.as_str()]).is_err());
+        // A hard link is a different path to the same file.
+        let link = dir.join("link.bin");
+        if std::fs::hard_link(&input, &link).is_ok() {
+            assert!(run(&[input_s.as_str(), link.to_str().unwrap()]).is_err());
+        }
+        assert_eq!(std::fs::read(&input).unwrap(), b"payload", "the input must survive a rejected run");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

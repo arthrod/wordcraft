@@ -148,13 +148,23 @@ pub(crate) fn read_package(bytes: &[u8], chunks: Option<ChunkImporter>) -> Resul
 /// [`read_package`] with the caller's decompression budgets ([`crate::package::MAX_PART`] and
 /// [`crate::package::MAX_TOTAL`] unless it has tighter ones, e.g. a Worker isolate).
 pub(crate) fn read_package_limited(bytes: &[u8], chunks: Option<ChunkImporter>, max_part: u64, max_total: u64) -> Result<Document, DocxError> {
-    read_opened(&Package::open_limited(bytes, max_part, max_total)?, chunks)
+    read_opened_limited(&Package::open_limited(bytes, max_part, max_total)?, chunks, max_part, max_total)
 }
 
 /// Read a package whose parts are already unpacked (from a zip, a Flat OPC file or a converted
 /// Word 2003 XML document).
 pub(crate) fn read_opened(pkg: &Package, chunks: Option<ChunkImporter>) -> Result<Document, DocxError> {
     let mut state = ChunkState::new(chunks);
+    read_opened_in(pkg, &mut state).map(|(doc, ..)| doc)
+}
+
+/// [`read_opened`] for a package opened under the caller's decompression budgets: nested
+/// WordprocessingML chunks are held to them too, their unpacked bytes charged against the
+/// `max_total` `pkg` hasn't already spent (see [`ChunkState`]).
+pub(crate) fn read_opened_limited(pkg: &Package, chunks: Option<ChunkImporter>, max_part: u64, max_total: u64) -> Result<Document, DocxError> {
+    let mut state = ChunkState::new(chunks);
+    state.part = max_part;
+    state.bytes = state.bytes.min(max_total.saturating_sub(pkg.size()));
     read_opened_in(pkg, &mut state).map(|(doc, ..)| doc)
 }
 

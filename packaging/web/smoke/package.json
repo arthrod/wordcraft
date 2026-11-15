@@ -4,7 +4,8 @@
   "type": "module",
   "description": "Consumer smoke matrix for the wordcraft-web npm package (deferred-items plan 7.3a).",
   "scripts": {
-    "smoke": "./run.sh"
+    "smoke": "./run.sh",
+    "test": "node --test"
   },
   "devDependencies": {
     "puppeteer-core": "^24.0.0"

@@ -122,6 +122,18 @@ function parseArgs(argv) {
   return args;
 }
 
+// Errors caused by the deliberate zero-config wasm attempt are expected
+// exactly when wasmAuto is false; everything else counts. Suppression requires
+// the error to identify the failed wasm URL (`*_bg.wasm`) — a generic "404"
+// text match would hide unrelated resource failures in the same window.
+export function isExpectedWasmMiss(smoke, e) {
+  return (
+    smoke?.wasmAuto === false &&
+    e.t <= (smoke.startResolvedAt ?? 0) + 500 &&
+    (e.url?.includes("_bg.wasm") || e.text?.includes("_bg.wasm"))
+  );
+}
+
 async function waitForConsole(logs, match, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -190,55 +202,63 @@ async function drive({ fixture, dist, pkg, out }) {
     const workerLine = await waitForConsole(consoleLog, (m) => /proofing worker: \d+ issue\(s\) in the smoke check/.test(m.text), 90_000);
 
     // Malformed messages must get a typed `error` reply, never silence or a throw out of
-    // onmessage (wordcraft-worker-proof `unpack`): post junk straight at the worker loader,
-    // plus one well-formed ping to prove the worker still answers.
+    // onmessage (each worker's `unpack`): post junk straight at every dedicated worker's
+    // loader, plus one well-formed ping to prove the worker still answers.
     const malformed = await page.evaluate(async (assetBase) => {
-      const worker = new Worker(`${assetBase}wordcraft-worker-proof_loader.js`, { type: "module" });
-      try {
-        const replies = [];
-        const errors = [];
-        worker.onmessage = (e) => replies.push(e.data);
-        worker.onerror = (e) => errors.push(String(e.message ?? e));
-        const kindOf = (d) => {
-          try {
-            return JSON.parse(d[0]).kind;
-          } catch {
-            return null;
+      const probe = async (file) => {
+        const worker = new Worker(`${assetBase}${file}`, { type: "module" });
+        try {
+          const replies = [];
+          const errors = [];
+          worker.onmessage = (e) => replies.push(e.data);
+          worker.onerror = (e) => errors.push(String(e.message ?? e));
+          const kindOf = (d) => {
+            try {
+              return JSON.parse(d[0]).kind;
+            } catch {
+              return null;
+            }
+          };
+          const codeOf = (d) => {
+            try {
+              return JSON.parse(new TextDecoder().decode(d[1] ?? new ArrayBuffer(0))).code;
+            } catch {
+              return null;
+            }
+          };
+          // The wasm binds asynchronously: `ready` is posted only once `onmessage` is set, so
+          // messages sent before it would be dispatched to nothing and dropped.
+          const bootDeadline = Date.now() + 30_000;
+          while (Date.now() < bootDeadline && !replies.some((d) => kindOf(d) === "ready")) {
+            await new Promise((r) => setTimeout(r, 100));
           }
-        };
-        const codeOf = (d) => {
-          try {
-            return JSON.parse(new TextDecoder().decode(d[1] ?? new ArrayBuffer(0))).code;
-          } catch {
-            return null;
+          worker.postMessage(null);
+          worker.postMessage("not-an-array");
+          worker.postMessage([null, new ArrayBuffer(8)]);
+          worker.postMessage([{ v: 1, id: 7, kind: "ping", revision: 0 }, "not-bytes"]);
+          worker.postMessage(['{"v":1,"id":9,"kind":"ping","revision":0}', new Uint8Array(0)]);
+          const deadline = Date.now() + 30_000;
+          const badRequests = () => replies.filter((d) => kindOf(d) === "error" && codeOf(d) === "badRequest").length;
+          while (Date.now() < deadline && (badRequests() < 4 || !replies.some((d) => kindOf(d) === "pong"))) {
+            await new Promise((r) => setTimeout(r, 100));
           }
-        };
-        // The wasm binds asynchronously: `ready` is posted only once `onmessage` is set, so
-        // messages sent before it would be dispatched to nothing and dropped.
-        const bootDeadline = Date.now() + 30_000;
-        while (Date.now() < bootDeadline && !replies.some((d) => kindOf(d) === "ready")) {
-          await new Promise((r) => setTimeout(r, 100));
+          return {
+            badRequests: badRequests(),
+            pong: replies.some((d) => kindOf(d) === "pong" && JSON.parse(d[0]).id === 9),
+            kinds: replies.map(kindOf),
+            errors,
+          };
+        } finally {
+          worker.terminate();
         }
-        worker.postMessage(null);
-        worker.postMessage("not-an-array");
-        worker.postMessage([null, new ArrayBuffer(8)]);
-        worker.postMessage([{ v: 1, id: 7, kind: "ping", revision: 0 }, "not-bytes"]);
-        worker.postMessage(['{"v":1,"id":9,"kind":"ping","revision":0}', new Uint8Array(0)]);
-        const deadline = Date.now() + 30_000;
-        const badRequests = () => replies.filter((d) => kindOf(d) === "error" && codeOf(d) === "badRequest").length;
-        while (Date.now() < deadline && (badRequests() < 4 || !replies.some((d) => kindOf(d) === "pong"))) {
-          await new Promise((r) => setTimeout(r, 100));
-        }
-        return {
-          badRequests: badRequests(),
-          pong: replies.some((d) => kindOf(d) === "pong" && JSON.parse(d[0]).id === 9),
-          kinds: replies.map(kindOf),
-          errors,
-        };
-      } finally {
-        worker.terminate();
-      }
+      };
+      return {
+        proof: await probe("wordcraft-worker-proof_loader.js"),
+        codecs: await probe("wordcraft-worker-codecs_loader.js"),
+        pdf: await probe("wordcraft-worker-pdf_loader.js"),
+      };
     }, "/wordcraft-web/");
+    const malformedOk = (m) => m !== null && m.badRequests >= 4 && m.pong === true;
 
     const status = (substr) => {
       for (const [url, code] of responses) {
@@ -248,12 +268,8 @@ async function drive({ fixture, dist, pkg, out }) {
     };
     const got = (substr) => status(substr) === 200;
 
-    // Errors caused by the deliberate zero-config wasm attempt are expected
-    // exactly when wasmAuto is false; everything else counts.
-    const isExpectedWasmMiss = (e) =>
-      smoke?.wasmAuto === false && e.t <= (smoke.startResolvedAt ?? 0) + 500 && (e.url?.includes("_bg.wasm") || e.text?.includes("_bg.wasm") || e.text?.includes("404"));
     const consoleErrors = [
-      ...consoleLog.filter((m) => (m.type === "error" || m.type === "assert") && !isExpectedWasmMiss(m)).map((m) => m.text),
+      ...consoleLog.filter((m) => (m.type === "error" || m.type === "assert") && !isExpectedWasmMiss(smoke, m)).map((m) => m.text),
       ...pageErrors.map((e) => e.text),
     ];
 
@@ -275,7 +291,7 @@ async function drive({ fixture, dist, pkg, out }) {
       workerReady: workerLine !== null,
       workerLine: workerLine?.text ?? null,
       workerMalformed: malformed,
-      workerMalformedOk: malformed.badRequests >= 4 && malformed.pong === true,
+      workerMalformedOk: malformedOk(malformed?.proof) && malformedOk(malformed?.codecs) && malformedOk(malformed?.pdf),
       workerFailed: consoleLog.some((m) => /proofing worker.*(fail|error)/i.test(m.text)),
       consoleErrors,
       httpMisses: [...responses.entries()].filter(([url, code]) => code >= 400 && !url.includes("favicon")).map(([url, code]) => `${code} ${url}`),
@@ -319,9 +335,12 @@ function report(resultsDir) {
   return lines.join("\n") + "\n";
 }
 
-const args = parseArgs(process.argv);
-if (args.report) {
-  process.stdout.write(report(resolve(args.results ?? join(HERE, "results"))));
-} else {
-  await drive(args);
+// Run only when invoked as a script, so drive.test.mjs can import the helpers.
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const args = parseArgs(process.argv);
+  if (args.report) {
+    process.stdout.write(report(resolve(args.results ?? join(HERE, "results"))));
+  } else {
+    await drive(args);
+  }
 }

@@ -50,8 +50,9 @@ struct Inner {
     /// Jobs posted before the worker's `ready` notice: a module worker still evaluating its
     /// top-level `await init()` silently DROPS transferred messages (measured 2026-11-15: a
     /// renderPdf posted pre-ready never arrives; the same bytes posted after `ready` answer),
-    /// so early posts wait here and flush when `ready` lands.
-    queued: Vec<(u32, proto::Kind, Vec<u8>)>,
+    /// so early posts wait here and flush when `ready` lands. The document revision travels
+    /// with the job: a `check` flushed with revision 0 would have its reply dropped as stale.
+    queued: Vec<(u32, proto::Kind, u64, Vec<u8>)>,
     pending: HashMap<u32, Pending>,
 }
 
@@ -90,10 +91,14 @@ impl ProofWorker {
 
         let handler = inner.clone();
         let onerror = Closure::<dyn FnMut(web_sys::ErrorEvent)>::new(move |event: web_sys::ErrorEvent| {
-            let mut inner = handler.borrow_mut();
-            inner.failed = true;
-            inner.pending.clear();
+            let pending = {
+                let mut inner = handler.borrow_mut();
+                inner.failed = true;
+                inner.queued.clear();
+                inner.pending.drain().map(|(id, p)| (id, p.sink)).collect::<Vec<_>>()
+            };
             log::warn!("proofing worker failed ({}:{}): {}", event.filename(), event.lineno(), event.message());
+            fail_pending(pending, "the proofing worker stopped");
         });
         worker.set_onerror(Some(onerror.as_ref().unchecked_ref()));
 
@@ -124,7 +129,7 @@ impl ProofWorker {
         }
         let id = inner.ids.next_id();
         if !inner.ready {
-            inner.queued.push((id, kind, payload.to_vec()));
+            inner.queued.push((id, kind, revision, payload.to_vec()));
             return Ok(id);
         }
         let env = proto::Envelope::request(id, kind, revision);
@@ -196,6 +201,17 @@ impl ProofWorker {
     }
 }
 
+/// Complete each pending request with a typed `error` reply after the worker died: callers get
+/// a failure instead of a promise that never settles (and their scheduler slots free up). Runs
+/// outside the state borrow — the sinks can re-enter the page's callers.
+fn fail_pending(pending: Vec<(u32, Sink)>, message: &str) {
+    let reply = proto::ErrorReply { code: proto::ErrorCode::Internal, message: message.to_string() };
+    let Ok(payload) = proto::encode_payload(&reply) else { return };
+    for (id, sink) in pending {
+        sink(&proto::Envelope::request(id, proto::Kind::Error, 0), &payload);
+    }
+}
+
 /// Route one `[headerJson, payloadBuffer]` message from the worker.
 fn on_message(inner: &Rc<RefCell<Inner>>, data: &wasm_bindgen::JsValue) {
     let arr = js_sys::Array::from(data);
@@ -218,8 +234,8 @@ fn on_message(inner: &Rc<RefCell<Inner>>, data: &wasm_bindgen::JsValue) {
             let queued = std::mem::take(&mut inner.queued);
             let worker = inner.worker.clone();
             drop(inner);
-            for (id, kind, payload) in queued {
-                let env = proto::Envelope::request(id, kind, 0);
+            for (id, kind, revision, payload) in queued {
+                let env = proto::Envelope::request(id, kind, revision);
                 let Ok(header) = proto::encode_envelope(&env)
                     .map_err(|e| e.to_string())
                     .and_then(|h| String::from_utf8(h).map_err(|_| "envelope was not UTF-8".to_string()))

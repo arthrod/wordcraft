@@ -74,10 +74,14 @@ impl PdfWorker {
 
         let handler = inner.clone();
         let onerror = Closure::<dyn FnMut(web_sys::ErrorEvent)>::new(move |event: web_sys::ErrorEvent| {
-            let mut inner = handler.borrow_mut();
-            inner.failed = true;
-            inner.pending.clear();
+            let pending = {
+                let mut inner = handler.borrow_mut();
+                inner.failed = true;
+                inner.queued.clear();
+                inner.pending.drain().collect::<Vec<_>>()
+            };
             log::warn!("pdf worker failed ({}:{}): {}", event.filename(), event.lineno(), event.message());
+            fail_pending(pending, "the pdf worker stopped");
         });
         worker.set_onerror(Some(onerror.as_ref().unchecked_ref()));
 
@@ -144,6 +148,17 @@ impl PdfWorker {
     #[allow(dead_code)] // Kept for a future cancel affordance.
     pub(crate) fn terminate(self) {
         self.inner.borrow().worker.terminate();
+    }
+}
+
+/// Complete each pending request with a typed `error` reply after the worker died: callers get
+/// a failure instead of a promise that never settles. Runs outside the state borrow — the sinks
+/// can re-enter the page's callers.
+fn fail_pending(pending: Vec<(u32, Box<dyn FnOnce(&proto::Envelope, &[u8])>)>, message: &str) {
+    let reply = proto::ErrorReply { code: proto::ErrorCode::Internal, message: message.to_string() };
+    let Ok(payload) = proto::encode_payload(&reply) else { return };
+    for (id, sink) in pending {
+        sink(&proto::Envelope::request(id, proto::Kind::Error, 0), &payload);
     }
 }
 

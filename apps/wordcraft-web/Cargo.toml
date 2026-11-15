@@ -21,6 +21,11 @@ wgpu = ["eframe/wgpu"]
 [dependencies]
 wordcraft-engine = { workspace = true, default-features = false }
 wordcraft-ui-egui = { workspace = true, default-features = false }
+# The proofing scheduler compiles for host tests too (`src/web/proof_squiggles.rs` is shared
+# through `#[path]`); these are its types.
+wordcraft-doc = { workspace = true }
+wordcraft-layout = { workspace = true, default-features = false }
+wordcraft-worker-proto = { workspace = true }
 log = { workspace = true }
 serde_json = { workspace = true }
 
@@ -31,11 +36,8 @@ wordcraft-ui-egui = { workspace = true, default-features = false, features = ["m
 craft-web-api = { git = "https://github.com/storytold/craft-libs", rev = "fd5e2feff6ea25bed371a99cc732b3968d621505", version = "0.1.0" }
 craft-web-host = { git = "https://github.com/storytold/craft-libs", rev = "fd5e2feff6ea25bed371a99cc732b3968d621505", version = "0.1.0" }
 egui = { workspace = true }
-wordcraft-doc = { workspace = true }
-wordcraft-layout = { workspace = true, default-features = false }
 wordcraft-fonts = { workspace = true, default-features = false, features = ["minimal-wasm-fonts"] }
 wordcraft-geom = { workspace = true }
-wordcraft-worker-proto = { workspace = true }
 eframe = { workspace = true, features = ["accesskit"] }
 rfd = { workspace = true }
 wasm-bindgen = "0.2"

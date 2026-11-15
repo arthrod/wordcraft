@@ -20,6 +20,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+#[cfg(target_arch = "wasm32")]
 use egui::Context;
 use wordcraft_doc::{Path, StoryRef};
 use wordcraft_worker_proto as proto;
@@ -81,10 +82,44 @@ thread_local! {
 }
 
 /// One frame: apply what arrived, then send what changed. `session.doc` is only read.
+#[cfg(target_arch = "wasm32")]
 pub(crate) fn tick(session: &wordcraft_engine::Session, asset_base: &str, ctx: &Context) {
     if !crate::web::proof_worker::ensure(asset_base) {
         return; // Unavailable in this browser (§3.1): squiggles are off, never a panic.
     }
+    let (applied, sends) = pump(session);
+    // Send outside the borrow: the reply closures push into the same scheduler.
+    for (id, req, story, path, text) in sends {
+        let key = (story, path.clone());
+        let sent = crate::web::proof_worker::with(|w| {
+            w.check(&req, move |reply| {
+                SCHED.with(|s| {
+                    s.borrow_mut().replies.push(Apply { id, story, path, checked_text: text, reply });
+                });
+            })
+        });
+        if !matches!(sent, Some(Ok(_))) {
+            // Nowhere to send (or the send failed): the reply never comes, so the paragraph
+            // must not stay pending — the scan would never re-check it.
+            SCHED.with(|s| {
+                let mut s = s.borrow_mut();
+                s.ids.remove(&id);
+                if let Some(t) = s.tracked.get_mut(&key) {
+                    t.pending = false;
+                }
+            });
+        }
+    }
+    if applied {
+        ctx.request_repaint();
+    }
+}
+
+/// The scheduler half of a frame, split from the worker send so tests can drive it without a
+/// browser: apply arrived replies, refresh the paragraph list on its interval, and collect the
+/// checks worth sending. Returns whether a reply applied (the caller repaints) and the
+/// `(id, request, story, path, checked text)` sends to post.
+fn pump(session: &wordcraft_engine::Session) -> (bool, Vec<(u32, proto::CheckRequest, StoryRef, Path, String)>) {
     let mut applied = false;
     let mut sends: Vec<(u32, proto::CheckRequest, StoryRef, Path, String)> = Vec::new();
     SCHED.with(|s| {
@@ -122,7 +157,10 @@ pub(crate) fn tick(session: &wordcraft_engine::Session, asset_base: &str, ctx: &
         // Refresh the paragraph list now and then.
         if s.ticks % PATHS_REFRESH == 0 {
             s.paths = session.doc.para_paths(StoryRef::Body);
-            s.scan = s.scan.min(s.paths.len());
+            // `scan` must stay a valid index into the refreshed list: 0 when it is empty,
+            // otherwise the old position clamped below the end — paragraphs may have been
+            // deleted since the last refresh.
+            s.scan = if s.paths.is_empty() { 0 } else { s.scan.min(s.paths.len() - 1) };
         }
         let in_flight = s.ids.len();
         let mut budget = SCAN_PER_TICK.min(s.paths.len());
@@ -168,29 +206,38 @@ pub(crate) fn tick(session: &wordcraft_engine::Session, asset_base: &str, ctx: &
             sends.push((id, req, StoryRef::Body, path, p.text.clone()));
         }
     });
-    // Send outside the borrow: the reply closures push into the same scheduler.
-    for (id, req, story, path, text) in sends {
-        let key = (story, path.clone());
-        let sent = crate::web::proof_worker::with(|w| {
-            w.check(&req, move |reply| {
-                SCHED.with(|s| {
-                    s.borrow_mut().replies.push(Apply { id, story, path, checked_text: text, reply });
-                });
-            })
-        });
-        if !matches!(sent, Some(Ok(_))) {
-            // Nowhere to send (or the send failed): the reply never comes, so the paragraph
-            // must not stay pending — the scan would never re-check it.
-            SCHED.with(|s| {
-                let mut s = s.borrow_mut();
-                s.ids.remove(&id);
-                if let Some(t) = s.tracked.get_mut(&key) {
-                    t.pending = false;
-                }
-            });
+    (applied, sends)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wordcraft_doc::{Document, Pos};
+
+    /// Paragraphs deleted between path refreshes must not leave `scan` indexing past the new
+    /// list: the refresh clamps it to a valid position (0 when nothing is left).
+    #[test]
+    fn refresh_after_deleting_paragraphs_keeps_scan_in_bounds() {
+        let mut session = wordcraft_engine::Session::new(Document::from_text("a\nb\nc\nd\ne\nf"));
+        // The first refresh lands on tick PATHS_REFRESH; run up to it so `paths` is filled.
+        for _ in 0..PATHS_REFRESH {
+            pump(&session);
         }
-    }
-    if applied {
-        ctx.request_repaint();
+        let len = SCHED.with(|s| s.borrow().paths.len());
+        assert_eq!(len, 6);
+        // Walk the scan to the last paragraph and line the next pump up on a refresh.
+        SCHED.with(|s| {
+            let mut s = s.borrow_mut();
+            s.scan = len - 1;
+            s.ticks = PATHS_REFRESH - 1;
+        });
+        // Delete paragraphs so the refreshed list is shorter than the old scan position.
+        session.doc.delete_range(&Pos::body(1, 0), &Pos::body(len - 2, 0)).unwrap();
+        assert!(session.doc.para_paths(StoryRef::Body).len() < len);
+        let _ = pump(&session);
+        SCHED.with(|s| {
+            let s = s.borrow();
+            assert!(s.paths.is_empty() || s.scan < s.paths.len());
+        });
     }
 }
