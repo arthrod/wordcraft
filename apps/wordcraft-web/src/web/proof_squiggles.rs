@@ -133,12 +133,9 @@ fn pump(session: &wordcraft_engine::Session) -> (bool, Vec<(u32, proto::CheckReq
             let Some(t) = s.tracked.get_mut(&key) else { continue };
             t.pending = false;
             let spans = match &apply.reply {
-                Ok(reply) => reply
-                    .issues
-                    .iter()
-                    .filter(|i| i.start < i.end)
-                    .map(|i| (i.start, i.end, i.kind == proto::IssueKind::Grammar))
-                    .collect::<Vec<_>>(),
+                Ok(reply) => {
+                    reply.issues.iter().filter(|i| i.start < i.end).map(|i| (i.start, i.end, i.kind == proto::IssueKind::Grammar)).collect::<Vec<_>>()
+                }
                 Err(_) => Vec::new(),
             };
             if session.doc.para(apply.story, &apply.path).is_some_and(|p| p.text == apply.checked_text) {
@@ -149,11 +146,7 @@ fn pump(session: &wordcraft_engine::Session) -> (bool, Vec<(u32, proto::CheckReq
                 // The next scan re-checks it; remove any stale overlay AND the remembered
                 // check, so text an undo restores is sent again instead of matching the
                 // stale entry and never being checked.
-                wordcraft_layout::proof_overlay::set_overlay(
-                    apply.story,
-                    apply.path,
-                    std::iter::empty::<wordcraft_layout::proof_overlay::Span>(),
-                );
+                wordcraft_layout::proof_overlay::set_overlay(apply.story, apply.path, std::iter::empty::<wordcraft_layout::proof_overlay::Span>());
                 s.tracked.remove(&key);
             }
         }
@@ -271,12 +264,14 @@ mod tests {
         });
     }
 
-    /// A paragraph deleted between path refreshes loses its tracked state and its in-flight
-    /// request slot, so nothing stale is left behind for a path that reappears later.
+    /// Paragraphs deleted between path refreshes lose their tracked state and their in-flight
+    /// request slot, so nothing stale is left behind for a path that reappears later. Paths
+    /// are positional, so the fixture deletes the trailing paragraphs — the only ones whose
+    /// keys actually leave the refreshed list.
     #[test]
     fn refresh_evicts_tracked_state_for_deleted_paragraphs() {
-        let mut session = wordcraft_engine::Session::new(Document::from_text("aaa\nbbb\nccc"));
-        // Warm up past the first refresh and let the scan send all three checks.
+        let mut session = wordcraft_engine::Session::new(Document::from_text("aaa\nbbb\nccc\nddd"));
+        // Warm up past the first refresh and let the scan send all four checks.
         for _ in 0..=PATHS_REFRESH {
             pump(&session);
         }
@@ -284,19 +279,22 @@ mod tests {
             let s = s.borrow();
             (s.tracked.len(), s.ids.len(), s.paths.clone())
         });
-        assert_eq!((tracked, ids, paths.len()), (3, 3, 3));
-        let gone = paths[1].clone();
-        session.doc.delete_range(&Pos::body(1, 0), &Pos::body(2, 0)).unwrap();
+        assert_eq!((tracked, ids, paths.len()), (4, 4, 4));
+        let gone = paths[3].clone();
+        // Delete from the start of "ccc" to the end of "ddd": the last two paragraphs' marks
+        // collapse into one empty paragraph, so path [3] is gone from the refreshed list.
+        session.doc.delete_range(&Pos::body(2, 0), &Pos::body(3, 3)).unwrap();
         // Line the next pump up on a refresh.
         SCHED.with(|s| s.borrow_mut().ticks = PATHS_REFRESH - 1);
         pump(&session);
         SCHED.with(|s| {
             let s = s.borrow();
-            assert_eq!(s.paths.len(), 2);
-            assert_eq!(s.tracked.len(), 2);
-            assert_eq!(s.ids.len(), 2);
+            assert!(s.paths.len() < 4);
+            assert_eq!(s.tracked.len(), s.paths.len());
+            assert_eq!(s.ids.len(), s.paths.len());
             assert!(!s.tracked.contains_key(&(StoryRef::Body, gone.clone())));
-            assert!(s.ids.values().all(|(_, p)| *p != gone));
+            assert!(s.tracked.keys().all(|(_, p)| s.paths.contains(p)));
+            assert!(s.ids.values().all(|(_, p)| s.paths.contains(p)));
         });
     }
 
@@ -306,10 +304,12 @@ mod tests {
     #[test]
     fn stale_reply_invalidates_the_tracked_check() {
         let mut session = wordcraft_engine::Session::new(Document::from_text("aaa"));
-        for _ in 0..=PATHS_REFRESH {
-            pump(&session);
-        }
+        // The first refresh tick already scans, so collect sends from the warmup too.
         let mut sent = Vec::new();
+        for _ in 0..=PATHS_REFRESH {
+            let (_, s) = pump(&session);
+            sent.extend(s);
+        }
         for _ in 0..4 {
             let (_, s) = pump(&session);
             sent.extend(s);
@@ -343,9 +343,6 @@ mod tests {
         assert_eq!(session.doc.para(StoryRef::Body, &path).unwrap().text, "aaa");
         SCHED.with(|s| s.borrow_mut().ticks = PATHS_REFRESH - 1);
         let (_, sends) = pump(&session);
-        assert!(
-            sends.iter().any(|(_, _, _, _, text)| text == "aaa"),
-            "the restored text was not re-checked"
-        );
+        assert!(sends.iter().any(|(_, _, _, _, text)| text == "aaa"), "the restored text was not re-checked");
     }
 }
