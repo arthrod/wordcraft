@@ -318,9 +318,10 @@ impl Lang {
     /// ([`locale_registered`] says which it is).
     pub fn from_code(code: &str) -> Option<Lang> {
         let info = LANGUAGES.iter().find(|l| l.code.eq_ignore_ascii_case(code))?;
-        let i18n = active_i18n();
-        let rt_active = ACTIVE_I18N.read().unwrap_or_else(std::sync::PoisonError::into_inner).is_some();
-        i18n.from_code(info.code).map(|lang| Lang { lang, catalogs: rt_active.then_some(i18n) })
+        // No catalog snapshot: lookups resolve through `active_i18n` at call time, so a handle
+        // outlives `register_locale` replacing the active catalogs (locale indices are stable —
+        // every rebuild keeps `base_catalogs`' order). Only test fixtures pin `catalogs`.
+        active_i18n().from_code(info.code).map(|lang| Lang { lang, catalogs: None })
     }
 
     /// Resolve the `language` setting: a language code, or [`AUTO`] (and anything unknown, e.g. a
@@ -766,5 +767,23 @@ mod picker_order_tests {
         assert_eq!(tr(fr, "__rt_probe__"), "Sonde runtime");
         assert_eq!(lang_from_tag("fr-FR").map(|l| l.code()), Some("fr"));
         assert_eq!(Lang::from_pref(AUTO).code(), "fr", "after registration, auto resolves the registered catalog");
+    }
+
+    /// A `Lang` handle kept across `register_locale` reads the replacement catalog, not the
+    /// generation it was created under.
+    #[test]
+    fn a_lang_handle_reads_the_replacement_catalog() {
+        let _lock = RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = RestoreRuntimeCatalog {
+            prev_entries: RUNTIME_CATALOGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone(),
+            prev_active: *ACTIVE_I18N.read().unwrap_or_else(std::sync::PoisonError::into_inner),
+            prev_test_tags: TEST_SYSTEM_TAGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take(),
+        };
+        register_locale("fr", "", "\t__rt_probe2__\tPremier\n");
+        let fr = Lang::from_code("fr").expect("fr resolves");
+        assert_eq!(tr(fr, "__rt_probe2__"), "Premier");
+
+        register_locale("fr", "", "\t__rt_probe2__\tRemplacé\n");
+        assert_eq!(tr(fr, "__rt_probe2__"), "Remplacé", "the retained handle uses the replacement translations");
     }
 }

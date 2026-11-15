@@ -154,14 +154,12 @@ fn run_check(req: &CheckRequest) -> CheckReply {
         ignore_numbers: opts.ignore_numbers,
         ignore_internet: opts.ignore_internet,
     };
-    let mut skipped: Vec<ByteRange> = req.skip.clone();
-    skipped.sort_unstable_by_key(|r| (r.start, r.end));
     let issues = wordcraft_proof::check_text_with(&req.text, &spans, &spelling, opts.grammar, req.list_item);
     CheckReply {
         para_id: req.para_id,
         issues: issues
             .into_iter()
-            .filter(|i| !overlaps(&skipped, i.start, i.end))
+            .filter(|i| !overlaps(&req.skip, i.start, i.end))
             .filter(|i| i.kind == IssueKind::Grammar || req.typing.is_none_or(|t| !(i.start < t.end as usize && (t.start as usize) < i.end)))
             .take(proto::MAX_ISSUES)
             .map(|i| Issue {
@@ -179,11 +177,12 @@ fn run_check(req: &CheckRequest) -> CheckReply {
     }
 }
 
-/// Whether `a..b` overlaps one of `skipped` (sorted): the first range ending after `a` is the
-/// only one that can — the same binary-search rule layout's `overlaps` uses.
+/// Whether `a..b` overlaps one of `skipped`. `check_request_error` bounds each range but not
+/// their order or overlap, so every range is checked — sorting by start would not order ends
+/// (a range can swallow a later one), and `MAX_SKIP_RANGES` is small enough that a scan is
+/// cheaper than sorting per request.
 fn overlaps(skipped: &[ByteRange], a: usize, b: usize) -> bool {
-    let k = skipped.partition_point(|r| r.end as usize <= a);
-    skipped.get(k).is_some_and(|r| (r.start as usize) < b)
+    skipped.iter().any(|r| (r.start as usize) < b && a < r.end as usize)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -206,13 +205,25 @@ fn serve() {
     post(&scope, &header, &[]);
 }
 
-/// The `[headerJson, payloadBuffer]` pair a message carries (crate docs); a missing or wrong
-/// shape unpacks to empty bytes, which `handle_message` answers with a typed `error`.
+/// The `[headerJson, payloadBuffer]` pair a message carries (crate docs). Anything else —
+/// not an array, a non-string header, a payload that is not bytes — unpacks to empty parts,
+/// which `handle_message` answers with a typed `error`: a malformed message must never throw
+/// out of `onmessage` and go unanswered.
 #[cfg(target_arch = "wasm32")]
 fn unpack(data: &wasm_bindgen::JsValue) -> (Vec<u8>, Vec<u8>) {
+    use wasm_bindgen::JsCast as _;
+
+    if !js_sys::Array::is_array(data) {
+        return (Vec::new(), Vec::new());
+    }
     let arr = js_sys::Array::from(data);
     let header = arr.get(0).as_string().unwrap_or_default().into_bytes();
-    let payload = js_sys::Uint8Array::new(&arr.get(1)).to_vec();
+    let payload = arr.get(1);
+    let payload = if payload.is_instance_of::<js_sys::ArrayBuffer>() || payload.is_instance_of::<js_sys::Uint8Array>() {
+        js_sys::Uint8Array::new(&payload).to_vec()
+    } else {
+        Vec::new()
+    };
     (header, payload)
 }
 
@@ -306,6 +317,27 @@ mod tests {
             after.issues.iter().filter(|i| i.kind == proto::IssueKind::Grammar).count(),
             before.issues.iter().filter(|i| i.kind == proto::IssueKind::Grammar).count()
         );
+    }
+
+    #[test]
+    fn skip_ranges_need_not_be_sorted_or_disjoint() {
+        // The wire contract bounds each range but not their order: (0,33) swallows (10,20),
+        // and sorting by start does not order ends — an issue inside the big range must still
+        // be filtered (a binary search keyed on end would miss it).
+        let req = CheckRequest {
+            para_id: 1,
+            text: format!("{}recieve", "a ".repeat(13)),
+            spans: Vec::new(),
+            skip: vec![ByteRange { start: 0, end: 33 }, ByteRange { start: 10, end: 20 }],
+            options: None,
+            typing: None,
+            list_item: false,
+        };
+        let (h, p) = request(Kind::Check, &req, 1);
+        let (rh, rp) = handle_message(&h, &p);
+        let (_, body) = decode_reply(&rh, &rp);
+        let reply: CheckReply = serde_json::from_value(body).unwrap();
+        assert!(reply.issues.is_empty(), "every byte is inside a skip range: {:?}", reply.issues);
     }
 
     #[test]

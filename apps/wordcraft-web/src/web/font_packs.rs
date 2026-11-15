@@ -16,7 +16,7 @@ use std::rc::Rc;
 use wasm_bindgen::JsCast as _;
 use wasm_bindgen_futures::JsFuture;
 
-use crate::font_pack_manifest::{ManifestEntry, entries_for_family, parse_manifest, style_matches};
+use crate::font_pack_manifest::{ManifestEntry, entries_for_families, parse_manifest, style_matches};
 
 /// The manifest entry implements the crate's face-like trait, so the matching rule is
 /// [`wordcraft_fonts::packs::pick_pack_face`]'s alone (family, italic, weight closest to the
@@ -109,7 +109,10 @@ async fn fetch_text(url: &str) -> Option<String> {
 fn ensure_manifest(ctx: egui::Context) {
     let loading = MANIFEST_FETCHING.with(|c| c.get());
     let have = MANIFEST.with(|m| m.borrow().is_some());
-    if loading || have {
+    // A failed fetch is not retried automatically (queued wanted faces would refetch every
+    // frame); `install_families` clears the flag first, so a manual ask still retries.
+    let failed = MANIFEST_FAILED.with(|c| c.get());
+    if loading || have || failed {
         return;
     }
     MANIFEST_FETCHING.with(|c| c.set(true));
@@ -130,6 +133,11 @@ fn ensure_manifest(ctx: egui::Context) {
             None => {
                 log::warn!("font packs: could not read {url}");
                 MANIFEST_FAILED.with(|c| c.set(true));
+                // Manual installs queued behind the manifest can never run: release them so
+                // their `installFonts` promises settle instead of hanging for the session.
+                // Wanted faces go too — automatic installs stay off once the manifest failed.
+                PENDING_FAMILIES.with(|p| p.borrow_mut().clear());
+                PENDING_WANTED.with(|p| p.borrow_mut().clear());
             }
         }
         // New wanted faces may have arrived while the manifest loaded.
@@ -204,7 +212,7 @@ fn record_result(file: &str, ok: bool) {
             let Some(families) = &waiter.families else {
                 continue;
             };
-            if manifest().is_some_and(|m| families.iter().any(|f| entries_for_family(&m, f).iter().any(|e| e.file == file))) {
+            if manifest().is_some_and(|m| entries_for_families(&m, families).iter().any(|e| e.file == file)) {
                 waiter.results.borrow_mut().push((file.to_string(), ok));
             }
         }
@@ -218,21 +226,20 @@ fn record_result(file: &str, ok: bool) {
 fn flush_waiters() {
     let in_flight_empty = IN_FLIGHT.with(|s| s.borrow().is_empty());
     let pending_empty = PENDING_FAMILIES.with(|p| p.borrow().is_empty());
+    // `installFonts()` also waits out the manifest fetch and wanted faces still queued behind it.
+    let settling_empty = !MANIFEST_FETCHING.with(|c| c.get()) && PENDING_WANTED.with(|p| p.borrow().is_empty());
     let manifest_done = MANIFEST.with(|m| m.borrow().is_some()) || MANIFEST_FAILED.with(|c| c.get());
     let mut ready = Vec::new();
     WAITERS.with(|w| {
         let mut keep = Vec::new();
         for waiter in w.borrow_mut().drain(..) {
             let done = match &waiter.families {
-                None => in_flight_empty && pending_empty,
+                None => in_flight_empty && pending_empty && settling_empty,
                 Some(families) => {
                     manifest_done
                         && pending_empty
                         && manifest().is_none_or(|m| {
-                            families
-                                .iter()
-                                .flat_map(|f| entries_for_family(&m, f))
-                                .all(|e| !in_flight(&e.file) && (attempted(&e.file) || is_installed(e)))
+                            entries_for_families(&m, families).into_iter().all(|e| !in_flight(&e.file) && (attempted(&e.file) || is_installed(e)))
                         })
                 }
             };
@@ -288,6 +295,8 @@ pub(crate) fn drain_wanted(ctx: &egui::Context) {
     if !needed.is_empty() {
         fetch_and_install(needed, ctx.clone());
     }
+    // Wanted faces may have settled with nothing to fetch; re-check waiters every frame.
+    flush_waiters();
 }
 
 /// The `install_font_packs` service callback and `font.installPack`'s work: fetch every pack face
@@ -304,11 +313,7 @@ pub(crate) fn install_families(families: Vec<String>, ctx: egui::Context) {
         return;
     };
     let needed: Vec<ManifestEntry> =
-        if families.is_empty() { m.iter().collect::<Vec<_>>() } else { families.iter().flat_map(|f| entries_for_family(&m, f)).collect() }
-            .into_iter()
-            .filter(|e| !attempted(&e.file) && !in_flight(&e.file) && !is_installed(e))
-            .cloned()
-            .collect();
+        entries_for_families(&m, &families).into_iter().filter(|e| !attempted(&e.file) && !in_flight(&e.file) && !is_installed(e)).cloned().collect();
     if needed.is_empty() {
         status(wordcraft_ui_egui::i18n::t("All fonts are already available.").to_string());
         ctx.request_repaint();

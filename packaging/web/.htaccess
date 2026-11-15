@@ -3,13 +3,19 @@ AddType application/wasm .wasm
 AddType text/javascript .js
 
 # Serve the precompressed <name>.wasm.br to clients that offer Brotli (plan §2.2). The .wasm
-# itself stays untouched — fallback clients and Range requests get the plain asset.
+# itself stays untouched — fallback clients and Range requests get the plain asset. The rewrite
+# runs only with mod_headers loaded: its FilesMatch below is what labels the .br payload
+# Content-Encoding: br, so without it the plain .wasm is served rather than br bytes the
+# browser can't decode. (mod_mime's AddEncoding can't be scoped to .wasm.br — it would also
+# mark the .ttf.br font packs, which the app downloads and decompresses itself.)
 <IfModule mod_rewrite.c>
-  RewriteEngine On
-  RewriteCond %{HTTP:Accept-Encoding} \bbr\b
-  RewriteCond %{HTTP:Range} !^.
-  RewriteCond %{REQUEST_FILENAME}.br -f
-  RewriteRule ^(.+\.wasm)$ $1.br [L]
+  <IfModule mod_headers.c>
+    RewriteEngine On
+    RewriteCond %{HTTP:Accept-Encoding} \bbr\b
+    RewriteCond %{HTTP:Range} !^.
+    RewriteCond %{REQUEST_FILENAME}.br -f
+    RewriteRule ^(.+\.wasm)$ $1.br [L]
+  </IfModule>
 </IfModule>
 
 <IfModule mod_deflate.c>

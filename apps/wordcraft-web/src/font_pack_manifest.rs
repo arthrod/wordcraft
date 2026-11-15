@@ -69,6 +69,13 @@ pub(crate) fn entries_for_family<'a>(manifest: &'a [ManifestEntry], family: &str
     manifest.iter().filter(|e| e.family.eq_ignore_ascii_case(family)).collect()
 }
 
+/// Every face a manual `installFonts(families)` ask covers: an empty `families` means the whole
+/// manifest. Shared by the fetch side and the waiter bookkeeping so both agree on the set.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(crate) fn entries_for_families<'a>(manifest: &'a [ManifestEntry], families: &[String]) -> Vec<&'a ManifestEntry> {
+    if families.is_empty() { manifest.iter().collect() } else { families.iter().flat_map(|f| entries_for_family(manifest, f)).collect() }
+}
+
 /// The (weight, italic) bucket an installed face's style name means, used to tell whether the
 /// face a manifest entry names is already loaded. Style names come from the font's `name` table
 /// ("Regular", "Italic", "Semibold", "Bold Italic", …).
@@ -137,6 +144,21 @@ mod tests {
             .join(",")
         );
         assert_eq!(parse_manifest(&big).unwrap().len(), MAX_MANIFEST_ENTRIES);
+    }
+
+    #[test]
+    fn entries_for_families_empty_means_every_face() {
+        let m = parse_manifest(
+            r#"{"faces":[
+              {"family":"Inter","weight":400,"italic":false,"file":"inter-regular.ttf.br","bytes":10},
+              {"family":"Inter","weight":700,"italic":false,"file":"inter-bold.ttf.br","bytes":10},
+              {"family":"Lora","weight":400,"italic":true,"file":"lora-italic.ttf.br","bytes":10}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(entries_for_families(&m, &[]).len(), 3);
+        assert_eq!(entries_for_families(&m, &["inter".to_string()]).len(), 2);
+        assert_eq!(entries_for_families(&m, &["lora".to_string(), "missing".to_string()]).len(), 1);
     }
 
     #[test]

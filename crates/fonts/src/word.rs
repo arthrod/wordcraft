@@ -650,6 +650,24 @@ fn resolve_family(db: &FontDb, family: &str) -> (String, bool) {
     remember_list_resolution(generation, list_key, family, (crate::FALLBACK_FAMILY.to_string(), true))
 }
 
+/// The candidates a fallback list skipped before settling on `resolved` (a candidate name or its
+/// charset base, as [`resolve_family`] reports it): the preferred entries a downloaded pack face
+/// could move the resolution up to. Bounded like the resolution walk itself.
+fn skipped_list_candidates<'a>(family: &'a str, resolved: &str) -> Vec<&'a str> {
+    family
+        .split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && s.len() <= FAMILY_KEY_MAX)
+        .take(8)
+        .map(|cand| {
+            let base = if cand.eq_ignore_ascii_case("Symbol (PCL6)") { "Symbol" } else { charset_base_family(cand) };
+            (cand, base)
+        })
+        .take_while(|(cand, base)| !cand.eq_ignore_ascii_case(resolved) && !base.eq_ignore_ascii_case(resolved))
+        .map(|(cand, _)| cand)
+        .collect()
+}
+
 /// Resolve `family` with bold/italic to a face (memoised until user fonts are added or removed,
 /// [`FontDb::generation`]).
 pub fn resolve(family: &str, bold: bool, italic: bool) -> Resolved {
@@ -684,7 +702,7 @@ pub fn resolve(family: &str, bold: bool, italic: bool) -> Resolved {
     let (fam, substituted) = resolve_family(db, family);
     let face = db.face(&fam, style_name(bold, italic));
     let r = Resolved { synth_bold: bold && face.weight < 600.0, synth_italic: italic && !face.italic, substituted, face: FaceRef::of(&face) };
-    note_wanted_pack(db, family, bold, italic, &r);
+    note_wanted_pack(db, family, &fam, bold, italic, &r);
     if cacheable {
         let mut c = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if c.0 == generation {
@@ -713,15 +731,23 @@ pub fn resolve(family: &str, bold: bool, italic: bool) -> Resolved {
 ///   substitutes to Source Sans 3 and fakes bold until SourceSans3-Bold lands);
 /// - and, on a substitution, every pack family the metric-twin and substitutes walk went past
 ///   with no face installed — a mono request walks MONO past JetBrains Mono, which the minimal
-///   web build doesn't bundle, so a download lets the walk settle there instead.
+///   web build doesn't bundle, so a download lets the walk settle there instead;
+/// - and, when a fallback list settles on a later installed candidate (`substituted` false),
+///   the pack families it skipped ahead of the winner — "JetBrains Mono;Source Sans 3" draws in
+///   Source Sans 3, but a JetBrains Mono download moves the resolution up the list.
 ///
 /// [`crate::packs::note_wanted`] records pack families only, deduped and bounded, so on native
 /// builds — every pack face bundled — the walk records nothing.
-fn note_wanted_pack(db: &FontDb, family: &str, bold: bool, italic: bool, r: &Resolved) {
+fn note_wanted_pack(db: &FontDb, family: &str, resolved: &str, bold: bool, italic: bool, r: &Resolved) {
     if r.synth_bold || r.synth_italic {
         crate::packs::note_wanted(&r.face.family, bold, italic);
     }
     if !r.substituted {
+        if family.contains(';') {
+            for cand in skipped_list_candidates(family, resolved) {
+                crate::packs::note_wanted(cand, bold, italic);
+            }
+        }
         return;
     }
     for cand in family.split(';').map(str::trim).filter(|s| !s.is_empty() && s.len() <= FAMILY_KEY_MAX).take(8) {
@@ -1136,6 +1162,19 @@ mod tests {
             assert!(r.substituted);
             assert_eq!(r.face.family, thai_sub);
         }
+    }
+
+    /// The candidates a fallback list skipped before its winner: everything ahead of the resolved
+    /// family (or its charset base), nothing from the winner on.
+    #[test]
+    fn skipped_list_candidates_stops_at_the_resolved_family() {
+        assert_eq!(skipped_list_candidates("JetBrains Mono;Source Sans 3;Inter", "Source Sans 3"), ["JetBrains Mono"]);
+        // The winner's charset base counts as the stop too ("Arial CE" resolves as "Arial").
+        assert!(skipped_list_candidates("Foo CE;Bar", "Foo").is_empty());
+        // First candidate installed: nothing skipped. A winner matching no candidate yields the
+        // bounded prefix rather than nothing.
+        assert!(skipped_list_candidates("A;B", "A").is_empty());
+        assert_eq!(skipped_list_candidates("A;B", "Z"), ["A", "B"]);
     }
 
     /// Fallback lists longer than `FAMILY_KEY_MAX` still select a later installed family and

@@ -209,7 +209,7 @@ mod tests {
         // error — both typed, never a panic.
         let req = wordcraft_worker_proto::PdfRenderRequest { docx: Vec::new(), fonts: Vec::new() };
         let (h, p) = request(&req, 2);
-        let (rh, rp) = handle_message(&h, &p);
+        let (_rh, rp) = handle_message(&h, &p);
         let body: proto::ErrorReply = serde_json::from_slice(&rp).unwrap();
         assert_eq!(body.code, ErrorCode::BadRequest);
 
@@ -247,6 +247,24 @@ mod tests {
         assert_eq!((renv.id, renv.revision), (11, 3));
         let body: proto::ErrorReply = serde_json::from_slice(&rp).unwrap();
         assert_eq!(body.code, ErrorCode::UnsupportedVersion);
+    }
+
+    /// The browser hangs reproducibly on the real sample document (a native render of the same
+    /// bytes answers in milliseconds): pin that exact input.
+    #[test]
+    fn render_pdf_answers_for_the_real_sample_document() {
+        let Ok(docx) = std::fs::read("/tmp/sample.docx") else {
+            eprintln!("skipped: /tmp/sample.docx not present (wordcraft-cli run --template sample --save /tmp/sample.docx)");
+            return;
+        };
+        let req = wordcraft_worker_proto::PdfRenderRequest { docx, fonts: Vec::new() };
+        let (h, p) = request(&req, 21);
+        let t0 = std::time::Instant::now();
+        let (rh, rp) = handle_message(&h, &p);
+        let env = proto::decode_envelope(&rh).unwrap();
+        assert_eq!(env.kind, Kind::Pdf, "body starts with {:?}", &rp[..rp.len().min(8)]);
+        assert!(rp.starts_with(b"%PDF"));
+        eprintln!("sample render: {} bytes in {:?}", rp.len(), t0.elapsed());
     }
 
     #[test]

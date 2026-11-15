@@ -24,7 +24,7 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
         let _ = app.run("file.save", json!({}));
     }
     let now = now_ms();
-    if app.session.md_source.as_ref().is_some_and(|src| src.is_pending() && now - src.applied_at_ms > APPLY_EVERY_MS) {
+    if app.session.md_source.as_ref().is_some_and(|src| src.is_pending() && !src.restored_by_undo() && now - src.applied_at_ms > APPLY_EVERY_MS) {
         wordcraft_engine::cmd::md_source::apply(&mut app.session);
         if let Some(src) = app.session.md_source.as_mut() {
             src.applied_at_ms = now;
@@ -106,6 +106,9 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
     }
     if changed {
         app.session.dirty = true;
+        if let Some(src) = app.session.md_source.as_mut() {
+            src.edited();
+        }
         ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(APPLY_EVERY_MS / 1000.0));
     }
 }
@@ -192,6 +195,7 @@ pub fn undo(app: &mut WordApp, redo: bool) -> Result<serde_json::Value, String> 
         src.text = text;
         let char_idx: usize = range.primary.index.into();
         src.caret = src.text.char_indices().nth(char_idx).map_or(src.text.len(), |(b, _)| b);
+        src.edited();
     }
     invalidate_undo_cache(&ctx, app.session.document_id());
     app.session.dirty = true;

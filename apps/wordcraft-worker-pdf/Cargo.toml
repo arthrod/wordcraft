@@ -16,7 +16,7 @@ path = "src/main.rs"
 [dependencies]
 wordcraft-doc = { workspace = true }
 wordcraft-docx = { workspace = true }
-wordcraft-fonts = { workspace = true, features = ["minimal-wasm-fonts"] }
+wordcraft-fonts = { workspace = true }
 wordcraft-layout = { workspace = true, default-features = false }
 wordcraft-pdf = { workspace = true }
 wordcraft-worker-proto = { workspace = true }
@@ -24,6 +24,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+# The worker only runs in the browser: the minimal bundle there, the full one on host builds
+# (an unconditional feature would unify it onto every workspace build and test).
+wordcraft-fonts = { workspace = true, features = ["minimal-wasm-fonts"] }
 # std HashMap/HashSet random seeds need a JS entropy source in the browser.
 getrandom = { workspace = true, features = ["wasm_js"] }
 wasm-bindgen = "0.2"

@@ -48,6 +48,7 @@ Chrome already in `~/.cache/puppeteer`.
 | **locale loaded** | `navigator.language(s)` is `fr-FR` (+ stored `{"language":"fr"}`), so the shell fetches `i18n/fr/common.tsv` and `i18n/fr/wordcraft.tsv` through `assetBase` | runtime catalogs consumers must self-serve |
 | **font pack loaded** | `api.installFonts(["JetBrains Mono"])` → `fonts/manifest.json` + `fonts/JetBrainsMono-*.ttf.br` fetched, Brotli-decoded, installed | the assetBase runtime files bundlers never copy |
 | **worker started** | `?proof-worker` spawns `<assetBase>wordcraft-worker-proof_loader.js` as a module worker and runs one `check`; success is the `proofing worker: N issue(s)` console line | worker loader/glue/wasm all resolve same-origin |
+| **malformed messages** | a second worker instance is posted `null`, a string, a bad header/payload pair and a non-string header, then one valid `ping`; every malformed message must get a typed `error`/`badRequest` reply and the ping a `pong` | `unpack` throwing out of `onmessage` (dropped messages), wrong-type payloads slipping through |
 | console errors | any `console.error`/`pageerror` after the deliberate zero-config wasm attempt | uncaught failures |
 
 ## JavaScript exception

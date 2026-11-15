@@ -48,6 +48,8 @@ struct ElsewhereContext {
     blocks_before: Option<std::collections::BTreeMap<String, Fragment>>,
     default_language_before: Option<String>,
     pending_application_change_before: bool,
+    md_latest_before: Option<Option<String>>,
+    md_source_before: Option<Option<crate::cmd::md_source::MdSource>>,
 }
 
 impl Session {
@@ -249,7 +251,16 @@ impl Session {
         };
         if self.document_id != home || (result.is_err() && self.order.iter().any(|d| *d >= mark)) {
             return self.finish_elsewhere(
-                ElsewhereContext { home, mark, before_doc, blocks_before, default_language_before, pending_application_change_before },
+                ElsewhereContext {
+                    home,
+                    mark,
+                    before_doc,
+                    blocks_before,
+                    default_language_before,
+                    pending_application_change_before,
+                    md_latest_before,
+                    md_source_before,
+                },
                 result,
             );
         }
@@ -510,7 +521,16 @@ impl Session {
     /// as it was (opening a document is no edit to undo there). Failed: the documents the command opened close again and the first document is
     /// active and as it was.
     fn finish_elsewhere(&mut self, context: ElsewhereContext, result: Result<Value, CmdError>) -> Result<Value, CmdError> {
-        let ElsewhereContext { home, mark, before_doc, blocks_before, default_language_before, pending_application_change_before } = context;
+        let ElsewhereContext {
+            home,
+            mark,
+            before_doc,
+            blocks_before,
+            default_language_before,
+            pending_application_change_before,
+            md_latest_before,
+            md_source_before,
+        } = context;
         // Another document is a state change the input method has to see, never an IME edit.
         self.ime_edit_outcome = ImeEditOutcome::default();
         match &result {
@@ -541,6 +561,13 @@ impl Session {
                         self.typing_open = t;
                         self.undo_evicted = ev;
                         self.column = c;
+                    }
+                    if let Some(md_latest) = md_latest_before {
+                        self.md_file.latest = md_latest;
+                        *self.md_file.cached_exact.borrow_mut() = None;
+                    }
+                    if let Some(md_source) = md_source_before {
+                        self.md_source = md_source;
                     }
                 }
                 if let Some(b) = blocks_before {

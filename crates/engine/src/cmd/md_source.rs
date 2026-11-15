@@ -65,6 +65,19 @@ impl MdSource {
     pub fn is_pending(&self) -> bool {
         self.text != *self.applied
     }
+
+    /// Undo restored this buffer (a command that closed the view kept it in its undo step, and
+    /// Undo brought it back): the text is a Redo offer, so a front end must not apply it on a
+    /// timer — `edit.redo` swaps the document back only while it stays pending. It applies once
+    /// the user changes the text ([`Self::edited`]) or the view is left.
+    pub fn restored_by_undo(&self) -> bool {
+        self.restored_by_undo
+    }
+
+    /// The user changed the text: it is theirs now, so it applies like any other edit.
+    pub fn edited(&mut self) {
+        self.restored_by_undo = false;
+    }
 }
 
 /// A Markdown file's own text, which keeps what the document can't (front matter, comments, a

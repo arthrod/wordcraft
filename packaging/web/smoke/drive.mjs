@@ -189,6 +189,57 @@ async function drive({ fixture, dist, pkg, out }) {
     // The worker's smoke check runs after start() resolves; give it time.
     const workerLine = await waitForConsole(consoleLog, (m) => /proofing worker: \d+ issue\(s\) in the smoke check/.test(m.text), 90_000);
 
+    // Malformed messages must get a typed `error` reply, never silence or a throw out of
+    // onmessage (wordcraft-worker-proof `unpack`): post junk straight at the worker loader,
+    // plus one well-formed ping to prove the worker still answers.
+    const malformed = await page.evaluate(async (assetBase) => {
+      const worker = new Worker(`${assetBase}wordcraft-worker-proof_loader.js`, { type: "module" });
+      try {
+        const replies = [];
+        const errors = [];
+        worker.onmessage = (e) => replies.push(e.data);
+        worker.onerror = (e) => errors.push(String(e.message ?? e));
+        const kindOf = (d) => {
+          try {
+            return JSON.parse(d[0]).kind;
+          } catch {
+            return null;
+          }
+        };
+        const codeOf = (d) => {
+          try {
+            return JSON.parse(new TextDecoder().decode(d[1] ?? new ArrayBuffer(0))).code;
+          } catch {
+            return null;
+          }
+        };
+        // The wasm binds asynchronously: `ready` is posted only once `onmessage` is set, so
+        // messages sent before it would be dispatched to nothing and dropped.
+        const bootDeadline = Date.now() + 30_000;
+        while (Date.now() < bootDeadline && !replies.some((d) => kindOf(d) === "ready")) {
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        worker.postMessage(null);
+        worker.postMessage("not-an-array");
+        worker.postMessage([null, new ArrayBuffer(8)]);
+        worker.postMessage([{ v: 1, id: 7, kind: "ping", revision: 0 }, "not-bytes"]);
+        worker.postMessage(['{"v":1,"id":9,"kind":"ping","revision":0}', new Uint8Array(0)]);
+        const deadline = Date.now() + 30_000;
+        const badRequests = () => replies.filter((d) => kindOf(d) === "error" && codeOf(d) === "badRequest").length;
+        while (Date.now() < deadline && (badRequests() < 4 || !replies.some((d) => kindOf(d) === "pong"))) {
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        return {
+          badRequests: badRequests(),
+          pong: replies.some((d) => kindOf(d) === "pong" && JSON.parse(d[0]).id === 9),
+          kinds: replies.map(kindOf),
+          errors,
+        };
+      } finally {
+        worker.terminate();
+      }
+    }, "/wordcraft-web/");
+
     const status = (substr) => {
       for (const [url, code] of responses) {
         if (url.includes(substr)) return code;
@@ -223,13 +274,15 @@ async function drive({ fixture, dist, pkg, out }) {
       workerFetch: workerFetchOk,
       workerReady: workerLine !== null,
       workerLine: workerLine?.text ?? null,
+      workerMalformed: malformed,
+      workerMalformedOk: malformed.badRequests >= 4 && malformed.pong === true,
       workerFailed: consoleLog.some((m) => /proofing worker.*(fail|error)/i.test(m.text)),
       consoleErrors,
       httpMisses: [...responses.entries()].filter(([url, code]) => code >= 400 && !url.includes("favicon")).map(([url, code]) => `${code} ${url}`),
       requestFailures: requestFailures.map((r) => `${r.error} ${r.url}`),
     };
     report.pass =
-      report.startOk && report.locale && report.fontPack && report.fontPackFailed.length === 0 && report.workerReady && !report.workerFailed && report.consoleErrors.length === 0;
+      report.startOk && report.locale && report.fontPack && report.fontPackFailed.length === 0 && report.workerReady && report.workerMalformedOk && !report.workerFailed && report.consoleErrors.length === 0;
 
     if (out) {
       mkdirSync(resolve(out, ".."), { recursive: true });
