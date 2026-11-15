@@ -197,12 +197,31 @@ fn normalize_bucket(segment: &str) -> String {
     "other".into()
 }
 
+/// The second `::`-separated path segment of a demangled name, if any, with the same
+/// leading-`<` and trailing-generics handling as [`first_crate_segment`] (`<a::b::T<…> as …>`
+/// names `b`).
+fn second_segment(demangled: &str) -> &str {
+    let body = demangled.strip_prefix('<').unwrap_or(demangled);
+    let Some(first_cut) = body.find("::") else { return "" };
+    let rest = body.get(first_cut + 2..).unwrap_or("");
+    let cut = rest.find([':', '>']).unwrap_or(rest.len());
+    rest.get(..cut).unwrap_or("")
+}
+
 /// Demangle and attribute one symbol. Symbols that demangle to a single word carry no
 /// crate path (C shims, link-time thunks), so they land in `other`.
 fn bucket_for_name(mangled: &str) -> String {
     let demangled = rustc_demangle::demangle(mangled).to_string();
     if !demangled.contains("::") {
         return "other".into();
+    }
+    // The one module-level bucket (plan S6): the dialogs are the split-spike's candidate cold
+    // region, so they are measured apart from the rest of the UI crate rather than claimed.
+    // The first segment carries a v0 disambiguator hash in mangled form
+    // (`wordcraft_ui_egui[6c571ced…]::dialogs`), so compare it stripped, as the crate buckets do.
+    let first = first_crate_segment(&demangled);
+    if first.split('[').next().unwrap_or(first) == "wordcraft_ui_egui" && second_segment(&demangled) == "dialogs" {
+        return "wordcraft-ui-egui::dialogs".into();
     }
     normalize_bucket(first_crate_segment(&demangled))
 }
@@ -504,6 +523,30 @@ mod tests {
         let total: usize = a.buckets.iter().map(|b| b.bytes).sum();
         assert_eq!(total, a.function_bytes);
         assert!(a.buckets.windows(2).all(|w| w[0].bytes >= w[1].bytes));
+    }
+
+    /// S6: the dialogs get their own module-level bucket, so "the dialogs are hot/cold" is a
+    /// measured row instead of a claim buried in the crate's total. Only that module splits out;
+    /// every other `wordcraft_ui_egui` module stays in the crate bucket.
+    #[test]
+    fn ui_egui_dialogs_get_their_own_bucket() {
+        // Five entries (sizes 10, 20, 5, 7, 7 + a length prefix each): three dialog forms —
+        // plain, trait-impl, and the v0-mangled shape rustc emits in the name section — and
+        // two non-dialog forms to prove the crate bucket keeps them.
+        let bytes = wasm_bytes(&[
+            section(10, &code_payload(&[10, 20, 5, 7, 7])),
+            name_section(&[
+                (0, "wordcraft_ui_egui::dialogs::text_dialogs::show"),
+                (1, "<wordcraft_ui_egui::dialogs::para::D as core::fmt::Debug>::fmt"),
+                (2, "wordcraft_ui_egui::ribbon::draw"),
+                (3, "wordcraft_ui_egui[6c571ced3128981]::dialogs::dispatch::body"),
+                (4, "wordcraft_ui_egui[6c571ced3128981]::ribbon::x"),
+            ]),
+        ]);
+        let a = analyze(PathBuf::from("t.wasm"), &bytes).unwrap();
+        let bucket = |n: &str| a.buckets.iter().find(|b| b.name == n);
+        assert_eq!(bucket("wordcraft-ui-egui::dialogs").map(|b| (b.funcs, b.bytes)), Some((3, 11 + 21 + 8)), "{:?}", a.buckets);
+        assert_eq!(bucket("wordcraft-ui-egui").map(|b| (b.funcs, b.bytes)), Some((2, 6 + 8)), "{:?}", a.buckets);
     }
 
     #[test]
