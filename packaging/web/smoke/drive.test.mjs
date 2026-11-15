@@ -6,7 +6,7 @@ import { isExpectedWasmMiss } from "./drive.mjs";
 
 // Shape of window.__SMOKE after the deliberate zero-config wasm attempt missed
 // and the explicit-wasmUrl retry resolved (fixtures/main.shared.js).
-const smokeMiss = { wasmAuto: false, startResolvedAt: 10_000 };
+const smokeMiss = { wasmAuto: false, startResolvedAt: 10_000, autoFailedAt: 9_900 };
 
 test("suppresses errors that identify the failed wasm URL", () => {
   // The real esbuild miss: Chrome logs the failed fetch against the wasm URL.
@@ -38,9 +38,16 @@ test("retains an unrelated resource 404 in the same interval", () => {
   );
 });
 
-test("does not suppress when wasmAuto is not false or outside the window", () => {
+test("does not suppress when wasmAuto is not false", () => {
   const wasmErr = { t: 10_100, url: "http://127.0.0.1:65269/wordcraft-web_bg.wasm", text: "" };
   assert.equal(isExpectedWasmMiss({ wasmAuto: true, startResolvedAt: 10_000 }, wasmErr), false);
   assert.equal(isExpectedWasmMiss({ wasmAuto: null, startResolvedAt: 10_000 }, wasmErr), false);
-  assert.equal(isExpectedWasmMiss(smokeMiss, { ...wasmErr, t: 10_501 }), false);
+});
+
+test("suppresses a wasm miss however late console delivery arrives", () => {
+  // Regression: the old predicate bounded e.t (Node-side receipt time) by the
+  // page-side startResolvedAt + 500ms, so a delayed console event for the
+  // expected miss counted as a real error.
+  const wasmErr = { t: 60_000, url: "http://127.0.0.1:65269/wordcraft-web_bg.wasm", text: "" };
+  assert.equal(isExpectedWasmMiss(smokeMiss, wasmErr), true);
 });

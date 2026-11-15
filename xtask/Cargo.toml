@@ -21,3 +21,5 @@ sha2 = { workspace = true }
 
 [dev-dependencies]
 brotli-decompressor = "5"
+# `pack_faces_match_wordcraft_fonts` compares the local PACK_FACES table against the crate's.
+wordcraft-fonts = { workspace = true }

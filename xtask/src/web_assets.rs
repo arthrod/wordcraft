@@ -393,6 +393,21 @@ mod tests {
         assert_eq!(pack_stems.len(), 9);
     }
 
+    /// The local table and `wordcraft_fonts::packs::PACK_FACES` must name the same faces with the
+    /// same family/weight/italic: the manifest is matched by those fields (`pick_pack_face`), so a
+    /// drifted entry here would fetch a face resolution never asks for, or vice versa.
+    #[test]
+    fn pack_faces_match_wordcraft_fonts() {
+        let theirs = wordcraft_fonts::packs::PACK_FACES;
+        assert_eq!(PACK_FACES.len(), theirs.len(), "pack face count drifted");
+        for (ours, theirs) in PACK_FACES.iter().zip(theirs) {
+            assert_eq!(ours.stem, theirs.stem);
+            assert_eq!(ours.family, theirs.family);
+            assert_eq!(ours.weight, theirs.weight);
+            assert_eq!(ours.italic, theirs.italic);
+        }
+    }
+
     #[test]
     fn emit_font_packs_writes_decodable_files_and_manifest() {
         let root = crate::root();

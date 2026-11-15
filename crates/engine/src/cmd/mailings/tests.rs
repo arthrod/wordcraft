@@ -598,6 +598,9 @@ fn spreadsheet_named_text_recipient_lists_read_as_text() {
         assert_eq!(r["fields"], json!(["Name", "City"]), "{path}");
         assert_eq!(s.merge.rows, [second], "{path}");
     }
+    // A non-text payload that is no spreadsheet either is never a recipient list.
+    let e = s.run("mailings.recipients", &json!({"path": "junk.bin", "data": b64(&[0, 1, 2, 3, 0xff])}));
+    assert!(matches!(e, Err(CmdError::Failed(m)) if m.contains("not a text recipient list")));
 }
 
 /// CSV recipient headers trim whitespace, name blanks `Column N`, and number repeats consistently
@@ -638,8 +641,6 @@ fn recipients_from_an_xls_workbook() {
     assert!(
         s.run("mailings.recipients", &json!({"path": "junk.xls", "data": b64(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1, 0, 1])})).is_err()
     );
-    let e = s.run("mailings.recipients", &json!({"path": "junk.bin", "data": b64(&[0, 1, 2, 3, 0xff])}));
-    assert!(matches!(e, Err(CmdError::Failed(m)) if m.contains("not a text recipient list")));
     assert!(super::is_spreadsheet_name("a.XLS") && super::is_spreadsheet_name("b.ods") && !super::is_spreadsheet_name("c.csv"));
     assert!(super::RECIPIENT_EXTENSIONS.contains(&"xls"));
 }

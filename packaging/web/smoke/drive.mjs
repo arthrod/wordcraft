@@ -125,13 +125,11 @@ function parseArgs(argv) {
 // Errors caused by the deliberate zero-config wasm attempt are expected
 // exactly when wasmAuto is false; everything else counts. Suppression requires
 // the error to identify the failed wasm URL (`*_bg.wasm`) — a generic "404"
-// text match would hide unrelated resource failures in the same window.
+// text match would hide unrelated resource failures. There is deliberately no
+// time bound: console delivery to Node can lag the page-side attempt, and a
+// bound would turn a delayed expected miss into a false error.
 export function isExpectedWasmMiss(smoke, e) {
-  return (
-    smoke?.wasmAuto === false &&
-    e.t <= (smoke.startResolvedAt ?? 0) + 500 &&
-    (e.url?.includes("_bg.wasm") || e.text?.includes("_bg.wasm"))
-  );
+  return smoke?.wasmAuto === false && (e.url?.includes("_bg.wasm") || e.text?.includes("_bg.wasm"));
 }
 
 async function waitForConsole(logs, match, timeoutMs) {
