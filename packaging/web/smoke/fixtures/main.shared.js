@@ -25,6 +25,7 @@ const result = {
   startOk: false,
   startResolvedAt: null,
   fonts: null,
+  exportWorker: null,
   fatal: null,
 };
 window.__SMOKE = result;
@@ -33,7 +34,43 @@ function options(extra) {
   return { canvas: "smoke_canvas", assetBase: ASSET_BASE, host: "none", installGlobal: false, ...extra };
 }
 
-export async function run(start) {
+// The package's createProofWorker export, pointed at the same /wordcraft-web/
+// deployment base start() uses: ready, then one ping/pong on the worker proto.
+function proofWorkerExport(createProofWorker) {
+  return new Promise((resolve, reject) => {
+    let worker;
+    try {
+      worker = createProofWorker({ assetBase: ASSET_BASE });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    const finish = (fn, value) => {
+      clearTimeout(timer);
+      worker.terminate();
+      fn(value);
+    };
+    const timer = setTimeout(() => finish(reject, new Error("proof worker export did not answer ping")), 30_000);
+    worker.onmessage = (event) => {
+      let msg;
+      try {
+        msg = JSON.parse(event.data?.[0]);
+      } catch {
+        return;
+      }
+      if (msg.kind === "ready") {
+        worker.postMessage(['{"v":1,"id":1,"kind":"ping","revision":0}', new Uint8Array(0)]);
+      } else if (msg.kind === "pong" && msg.id === 1) {
+        finish(resolve, true);
+      } else if (msg.kind === "error") {
+        finish(reject, new Error(`proof worker export error: ${event.data?.[0]}`));
+      }
+    };
+    worker.onerror = (event) => finish(reject, new Error(`proof worker export failed: ${event.message ?? "worker error"}`));
+  });
+}
+
+export async function run(start, createProofWorker) {
   try {
     let api;
     try {
@@ -50,6 +87,7 @@ export async function run(start) {
     // One font pack through assetBase: resolves once the manifest and the
     // family's .ttf.br files are fetched, decoded and installed.
     result.fonts = await api.installFonts(["JetBrains Mono"]);
+    result.exportWorker = await proofWorkerExport(createProofWorker);
     result.phase = "done";
   } catch (error) {
     result.phase = "failed";

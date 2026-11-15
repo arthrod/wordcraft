@@ -127,8 +127,11 @@ fn serve() {
     let scope: web_sys::DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();
     let handler_scope = scope.clone();
     let onmessage = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
-        let (header, payload) = unpack(&event.data());
-        let (rheader, rpayload) = handle_message(&header, &payload);
+        let (header, payload, oversized) = unpack(&event.data());
+        let (rheader, rpayload) = match oversized {
+            Some((env, got, limit)) => reply(&env, error(ErrorCode::TooLarge, format!("message is {got} bytes, over the {limit}-byte limit"))),
+            None => handle_message(&header, &payload),
+        };
         post(&handler_scope, &rheader, &rpayload);
     });
     scope.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
@@ -144,22 +147,37 @@ fn serve() {
 /// to empty bytes, which `handle_message` answers with a typed `error`. Anything else — not an
 /// array, a non-string header, a payload that is not bytes — must never throw out of
 /// `onmessage` and go unanswered.
+///
+/// The payload is copied only after its length is checked against the request kind's
+/// [`proto::request_payload_limit`]: an oversized one comes back as `Some((env, got, limit))`
+/// with no copy, and `serve` answers `TooLarge`. A header or payload the handler never reads
+/// (an undecodable header, a reply kind sent as a request) is not copied at all.
 #[cfg(target_arch = "wasm32")]
-fn unpack(data: &wasm_bindgen::JsValue) -> (Vec<u8>, Vec<u8>) {
+fn unpack(data: &wasm_bindgen::JsValue) -> (Vec<u8>, Vec<u8>, Option<(Envelope, usize, usize)>) {
     use wasm_bindgen::JsCast as _;
 
     if !js_sys::Array::is_array(data) {
-        return (Vec::new(), Vec::new());
+        return (Vec::new(), Vec::new(), None);
     }
     let arr = js_sys::Array::from(data);
-    let header = arr.get(0).as_string().unwrap_or_default().into_bytes();
+    let header_str = arr.get(0).as_string().unwrap_or_default();
+    // `decode_envelope` applies `MAX_PAYLOAD_BYTES` itself; an over-limit header gets the same
+    // `BadRequest` an empty one does, without paying for the copy first.
+    let header = if header_str.len() > proto::MAX_PAYLOAD_BYTES { Vec::new() } else { header_str.into_bytes() };
     let payload = arr.get(1);
-    let payload = if payload.is_instance_of::<js_sys::ArrayBuffer>() || payload.is_instance_of::<js_sys::Uint8Array>() {
-        js_sys::Uint8Array::new(&payload).to_vec()
-    } else {
-        Vec::new()
+    if !payload.is_instance_of::<js_sys::ArrayBuffer>() && !payload.is_instance_of::<js_sys::Uint8Array>() {
+        return (header, Vec::new(), None);
+    }
+    let view = js_sys::Uint8Array::new(&payload);
+    let got = view.length() as usize;
+    let Some(env) = proto::decode_envelope(&header).ok().filter(|e| e.kind.is_request()) else {
+        return (header, Vec::new(), None);
     };
-    (header, payload)
+    let limit = proto::request_payload_limit(env.kind);
+    if got > limit {
+        return (header, Vec::new(), Some((env, got, limit)));
+    }
+    (header, view.to_vec(), None)
 }
 
 /// Post `(headerJson, payloadBuffer)` back to the main thread, transferring the payload buffer.

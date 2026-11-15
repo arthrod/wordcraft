@@ -513,19 +513,26 @@ impl FontDb {
 
     /// Check `sfnt`'s faces and add the ones not already available, without a user-font record —
     /// [`FontDb::install_pack_font`]'s work. `packs` is the caller's held pack record: the faces
-    /// are counted against its remaining capacity before any is committed, so a file that
-    /// wouldn't fit is refused with the database and its generation untouched. Returns the faces
-    /// that were added, whose ids go in the pack record.
+    /// that are still fresh are counted against its remaining capacity under the face write lock
+    /// that adds them, so a file that wouldn't fit is refused with the database and its
+    /// generation untouched. Returns the faces that were added, whose ids go in the pack record.
     pub(crate) fn add_pack_faces(&self, packs: &mut crate::packs::PackFonts, sfnt: Vec<u8>) -> Result<Vec<Arc<super::FontFace>>, UserFontError> {
+        self.add_pack_faces_before_commit(packs, sfnt, || {})
+    }
+
+    /// [`FontDb::add_pack_faces`] with `before_commit` run after the file is checked and before
+    /// its fresh faces are counted and committed (tests interleave a removal there).
+    fn add_pack_faces_before_commit(
+        &self,
+        packs: &mut crate::packs::PackFonts,
+        sfnt: Vec<u8>,
+        before_commit: impl FnOnce(),
+    ) -> Result<Vec<Arc<super::FontFace>>, UserFontError> {
         let new = self.checked_faces(sfnt)?;
-        let added = self.fresh_faces(&new);
-        if added.is_empty() {
-            return Err(UserFontError::AlreadyAvailable(families_of(&new)));
-        }
-        if packs.installed.len() + added.len() > crate::packs::MAX_INSTALLED_PACK_FACES {
-            return Err(UserFontError::TooManyPacks);
-        }
-        let committed = self.commit_faces(&new);
+        before_commit();
+        let committed = self.commit_faces(&new, |fresh| {
+            if packs.installed.len() + fresh > crate::packs::MAX_INSTALLED_PACK_FACES { Err(UserFontError::TooManyPacks) } else { Ok(()) }
+        })?;
         if committed.is_empty() {
             return Err(UserFontError::AlreadyAvailable(families_of(&new)));
         }
@@ -539,7 +546,7 @@ impl FontDb {
     /// already available.
     fn check_and_add_faces(&self, sfnt: Vec<u8>) -> Result<Vec<Arc<super::FontFace>>, UserFontError> {
         let new = self.checked_faces(sfnt)?;
-        let added = self.commit_faces(&new);
+        let added = self.commit_faces(&new, |_| Ok(()))?;
         if added.is_empty() {
             return Err(UserFontError::AlreadyAvailable(families_of(&new)));
         }
@@ -572,26 +579,26 @@ impl FontDb {
         Ok(new)
     }
 
-    /// The faces of `new` not already loaded.
-    fn fresh_faces(&self, new: &[Arc<super::FontFace>]) -> Vec<Arc<super::FontFace>> {
-        let faces = self.read_faces();
-        new.iter()
-            .filter(|f| !faces.iter().any(|g| g.family.eq_ignore_ascii_case(&f.family) && g.style.eq_ignore_ascii_case(&f.style)))
-            .cloned()
-            .collect()
-    }
-
-    /// Add `new`'s faces that aren't already loaded (re-checked under the write lock); returns
-    /// the faces actually added.
-    fn commit_faces(&self, new: &[Arc<super::FontFace>]) -> Vec<Arc<super::FontFace>> {
+    /// Add `new`'s faces that aren't already loaded (re-checked under the write lock); `admit`
+    /// sees how many are fresh under that same lock before any is added. Returns the faces
+    /// actually added.
+    fn commit_faces(
+        &self,
+        new: &[Arc<super::FontFace>],
+        admit: impl FnOnce(usize) -> Result<(), UserFontError>,
+    ) -> Result<Vec<Arc<super::FontFace>>, UserFontError> {
         let mut faces = self.faces.write().unwrap_or_else(|e| e.into_inner());
         let fresh: Vec<_> = new
             .iter()
             .filter(|f| !faces.iter().any(|g| g.family.eq_ignore_ascii_case(&f.family) && g.style.eq_ignore_ascii_case(&f.style)))
             .cloned()
             .collect();
+        if fresh.is_empty() {
+            return Ok(Vec::new());
+        }
+        admit(fresh.len())?;
         faces.extend(fresh.iter().cloned());
-        fresh
+        Ok(fresh)
     }
 
     /// Forget cached fallback choices and tell watchers ([`FontDb::generation`]).

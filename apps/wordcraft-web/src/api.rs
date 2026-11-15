@@ -262,8 +262,10 @@ fn attach_doc_helpers(api: &js_sys::Object, queue: Sender<ControlRequest>, ctx: 
                     Err(e) => fail(&reject_for_reply, format!("conversion failed: {}", e.message)),
                 })
             });
-            if sent.is_none() {
-                fail(&reject, "the codec worker is unavailable in this browser".into());
+            match sent {
+                Some(Ok(_)) => {}
+                Some(Err(e)) => fail(&reject, format!("the codec worker could not take the conversion: {e}")),
+                None => fail(&reject, "the codec worker is unavailable in this browser".into()),
             }
         })
     });

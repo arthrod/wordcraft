@@ -101,9 +101,20 @@ export function initSync(
  */
 export function start(options?: StartOptions): Promise<WordCraftApi>;
 
+export interface ProofWorkerOptions {
+  /**
+   * Base URL the worker loader is served from (same semantics as
+   * `StartOptions.assetBase`); `wordcraft-worker-proof_loader.js` is appended.
+   */
+  assetBase?: string;
+  /** Exact URL of `wordcraft-worker-proof_loader.js`; takes precedence over `assetBase`. */
+  loaderUrl?: string;
+}
+
 /**
  * Construct the proofing dedicated worker bundled with this package as a module
- * worker (`new Worker(new URL('./wordcraft-worker-proof_loader.js', import.meta.url),
- * { type: 'module' })`). It speaks the `wordcraft-worker-proto` wire contract.
+ * worker. With no options it resolves `./wordcraft-worker-proof_loader.js` against
+ * the package; pass `assetBase` or `loaderUrl` for deployments that serve the
+ * worker files separately. It speaks the `wordcraft-worker-proto` wire contract.
  */
-export function createProofWorker(): Worker;
+export function createProofWorker(options?: ProofWorkerOptions): Worker;

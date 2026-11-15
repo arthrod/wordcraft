@@ -11,7 +11,10 @@ use wordcraft_ui_egui::async_saves::{AsyncSaves, SaveOutcome};
 use wordcraft_ui_egui::{Inbox, Services, WordApp};
 
 thread_local! {
-    static ATTEMPTED_LOCALES: RefCell<HashSet<&'static str>> = RefCell::new(HashSet::new());
+    /// Locale fetches in flight, so concurrent asks don't duplicate one. Not a record of
+    /// successes: a registered locale is guarded by `i18n::locale_registered`, and a failed
+    /// or empty fetch removes its marker so a later ask can retry.
+    static LOADING_LOCALES: RefCell<HashSet<&'static str>> = RefCell::new(HashSet::new());
 }
 
 fn default_asset_base(document: &web_sys::Document) -> String {
@@ -51,13 +54,14 @@ pub(crate) fn ensure_locale_loaded(pref: &str, asset_base: &str, ctx: egui::Cont
     if code == "en" || wordcraft_ui_egui::i18n::locale_registered(code) {
         return;
     }
-    let first_attempt = ATTEMPTED_LOCALES.with(|s| s.borrow_mut().insert(code));
-    if !first_attempt {
+    let in_flight = LOADING_LOCALES.with(|s| s.borrow_mut().insert(code));
+    if !in_flight {
         return;
     }
     let base = normalize_asset_base(asset_base);
     wasm_bindgen_futures::spawn_local(async move {
         let Some(window) = web_sys::window() else {
+            LOADING_LOCALES.with(|s| s.borrow_mut().remove(code));
             return;
         };
         let common_url = format!("{base}i18n/{code}/common.tsv");
@@ -78,6 +82,9 @@ pub(crate) fn ensure_locale_loaded(pref: &str, asset_base: &str, ctx: egui::Cont
                 log::warn!("i18n: could not load locale `{code}` ({e}); keeping English");
             }
         }
+        // Done one way or another: the marker only deduped this fetch. A registered locale is
+        // protected by `locale_registered`; anything else may be retried by a later ask.
+        LOADING_LOCALES.with(|s| s.borrow_mut().remove(code));
     });
 }
 

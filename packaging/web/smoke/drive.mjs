@@ -13,6 +13,7 @@
 //   - one runtime locale (i18n/fr/*.tsv) fetched through assetBase
 //   - one font pack (JetBrains Mono .ttf.br) fetched + installed through assetBase
 //   - the proofing dedicated worker answering a `check` (?proof-worker smoke)
+//   - the package's createProofWorker export answering a ping via assetBase
 //   - console errors after the deliberate zero-config wasm attempt
 //
 // Tooling-script JavaScript: the repository's "Rust only" rule covers shipped
@@ -290,13 +291,14 @@ async function drive({ fixture, dist, pkg, out }) {
       workerLine: workerLine?.text ?? null,
       workerMalformed: malformed,
       workerMalformedOk: malformedOk(malformed?.proof) && malformedOk(malformed?.codecs) && malformedOk(malformed?.pdf),
+      exportWorker: smoke?.exportWorker === true,
       workerFailed: consoleLog.some((m) => /proofing worker.*(fail|error)/i.test(m.text)),
       consoleErrors,
       httpMisses: [...responses.entries()].filter(([url, code]) => code >= 400 && !url.includes("favicon")).map(([url, code]) => `${code} ${url}`),
       requestFailures: requestFailures.map((r) => `${r.error} ${r.url}`),
     };
     report.pass =
-      report.startOk && report.locale && report.fontPack && report.fontPackFailed.length === 0 && report.workerReady && report.workerMalformedOk && !report.workerFailed && report.consoleErrors.length === 0;
+      report.startOk && report.locale && report.fontPack && report.fontPackFailed.length === 0 && report.workerReady && report.exportWorker && report.workerMalformedOk && !report.workerFailed && report.consoleErrors.length === 0;
 
     if (out) {
       mkdirSync(resolve(out, ".."), { recursive: true });

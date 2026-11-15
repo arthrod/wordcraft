@@ -53,17 +53,33 @@ export async function start(options = {}) {
 
 /**
  * Construct the proofing dedicated worker bundled with this package, as a module
- * worker resolved against the package's own files (the same-origin Trunk loader
- * shim — no `blob:` URL, so `worker-src 'self'` suffices).
+ * worker (the same-origin Trunk loader shim — no `blob:` URL, so
+ * `worker-src 'self'` suffices). By default it resolves against the package's own
+ * files; pass `assetBase` (the same runtime base `start` uses) or `loaderUrl` when
+ * the files are served elsewhere.
  *
  * The worker speaks the `wordcraft-worker-proto` wire contract
  * (`[headerJson, payloadArrayBuffer]` messages). Consumers that embed WordCraft
  * normally let the app spawn its own worker; this export exists for hosts that
  * need the worker under their own control or CSP.
  *
+ * @param {import("./index.d.ts").ProofWorkerOptions} [options]
  * @returns {Worker}
  */
-export function createProofWorker() {
+export function createProofWorker(options = {}) {
+  if (options !== null && options !== undefined && typeof options !== "object") {
+    throw new TypeError("wordcraft-web createProofWorker(options) expects an options object");
+  }
+  const resolved = options ?? {};
+  const { assetBase, loaderUrl } = resolved;
+  if (loaderUrl !== undefined) {
+    if (typeof loaderUrl !== "string") throw new TypeError("createProofWorker loaderUrl must be a string");
+    return new Worker(loaderUrl, { type: "module" });
+  }
+  if (assetBase !== undefined) {
+    if (typeof assetBase !== "string") throw new TypeError("createProofWorker assetBase must be a string");
+    return new Worker(`${joinAssetBase(assetBase)}wordcraft-worker-proof_loader.js`, { type: "module" });
+  }
   return workerFrom("./wordcraft-worker-proof_loader.js");
 }
 
@@ -78,4 +94,13 @@ export function createProofWorker() {
 function workerFrom(specifier) {
   const url = new URL(specifier, import.meta.url);
   return new Worker(url.href, { type: "module" });
+}
+
+/**
+ * @param {string} assetBase
+ */
+function joinAssetBase(assetBase) {
+  const trimmed = assetBase.trim();
+  if (trimmed === "") return "./";
+  return trimmed.endsWith("/") ? trimmed : `${trimmed}/`;
 }

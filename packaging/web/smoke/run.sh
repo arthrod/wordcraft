@@ -14,6 +14,7 @@
 #        - one runtime locale (fr) fetched through assetBase
 #        - one font pack (JetBrains Mono) fetched + installed through assetBase
 #        - the proofing dedicated worker (?proof-worker) answering a check
+#        - the createProofWorker export answering a ping via assetBase
 #   4. Writes results/<bundler>.json and results/report.md.
 #
 # Usage: ./run.sh [--tarball <path>] [--build] [--only vite|webpack|esbuild]

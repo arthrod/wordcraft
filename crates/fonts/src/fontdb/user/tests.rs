@@ -607,3 +607,28 @@ fn a_pack_past_the_face_cap_is_refused_before_any_face_is_added() {
     assert_eq!(db.pack_fonts().len(), crate::packs::MAX_INSTALLED_PACK_FACES);
     assert!(!db.has_family(PACKFAMILY), "a refused pack commits no face");
 }
+
+#[test]
+fn a_pack_cap_counts_faces_freed_before_commit() {
+    let db = db();
+    db.install_font("a.ttf", &renamed("SourceSans3-Regular.ttf", FAMILY)).unwrap();
+    {
+        let mut packs = db.write_packs();
+        for i in 0..crate::packs::MAX_INSTALLED_PACK_FACES - 1 {
+            packs.installed.push((u32::MAX - i as u32, format!("Pack {i}"), "Regular".to_string()));
+        }
+        // One slot left: the collection's first face is already installed, so a stale count
+        // would see one fresh face. Removing it before commit makes both faces fresh, which
+        // must trip the cap under the face write lock instead of being recorded.
+        let pair = collection2(&renamed("SourceSans3-Regular.ttf", FAMILY), &renamed("SourceSans3-It.ttf", PACKFAMILY));
+        let err = db
+            .add_pack_faces_before_commit(&mut packs, pair, || {
+                db.remove_user_font(FAMILY).unwrap();
+            })
+            .unwrap_err();
+        assert!(matches!(err, UserFontError::TooManyPacks), "{err}");
+        assert_eq!(packs.installed.len(), crate::packs::MAX_INSTALLED_PACK_FACES - 1);
+    }
+    assert!(!db.has_family(FAMILY), "the interleaved removal still happened");
+    assert!(!db.has_family(PACKFAMILY), "the refused pack committed no face");
+}

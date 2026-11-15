@@ -312,7 +312,7 @@ packages:
         optional: true
 
   wordcraft-web@file:../../tarball/wordcraft-web.tgz:
-    resolution: {integrity: sha512-JRdXM+0Kx7c2rn9MH2LcfYVh3NvzFyjcj3Anykn0Q0BqRF85EtvDGkwuKEn2UPBjLuKTnFTlkSSwM28kQLk/9g==, tarball: file:../../tarball/wordcraft-web.tgz}
+    resolution: {integrity: sha512-5uV+E1EhDd+OVD8q9Vu4S9DJj1yGwnFaLaex2pYqw8P9ZZcftZ6ogUPuEquqKjw+Qs8axzCn9k3q8PgOIKnRSA==, tarball: file:../../tarball/wordcraft-web.tgz}
     version: 0.18.1
 
 snapshots:

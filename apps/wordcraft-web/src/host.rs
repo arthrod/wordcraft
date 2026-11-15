@@ -70,6 +70,9 @@ impl Bridge {
                 if canvas.get_attribute("data-host").as_deref() != Some("page") {
                     let _ = canvas.set_attribute("data-host", "page");
                 }
+                // `?host=parent` outranks `data-host="page"` in the crate's detection, so an
+                // explicit page mode withdraws that signal from the URL first.
+                withdraw_parent_query();
                 Ok(Self::detect(canvas))
             }
             Some("parent") => {
@@ -153,6 +156,36 @@ fn supply_parent_query() {
     };
     if let Err(e) = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&url)) {
         log::warn!("host=parent: could not update the page URL ({e:?}); not hosted");
+    }
+}
+
+/// The counterpart of [`supply_parent_query`] for an explicit `host: "page"` start: the crate's
+/// `Mode::detect` lets a `?host=parent` query outrank `data-host="page"`, so the query signal
+/// is removed (without reloading) before detection runs. Query-based detection is untouched —
+/// this only runs when the caller asked for page mode.
+fn withdraw_parent_query() {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let location = window.location();
+    let Ok(search) = location.search() else {
+        return;
+    };
+    let pairs: Vec<&str> = search.trim_start_matches('?').split('&').filter(|p| !p.is_empty()).collect();
+    if !pairs.contains(&"host=parent") {
+        return;
+    }
+    let kept: Vec<&str> = pairs.into_iter().filter(|p| *p != "host=parent").collect();
+    let query = if kept.is_empty() { String::new() } else { format!("?{}", kept.join("&")) };
+    let (Ok(pathname), Ok(hash)) = (location.pathname(), location.hash()) else {
+        return;
+    };
+    let url = format!("{pathname}{query}{hash}");
+    let Ok(history) = window.history() else {
+        return;
+    };
+    if let Err(e) = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&url)) {
+        log::warn!("host=page: could not update the page URL ({e:?}); the parent query still wins");
     }
 }
 

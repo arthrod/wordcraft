@@ -247,7 +247,7 @@ if [[ "$RUN_CHECK" -eq 1 ]]; then
       mkdir -p "$TS_DIR/node_modules"
       ln -s "$NPM_STAGE" "$TS_DIR/node_modules/wordcraft-web"
       cat > "$TS_DIR/consumer.ts" <<'EOF'
-import { init, initSync, start, type StartOptions, type WordCraftApi } from "wordcraft-web";
+import { init, initSync, start, createProofWorker, type StartOptions, type WordCraftApi } from "wordcraft-web";
 import rawInit, { start as rawStart } from "wordcraft-web/glue";
 
 async function check(canvas: HTMLCanvasElement, precompiled: WebAssembly.Module): Promise<void> {
@@ -260,6 +260,8 @@ async function check(canvas: HTMLCanvasElement, precompiled: WebAssembly.Module)
   const fonts: { installed: string[]; failed: string[] } = await api.installFonts(["Inter"]);
   const rtf = new Uint8Array(await api.convertDocument({ from: "docx", to: "rtf", data: bytes })); void rtf;
   const pdf = new Uint8Array(await api.exportPdf()); void pdf;
+  const proofWorker: Worker = createProofWorker({ assetBase: "/wordcraft-web/" });
+  proofWorker.terminate();
   await init();
   initSync(precompiled);
   await rawInit();

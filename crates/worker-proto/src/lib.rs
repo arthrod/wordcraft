@@ -515,6 +515,24 @@ pub fn convert_request_error(req: &ConvertRequest) -> Option<ErrorCode> {
     None
 }
 
+/// The largest payload buffer a `kind` request may arrive in, in bytes — the document bound
+/// plus the [`pack_binary`] framing and JSON metadata overhead — so a worker can refuse an
+/// oversized message before copying it into its heap. `0` for kinds that are never requests
+/// (a worker never reads their payload).
+pub fn request_payload_limit(kind: Kind) -> usize {
+    match kind {
+        // JSON bodies: `decode_payload`'s own cap is the whole bound.
+        Kind::Check | Kind::Cancel | Kind::Configure | Kind::Ping => MAX_PAYLOAD_BYTES,
+        // `WCB\x01` + part count + two length words (16 bytes of framing), the metadata part
+        // (a JSON payload, `MAX_PAYLOAD_BYTES`) and the input (`MAX_CONVERT_BYTES`).
+        Kind::Convert => MAX_CONVERT_BYTES + MAX_PAYLOAD_BYTES + 16,
+        // `meta + docx + fonts`: at most `MAX_FONT_COPIES` font parts, so the frame overhead
+        // is 8 + 4·(MAX_FONT_COPIES + 2) bytes; the meta part is a JSON payload.
+        Kind::RenderPdf => MAX_PDF_DOC_BYTES + MAX_FONT_TOTAL_BYTES + MAX_PAYLOAD_BYTES + 8 + 4 * (MAX_FONT_COPIES + 2),
+        _ => 0,
+    }
+}
+
 /// Validate a [`PdfRenderRequest`] against the protocol bounds before a worker runs it, like
 /// [`check_request_error`]: `TooLarge` past [`MAX_PDF_DOC_BYTES`], [`MAX_FONT_COPIES`] or
 /// [`MAX_FONT_TOTAL_BYTES`], `BadRequest` for an empty package.
@@ -954,5 +972,38 @@ mod tests {
             Some(ErrorCode::TooLarge)
         );
         assert_eq!(pdf_request_error(&PdfRenderRequest { docx: Vec::new(), fonts: Vec::new() }), Some(ErrorCode::BadRequest));
+    }
+
+    #[test]
+    fn request_payload_limit_covers_everything_decode_accepts() {
+        // Reply kinds never carry a request payload.
+        for kind in [Kind::Issues, Kind::Converted, Kind::Pdf, Kind::Ack, Kind::Pong, Kind::Ready, Kind::Error] {
+            assert_eq!(request_payload_limit(kind), 0, "{kind:?}");
+        }
+        // The JSON kinds are bounded by `decode_payload` itself.
+        for kind in [Kind::Check, Kind::Cancel, Kind::Configure, Kind::Ping] {
+            assert_eq!(request_payload_limit(kind), MAX_PAYLOAD_BYTES, "{kind:?}");
+        }
+        // A convert frame at the document cap plus a maximal metadata part still fits; the
+        // same frame one byte larger does not — the worker's pre-copy check relies on this.
+        let meta = encode_payload(&serde_json::json!({"format": "rtf", "direction": "import"})).unwrap();
+        let input = vec![0u8; MAX_CONVERT_BYTES];
+        let frame = pack_binary(&[&meta, &input]).unwrap();
+        assert!(frame.len() <= request_payload_limit(Kind::Convert));
+        let meta = vec![b' '; MAX_PAYLOAD_BYTES];
+        let frame = pack_binary(&[&meta, &input]).unwrap();
+        assert!(frame.len() <= request_payload_limit(Kind::Convert));
+        let over = pack_binary(&[&meta, &vec![0u8; MAX_CONVERT_BYTES + 1]]).unwrap();
+        assert!(over.len() > request_payload_limit(Kind::Convert));
+        // renderPdf: docx at its cap, the font batch at its cap, every allowed font part —
+        // the limit must cover the largest frame `decode_pdf_request` can accept.
+        let fonts_meta: Vec<serde_json::Value> = (0..MAX_FONT_COPIES).map(|_| serde_json::json!({"family": "f", "style": "s"})).collect();
+        let meta = encode_payload(&serde_json::json!({"fonts": fonts_meta})).unwrap();
+        let docx = vec![0u8; MAX_PDF_DOC_BYTES];
+        let font = vec![0u8; MAX_FONT_TOTAL_BYTES / MAX_FONT_COPIES];
+        let mut parts: Vec<&[u8]> = vec![meta.as_slice(), docx.as_slice()];
+        parts.extend((0..MAX_FONT_COPIES).map(|_| font.as_slice()));
+        let frame = pack_binary(&parts).unwrap();
+        assert!(frame.len() <= request_payload_limit(Kind::RenderPdf), "{} > {}", frame.len(), request_payload_limit(Kind::RenderPdf));
     }
 }

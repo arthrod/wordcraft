@@ -12,7 +12,7 @@
 //! stale-revision dropping of the proofing client does not apply; cancellation stays
 //! cooperative and a long job is stopped with [`CodecWorker::terminate`].
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -33,6 +33,9 @@ struct Pending {
 
 struct Inner {
     worker: web_sys::Worker,
+    /// The asset base the worker's loader was fetched from: [`ensure`] reuses the worker only
+    /// for the same base, so one instance's worker is never borrowed for another's assets.
+    asset_base: String,
     ids: proto::RequestIds,
     /// The worker's `ready` notice arrived.
     ready: bool,
@@ -66,6 +69,7 @@ impl CodecWorker {
         let worker = web_sys::Worker::new_with_options(&url, &options).map_err(|e| format!("cannot start {LOADER_FILE}: {e:?}"))?;
         let inner = Rc::new(RefCell::new(Inner {
             worker: worker.clone(),
+            asset_base: asset_base.to_string(),
             ids: proto::RequestIds::new(),
             ready: false,
             failed: false,
@@ -190,12 +194,13 @@ fn on_message(inner: &Rc<RefCell<Inner>>, data: &wasm_bindgen::JsValue) {
         }
     };
     let pending = {
-        let mut inner = inner.borrow_mut();
+        let mut guard = inner.borrow_mut();
         if env.kind == proto::Kind::Ready {
-            inner.ready = true;
-            let queued = std::mem::take(&mut inner.queued);
-            let worker = inner.worker.clone();
-            drop(inner);
+            guard.ready = true;
+            let queued = std::mem::take(&mut guard.queued);
+            let worker = guard.worker.clone();
+            drop(guard);
+            let mut unsent = Vec::new();
             for (id, kind, payload) in queued {
                 let env = proto::Envelope::request(id, kind, 0);
                 let Ok(header) = proto::encode_envelope(&env)
@@ -203,6 +208,7 @@ fn on_message(inner: &Rc<RefCell<Inner>>, data: &wasm_bindgen::JsValue) {
                     .and_then(|h| String::from_utf8(h).map_err(|_| "envelope was not UTF-8".to_string()))
                 else {
                     log::warn!("worker: cannot encode a queued message");
+                    unsent.push(id);
                     continue;
                 };
                 let bytes = js_sys::Uint8Array::from(payload.as_slice());
@@ -210,11 +216,21 @@ fn on_message(inner: &Rc<RefCell<Inner>>, data: &wasm_bindgen::JsValue) {
                 let transfer = js_sys::Array::of1(&bytes.buffer());
                 if let Err(e) = worker.post_message_with_transfer(&msg, &transfer) {
                     log::warn!("worker: a queued message failed to send: {e:?}");
+                    unsent.push(id);
                 }
+            }
+            if !unsent.is_empty() {
+                // A request that never went out must not leave its pending entry — and the
+                // caller's promise — hanging: complete it with an error instead.
+                let sinks = {
+                    let mut guard = inner.borrow_mut();
+                    unsent.into_iter().filter_map(|id| guard.pending.remove(&id).map(|p| (id, p.sink))).collect::<Vec<_>>()
+                };
+                fail_pending(sinks, "the codec worker could not send the queued request");
             }
             return;
         }
-        match inner.pending.remove(&env.id) {
+        match guard.pending.remove(&env.id) {
             Some(p) => p,
             None => return,
         }
@@ -224,37 +240,53 @@ fn on_message(inner: &Rc<RefCell<Inner>>, data: &wasm_bindgen::JsValue) {
 
 impl Drop for CodecWorker {
     fn drop(&mut self) {
-        // Detach first so a message that races the drop can't touch freed state, then stop the
+        // Complete the outstanding requests first — a dropped worker (replaced by [`ensure`]
+        // for another asset base, or `terminate`d) must not leave their promises unsettled —
+        // then detach so a message that races the drop can't touch freed state, then stop the
         // worker itself.
-        let inner = self.inner.borrow();
-        inner.worker.set_onmessage(None);
-        inner.worker.set_onerror(None);
-        inner.worker.terminate();
+        let (worker, pending) = {
+            let mut inner = self.inner.borrow_mut();
+            inner.queued.clear();
+            let pending = inner.pending.drain().map(|(id, p)| (id, p.sink)).collect::<Vec<_>>();
+            (inner.worker.clone(), pending)
+        };
+        worker.set_onmessage(None);
+        worker.set_onerror(None);
+        worker.terminate();
+        fail_pending(pending, "the codec worker was stopped");
     }
 }
 
 thread_local! {
     /// The one codec worker per page, started on first ask.
     static WORKER: RefCell<Option<CodecWorker>> = const { RefCell::new(None) };
-    /// Construction already failed once: don't retry every ask.
-    static WORKER_FAILED: Cell<bool> = const { Cell::new(false) };
+    /// Asset bases whose worker construction already failed: don't retry every ask, and don't
+    /// let one base's failure block another's.
+    static WORKER_FAILED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Start the codec worker if it isn't already; `true` when it is running (or already was).
+/// A running worker is reused only for the asset base it was started with.
 pub(crate) fn ensure(asset_base: &str) -> bool {
-    // A worker that errored at runtime is dead weight: drop it (its `Drop` terminates the JS
-    // worker) and start fresh below. `WORKER_FAILED` stays reserved for `start` failures.
+    // A worker that errored at runtime — or one started for a different asset base — is dead
+    // weight here: drop it (its `Drop` terminates the JS worker and fails its pending
+    // requests) and start fresh below. `WORKER_FAILED` stays reserved for `start` failures,
+    // remembered per asset base.
     let alive = WORKER.with(|w| {
         let mut slot = w.borrow_mut();
-        if slot.as_ref().is_some_and(|worker| worker.inner.borrow().failed) {
+        let reusable = slot.as_ref().is_some_and(|worker| {
+            let inner = worker.inner.borrow();
+            !inner.failed && inner.asset_base == asset_base
+        });
+        if !reusable && slot.is_some() {
             *slot = None;
         }
-        slot.is_some()
+        reusable
     });
     if alive {
         return true;
     }
-    if WORKER_FAILED.with(|f| f.get()) {
+    if WORKER_FAILED.with(|f| f.borrow().iter().any(|b| b == asset_base)) {
         return false;
     }
     match CodecWorker::start(asset_base) {
@@ -264,7 +296,7 @@ pub(crate) fn ensure(asset_base: &str) -> bool {
         }
         Err(e) => {
             log::warn!("{e}");
-            WORKER_FAILED.with(|f| f.set(true));
+            WORKER_FAILED.with(|f| f.borrow_mut().push(asset_base.to_string()));
             false
         }
     }
