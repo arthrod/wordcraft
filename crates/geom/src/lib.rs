@@ -6,6 +6,9 @@
 //! here so every crate agrees on them.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "image")]
@@ -14,6 +17,65 @@ mod region;
 pub use region::Region;
 mod pixels;
 pub use pixels::{MAX_DECODED_BYTES, MAX_RASTER_PIXELS, decode_fits, decode_peak_fits, fit_pixels, rgba_bytes, rgba_fits};
+
+static WASM_NOW_MS_BITS: AtomicU64 = AtomicU64::new(0);
+static WASM_EPOCH_MS_BITS: AtomicU64 = AtomicU64::new(0);
+/// Host clock callbacks: monotonic ms, Unix-epoch ms, and local UTC offset (secs) at a Unix time.
+struct WasmClock {
+    now_ms: fn() -> f64,
+    epoch_ms: fn() -> f64,
+    tz_offset_secs: fn(u64) -> i64,
+}
+
+static WASM_CLOCK_CB: OnceLock<WasmClock> = OnceLock::new();
+
+/// Updates the atomic monotonic and Unix-epoch clocks (in milliseconds) for WASM hosts.
+pub fn set_wasm_clock(now_ms: f64, epoch_ms: f64) {
+    if now_ms.is_finite() {
+        WASM_NOW_MS_BITS.store(now_ms.to_bits(), Ordering::Relaxed);
+    }
+    if epoch_ms.is_finite() {
+        WASM_EPOCH_MS_BITS.store(epoch_ms.to_bits(), Ordering::Relaxed);
+    }
+}
+
+/// Registers host-side clock callbacks at L6 startup: `now_ms` for elapsed-time measurement
+/// (read by [`wasm_now_ms`]), `epoch_ms` for Unix-epoch timestamps (read by [`wasm_epoch_ms`]),
+/// and `tz_offset_secs` for the local UTC offset at a Unix time.
+pub fn register_wasm_clock(now_ms: fn() -> f64, epoch_ms: fn() -> f64, tz_offset_secs: fn(u64) -> i64) {
+    let _ = WASM_CLOCK_CB.set(WasmClock { now_ms, epoch_ms, tz_offset_secs });
+}
+
+/// Current time in milliseconds for elapsed-time measurement in WASM builds without `js-sys`
+/// below L6, from the host's registered `now_ms` callback (or [`set_wasm_clock`]). It is only as
+/// monotonic as that host clock.
+pub fn wasm_now_ms() -> f64 {
+    if let Some(cb) = WASM_CLOCK_CB.get() {
+        let v = (cb.now_ms)();
+        if v.is_finite() {
+            return v;
+        }
+    }
+    let v = f64::from_bits(WASM_NOW_MS_BITS.load(Ordering::Relaxed));
+    if v.is_finite() { v } else { 0.0 }
+}
+
+/// Current Unix epoch time in milliseconds for WASM builds without `js-sys` below L6.
+pub fn wasm_epoch_ms() -> f64 {
+    if let Some(cb) = WASM_CLOCK_CB.get() {
+        let v = (cb.epoch_ms)();
+        if v.is_finite() && v > 0.0 {
+            return v;
+        }
+    }
+    let v = f64::from_bits(WASM_EPOCH_MS_BITS.load(Ordering::Relaxed));
+    if v.is_finite() && v > 0.0 { v } else { 0.0 }
+}
+
+/// Local UTC offset in seconds (east positive) at `unix`, supplied by the host clock on WASM.
+pub fn wasm_tz_offset_secs(unix: u64) -> i64 {
+    WASM_CLOCK_CB.get().map_or(0, |cb| (cb.tz_offset_secs)(unix))
+}
 
 /// Points per inch.
 pub const PT_PER_IN: f32 = 72.0;
@@ -470,5 +532,15 @@ mod tests {
             assert_eq!((f.k, f.dx, f.dy), (1.0, 0.0, 0.0));
         }
         assert!(fit_to_paper(1.0, 1.0, f32::MAX, f32::MAX).k.is_finite());
+    }
+
+    #[test]
+    fn wasm_atomic_clock_ignores_non_finite_and_roundtrips() {
+        set_wasm_clock(1234.5, 1_700_000_000_000.0);
+        assert_eq!(wasm_now_ms(), 1234.5);
+        assert_eq!(wasm_epoch_ms(), 1_700_000_000_000.0);
+        set_wasm_clock(f64::NAN, f64::INFINITY);
+        assert_eq!(wasm_now_ms(), 1234.5);
+        assert_eq!(wasm_epoch_ms(), 1_700_000_000_000.0);
     }
 }

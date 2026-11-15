@@ -43,6 +43,7 @@ fn nav_harness(language: &str, percent: u16) -> egui_kittest::Harness<'static, W
 /// File › Options must not offer a way around the protected document's author check.
 #[test]
 fn user_name_field_disables_when_protection_starts() {
+    let _lock = crate::i18n::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut h = nav_harness("en", 100);
     let user_name = || egui_kittest::kittest::By::new().role(egui::accesskit::Role::TextInput).value("WordCraft User");
     assert!(!h.get(user_name()).accesskit_node().is_disabled());
@@ -55,6 +56,7 @@ fn user_name_field_disables_when_protection_starts() {
 /// label. AccessKit must still expose the full name and the row must keep its fixed size.
 #[test]
 fn options_nav_labels_stay_inside_their_rows() {
+    let _lock = crate::i18n::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if !crate::i18n::catalogs_embedded() {
         return;
     }
@@ -101,6 +103,7 @@ fn options_nav_labels_stay_inside_their_rows() {
 /// backgrounds intact, and the selected pane's settings visible at every interface size.
 #[test]
 fn options_nav_rows_keep_hover_and_selection() {
+    let _lock = crate::i18n::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if !crate::i18n::catalogs_embedded() {
         return;
     }
@@ -397,6 +400,7 @@ fn advanced_alignment_guides_checkbox_turns_snapping_off_and_on() {
 /// and the section is translated.
 #[test]
 fn advanced_animation_turns_the_caret_animation_off_and_on() {
+    let _lock = crate::i18n::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut a = app();
     a.run("file.options", json!({"pane": "advanced"})).unwrap();
     let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
@@ -460,6 +464,7 @@ fn length_fields_follow_the_region() {
 /// takes the unit typed either way.
 #[test]
 fn length_units_follow_the_interface_language() {
+    let _lock = crate::i18n::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if !crate::i18n::catalogs_embedded() {
         return;
     }

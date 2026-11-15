@@ -60,6 +60,29 @@ impl Bridge {
         Some(Self { host: Rc::new(Host::connect(APP, canvas)?) })
     }
 
+    /// Connect using an explicit `StartOptions.host` override (`"none"`, `"parent"`, or
+    /// `"page"`) or fall back to [`Self::detect`] when omitted.
+    pub fn detect_with_override(canvas: &web_sys::HtmlCanvasElement, mode: Option<&str>) -> Result<Option<Self>, String> {
+        match mode {
+            None => Ok(Self::detect(canvas)),
+            Some("none") => Ok(None),
+            Some("page") => {
+                if canvas.get_attribute("data-host").as_deref() != Some("page") {
+                    let _ = canvas.set_attribute("data-host", "page");
+                }
+                // `?host=parent` outranks `data-host="page"` in the crate's detection, so an
+                // explicit page mode withdraws that signal from the URL first.
+                withdraw_parent_query();
+                Ok(Self::detect(canvas))
+            }
+            Some("parent") => {
+                supply_parent_query();
+                Ok(Self::detect(canvas))
+            }
+            Some(other) => Err(format!("invalid host mode `{other}` (expected \"none\", \"parent\", or \"page\")")),
+        }
+    }
+
     /// Hand saved and exported files to the host instead of downloading them, report unsaved
     /// changes to it, and hear the files it sends.
     pub fn connect(&self, services: &mut Services, inbox: Inbox, ctx: egui::Context) {
@@ -105,6 +128,64 @@ impl Bridge {
                 deliver_open(&inbox, &ctx, &name, &data);
             }
         });
+    }
+}
+
+/// The `craft_web_host` transport reads the parent mode only from `?host=parent` on the page
+/// URL (its `data-host` attribute carries `page` mode), so an explicit `host: "parent"` start
+/// option supplies the same signal: add it to the query without reloading. `Host::connect`
+/// still refuses an unframed or cross-origin parent itself.
+fn supply_parent_query() {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let location = window.location();
+    let Ok(search) = location.search() else {
+        return;
+    };
+    if search.trim_start_matches('?').split('&').any(|p| p == "host=parent") {
+        return;
+    }
+    let (Ok(pathname), Ok(hash)) = (location.pathname(), location.hash()) else {
+        return;
+    };
+    let query = if search.is_empty() { "?host=parent".to_string() } else { format!("{search}&host=parent") };
+    let url = format!("{pathname}{query}{hash}");
+    let Ok(history) = window.history() else {
+        return;
+    };
+    if let Err(e) = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&url)) {
+        log::warn!("host=parent: could not update the page URL ({e:?}); not hosted");
+    }
+}
+
+/// The counterpart of [`supply_parent_query`] for an explicit `host: "page"` start: the crate's
+/// `Mode::detect` lets a `?host=parent` query outrank `data-host="page"`, so the query signal
+/// is removed (without reloading) before detection runs. Query-based detection is untouched —
+/// this only runs when the caller asked for page mode.
+fn withdraw_parent_query() {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let location = window.location();
+    let Ok(search) = location.search() else {
+        return;
+    };
+    let pairs: Vec<&str> = search.trim_start_matches('?').split('&').filter(|p| !p.is_empty()).collect();
+    if !pairs.contains(&"host=parent") {
+        return;
+    }
+    let kept: Vec<&str> = pairs.into_iter().filter(|p| *p != "host=parent").collect();
+    let query = if kept.is_empty() { String::new() } else { format!("?{}", kept.join("&")) };
+    let (Ok(pathname), Ok(hash)) = (location.pathname(), location.hash()) else {
+        return;
+    };
+    let url = format!("{pathname}{query}{hash}");
+    let Ok(history) = window.history() else {
+        return;
+    };
+    if let Err(e) = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&url)) {
+        log::warn!("host=page: could not update the page URL ({e:?}); the parent query still wins");
     }
 }
 

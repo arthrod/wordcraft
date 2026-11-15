@@ -12,14 +12,25 @@ use std::path::PathBuf;
 fn main() {
     println!("cargo::rerun-if-env-changed=CRAFT_FONTS_DIR");
     println!("cargo::rerun-if-env-changed=CRAFT_FONTS_REQUIRED");
+    println!("cargo::rerun-if-env-changed=CARGO_FEATURE_MINIMAL_WASM_FONTS");
+    let minimal_wasm_fonts = std::env::var_os("CARGO_FEATURE_MINIMAL_WASM_FONTS").is_some();
+    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").unwrap_or_default());
+
+    if let Err(e) = write_bundled_wasm_fonts(&out_dir, minimal_wasm_fonts) {
+        println!("cargo::error=writing bundled_fonts.rs: {e}");
+    }
+
     let mut src = String::from("pub static CRAFT_FONTS: &[CraftFont] = &[\n");
-    if let Some(dir) = std::env::var_os("CRAFT_FONTS_DIR").map(PathBuf::from) {
+    let wasm = std::env::var("CARGO_CFG_TARGET_ARCH").is_ok_and(|a| a == "wasm32");
+    // Native minimal builds skip craft-fonts; minimal wasm builds keep the small Arabic/Georgian UI faces.
+    if (!minimal_wasm_fonts || wasm)
+        && let Some(dir) = std::env::var_os("CRAFT_FONTS_DIR").map(PathBuf::from)
+    {
         match craft_fonts(&dir) {
             Ok((entries, covered)) => {
                 src.push_str(&entries);
                 // Each CJK interface language needs its own face: without the Chinese one, Chinese
                 // menus fall back to the Japanese face and show boxes for simplified hanzi (#241).
-                let wasm = std::env::var("CARGO_CFG_TARGET_ARCH").is_ok_and(|a| a == "wasm32");
                 if std::env::var_os("CRAFT_FONTS_REQUIRED").is_some() && !wasm {
                     for s in REQUIRED_SCRIPTS.iter().filter(|s| !covered.iter().any(|c| c == *s)) {
                         println!("cargo::error=CRAFT_FONTS_DIR={}: no {s} font in fonts/manifest.txt (craft-fonts too old?)", dir.display());
@@ -73,4 +84,32 @@ fn craft_fonts(dir: &std::path::Path) -> Result<(String, Vec<String>), String> {
         );
     }
     Ok((out, covered))
+}
+
+const CORE_WASM_FONTS: &[&str] = &["SourceSans3-Regular", "SourceSerif4-Regular", "Inter-Regular", "Inter-Medium"];
+
+fn write_bundled_wasm_fonts(out_dir: &std::path::Path, minimal: bool) -> Result<(), String> {
+    let manifest_dir = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap_or_default());
+    let assets_dir = manifest_dir.join("../../assets/fonts");
+    let br_dir = out_dir.join("bundled_br");
+    let mut rs = String::new();
+    if minimal {
+        std::fs::create_dir_all(&br_dir).map_err(|e| format!("{}: {e}", br_dir.display()))?;
+        rs.push_str("pub(super) static BUNDLED_BR: &[(&str, &[u8])] = &[\n");
+        let params = brotli::enc::BrotliEncoderParams { quality: 9, lgwin: 22, ..Default::default() };
+        for stem in CORE_WASM_FONTS {
+            let src = assets_dir.join(format!("{stem}.ttf"));
+            println!("cargo::rerun-if-changed={}", src.display());
+            let raw = std::fs::read(&src).map_err(|e| format!("{}: {e}", src.display()))?;
+            let mut compressed = Vec::new();
+            let mut reader = std::io::Cursor::new(raw);
+            brotli::BrotliCompress(&mut reader, &mut compressed, &params).map_err(|e| format!("brotli {stem}: {e}"))?;
+            let dst = br_dir.join(format!("{stem}.ttf.br"));
+            std::fs::write(&dst, compressed).map_err(|e| format!("{}: {e}", dst.display()))?;
+            let _ = writeln!(rs, "    ({stem:?}, include_bytes!({:?})),", dst.display().to_string());
+        }
+        rs.push_str("];\n");
+    }
+    let out_file = out_dir.join("bundled_fonts.rs");
+    std::fs::write(&out_file, rs).map_err(|e| format!("{}: {e}", out_file.display()))
 }

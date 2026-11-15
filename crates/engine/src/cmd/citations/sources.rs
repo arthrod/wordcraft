@@ -75,7 +75,7 @@ fn import_sources(s: &mut Session, path: &str) -> Result<(), CmdError> {
     #[cfg(target_arch = "wasm32")]
     {
         let _ = (s, path);
-        return Err(CmdError::Failed("reading files by path isn't available on the web".into()));
+        Err(CmdError::Failed("reading files by path isn't available on the web".into()))
     }
     #[cfg(not(target_arch = "wasm32"))]
     {

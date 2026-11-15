@@ -5,7 +5,7 @@ pub(crate) mod sysfonts;
 #[cfg(not(target_arch = "wasm32"))]
 fn occasional_slow_hinted_glyphs_do_not_turn_hinting_off() {
     let off = |pattern: &[bool]| {
-        let face = super::make_face(super::FontBytes::Static(super::BUNDLED[0]), 0, "T".into(), "Regular".into(), "T".into(), Vec::new()).unwrap();
+        let face = super::make_face(super::FontBytes::Static(super::bundled()[0]), 0, "T".into(), "Regular".into(), "T".into(), Vec::new()).unwrap();
         pattern.iter().position(|&slow| face.count_hinted(slow))
     };
     // A face slow throughout stops at the third strike.
@@ -193,14 +193,14 @@ fn a_thai_run_with_latin_falls_back_to_one_face() {
 fn a_run_without_a_covering_face_keeps_the_per_character_path() {
     // Use only this repository's Latin faces. Optional craft-fonts inputs can contain a
     // complete Thai face even when system font loading is disabled.
-    let bundled = FontDb::with_font_dirs(Vec::new());
-    bundled.faces.write().unwrap().retain(|face| BUNDLED.iter().any(|bytes| std::ptr::eq(face.data(), *bytes)));
-    bundled.set_system_fallback(false);
-    let latin = bundled.face(FALLBACK_FAMILY, "Regular");
+    let bundled_db = FontDb::with_font_dirs(Vec::new());
+    bundled_db.faces.write().unwrap().retain(|face| bundled().iter().any(|bytes| std::ptr::eq(face.data(), *bytes)));
+    bundled_db.set_system_fallback(false);
+    let latin = bundled_db.face(FALLBACK_FAMILY, "Regular");
     let chars: Vec<char> = THAI_RUN.chars().filter(|c| !c.is_whitespace()).collect();
-    assert!(!bundled.faces.read().unwrap().is_empty(), "the negative fixture retains real Latin faces");
-    assert!(bundled.faces.read().unwrap().iter().all(|face| !face.covers('น')));
-    assert!(bundled.fallback_for_run(&chars, latin.id(), false, false).is_none());
+    assert!(!bundled_db.faces.read().unwrap().is_empty(), "the negative fixture retains real Latin faces");
+    assert!(bundled_db.faces.read().unwrap().iter().all(|face| !face.covers('น')));
+    assert!(bundled_db.fallback_for_run(&chars, latin.id(), false, false).is_none());
 }
 
 #[test]
@@ -208,14 +208,22 @@ fn a_family_named_for_a_heavy_weight_is_that_heavy() {
     let face = |bytes: &'static [u8], family: &str| {
         make_face(FontBytes::Static(bytes), 0, family.into(), "Regular".into(), family.into(), Vec::new()).unwrap()
     };
+    let regular = bundled()[0];
     // The file says 400, as the core-fonts Arial Black does: bold must not embolden it again.
-    assert_eq!(face(BUNDLED[0], "Arial Black").weight, 900.0);
-    assert_eq!(face(BUNDLED[0], "Franklin Gothic Heavy ").weight, 900.0);
-    assert_eq!(face(BUNDLED[0], "Segoe UI ExtraBold").weight, 800.0);
-    assert_eq!(face(BUNDLED[0], "Blackadder ITC").weight, 400.0);
-    assert_eq!(face(BUNDLED[0], "Arial").weight, 400.0);
+    assert_eq!(face(regular, "Arial Black").weight, 900.0);
+    assert_eq!(face(regular, "Franklin Gothic Heavy ").weight, 900.0);
+    assert_eq!(face(regular, "Segoe UI ExtraBold").weight, 800.0);
+    assert_eq!(face(regular, "Blackadder ITC").weight, 400.0);
+    assert_eq!(face(regular, "Arial").weight, 400.0);
+    // A file under 600 named for a heavy weight is promoted (Inter Medium says 500).
+    if let Some(medium) = crate::bundled_by_stem("Inter-Medium") {
+        assert_eq!(face(medium, "Inter Heavy").weight, 900.0);
+    }
     // A file that already says it is heavy keeps its own weight (Lato Heavy is 800, not 900).
-    assert_eq!(face(BUNDLED[1], "Source Sans 3 Heavy").weight, 600.0);
+    // The minimal web font set bundles no face that heavy.
+    if let Some(semi) = crate::bundled_by_stem("Inter-SemiBold") {
+        assert_eq!(face(semi, "Inter Heavy").weight, 600.0);
+    }
 }
 
 #[test]
@@ -306,6 +314,30 @@ fn postscript_names_select_faces() {
 
 /// A variable font holding just `name` and `fvar` tables: family "Var Test", one `wght` axis
 /// and `instances` named instances, each with its own style name.
+/// `runtime_faces` lists exactly what a worker needs beside its compiled-in set: faces loaded
+/// from runtime bytes, never the bundled ones (deferred-items plan §3.4). Exercised through
+/// the document-fonts path: on native every repository font is bundled, so the user and pack
+/// paths dedup against the full bundle here — the browser build exercises them live
+/// (`installFonts`, the font packs).
+#[test]
+fn runtime_faces_list_installed_not_bundled() {
+    let db = FontDb::with_font_dirs(vec![]);
+    assert!(db.runtime_faces().is_empty(), "the bundled faces are compiled into the worker");
+
+    // A bundled file re-added as a document font under a new family name: it becomes a runtime
+    // face (a substitute the document asks for), so its bytes must ride along to the worker.
+    let bytes = include_bytes!("../../../../assets/fonts/SourceSans3-Bold.ttf").to_vec();
+    let added = db.add_document_fonts(vec![(bytes.clone(), "Contract Bold".to_string())]);
+    assert_eq!(added, 1, "the document's face is new under its own name");
+    let faces = db.runtime_faces();
+    assert_eq!(faces.len(), 1, "only the runtime face, never the bundled set");
+    assert_eq!((faces[0].0.as_str(), faces[0].1.as_str()), ("Contract Bold", "Bold"));
+    assert_eq!(faces[0].2.len(), bytes.len(), "the file's bytes ride along");
+
+    // The bundled original is not listed beside it: one runtime face, not two.
+    assert_eq!(db.runtime_faces().len(), 1);
+}
+
 fn variable_font(instances: u16) -> Vec<u8> {
     variable_font_named("Var Test", &[], instances)
 }
@@ -459,7 +491,7 @@ fn named_instances_and_collection_members_are_capped() {
     assert_eq!(enumerate_faces(&font, MAX_FILE_FACES).len(), MAX_FILE_FACES);
     // A million members, all the same font: read once, and no more than the cap.
     let started = std::time::Instant::now();
-    let ttc = collection_of(BUNDLED[0], 1_000_000);
+    let ttc = collection_of(bundled()[0], 1_000_000);
     let found = enumerate_faces(&ttc, MAX_FILE_FACES);
     assert_eq!(found.iter().map(|f| (f.family.as_str(), f.style.as_str())).collect::<Vec<_>>(), [(FALLBACK_FAMILY, "Regular")]);
     let db = FontDb::with_font_dirs(vec![]);

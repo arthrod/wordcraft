@@ -10,9 +10,75 @@ pub const FALLBACK_FAMILY: &str = "Source Sans 3";
 /// The bundled fonts (OFL), as font file bytes. Japanese fonts are not bundled: they come from
 /// the optional craft-fonts build input ([`crate::japanese_document_fonts`]).
 pub fn bundled() -> &'static [&'static [u8]] {
-    BUNDLED
+    #[cfg(not(feature = "minimal-wasm-fonts"))]
+    {
+        BUNDLED
+    }
+    #[cfg(feature = "minimal-wasm-fonts")]
+    {
+        static SLICES: std::sync::OnceLock<Vec<&'static [u8]>> = std::sync::OnceLock::new();
+        SLICES.get_or_init(|| decompressed_bundled().iter().map(|(_, b)| *b).collect()).as_slice()
+    }
 }
 
+/// Look up one bundled font by asset stem (e.g. `"Inter-Regular"`).
+pub fn bundled_by_stem(stem: &str) -> Option<&'static [u8]> {
+    bundled_named().iter().find_map(|(name, bytes)| (*name == stem).then_some(*bytes))
+}
+
+#[cfg(feature = "minimal-wasm-fonts")]
+include!(concat!(env!("OUT_DIR"), "/bundled_fonts.rs"));
+
+#[cfg(feature = "minimal-wasm-fonts")]
+fn decompressed_bundled() -> &'static [(&'static str, &'static [u8])] {
+    use std::io::Read as _;
+    static DECODED: std::sync::OnceLock<Vec<(&'static str, &'static [u8])>> = std::sync::OnceLock::new();
+    DECODED
+        .get_or_init(|| {
+            let mut out = Vec::with_capacity(BUNDLED_BR.len());
+            for &(stem, br) in BUNDLED_BR {
+                let mut raw = Vec::new();
+                if let Err(e) = brotli_decompressor::Decompressor::new(br, 4096).read_to_end(&mut raw) {
+                    log::error!("decompress bundled font {stem}: {e}");
+                    continue;
+                }
+                let leaked: &'static mut [u8] = raw.leak();
+                out.push((stem, &*leaked));
+            }
+            out
+        })
+        .as_slice()
+}
+
+fn bundled_named() -> &'static [(&'static str, &'static [u8])] {
+    #[cfg(feature = "minimal-wasm-fonts")]
+    {
+        decompressed_bundled()
+    }
+    #[cfg(not(feature = "minimal-wasm-fonts"))]
+    {
+        BUNDLED_NAMED
+    }
+}
+
+#[cfg(not(feature = "minimal-wasm-fonts"))]
+static BUNDLED_NAMED: &[(&str, &[u8])] = &[
+    ("SourceSans3-Regular", BUNDLED[0]),
+    ("SourceSans3-Semibold", BUNDLED[1]),
+    ("SourceSans3-Bold", BUNDLED[2]),
+    ("SourceSans3-It", BUNDLED[3]),
+    ("SourceSerif4-Regular", BUNDLED[4]),
+    ("SourceSerif4-It", BUNDLED[5]),
+    ("SourceSerif4-Semibold", BUNDLED[6]),
+    ("SourceSerif4-Bold", BUNDLED[7]),
+    ("SourceSerif4-BoldIt", BUNDLED[8]),
+    ("Inter-Regular", BUNDLED[9]),
+    ("Inter-Medium", BUNDLED[10]),
+    ("Inter-SemiBold", BUNDLED[11]),
+    ("JetBrainsMono-Regular", BUNDLED[12]),
+];
+
+#[cfg(not(feature = "minimal-wasm-fonts"))]
 pub(super) static BUNDLED: &[&[u8]] = &[
     include_bytes!("../../../../assets/fonts/SourceSans3-Regular.ttf"),
     include_bytes!("../../../../assets/fonts/SourceSans3-Semibold.ttf"),

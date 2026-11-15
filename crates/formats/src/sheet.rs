@@ -18,7 +18,7 @@
 //! all), sheets, rows, columns, cells and string lengths are capped, repeat counts are clamped to
 //! what is left, and nothing recurses, so XML depth costs nothing.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Cursor, Read};
 
 use quick_xml::XmlVersion;
@@ -145,36 +145,7 @@ pub fn read_rows(bytes: &[u8], pick: Pick<'_>) -> Result<(Vec<String>, Vec<Vec<S
     }
 }
 
-/// Field names from a header row: trimmed, blanks named `Column N` (N = 1-based column) and
-/// repeats numbered (`Name`, `Name 2`), ignoring case as merge fields do.
-pub fn field_names(row: &[String]) -> Vec<String> {
-    let mut out: Vec<String> = Vec::with_capacity(row.len());
-    // The names given so far, ASCII-lowercased, and per base name the next number to try: a set
-    // lookup per candidate, and each base resumes where it stopped, instead of rescanning every
-    // name from `2` for every repeat (cubic on a row of equal headers).
-    let mut taken: HashSet<String> = HashSet::with_capacity(row.len());
-    let mut next: HashMap<String, usize> = HashMap::new();
-    for (i, h) in row.iter().enumerate() {
-        let base = match h.trim() {
-            "" => format!("Column {}", i + 1),
-            t => t.to_string(),
-        };
-        let mut name = base.clone();
-        if taken.contains(&name.to_ascii_lowercase()) {
-            let k = next.entry(base.to_ascii_lowercase()).or_insert(2);
-            loop {
-                name = format!("{base} {k}");
-                *k = k.saturating_add(1);
-                if !taken.contains(&name.to_ascii_lowercase()) {
-                    break;
-                }
-            }
-        }
-        taken.insert(name.to_ascii_lowercase());
-        out.push(name);
-    }
-    out
-}
+pub use crate::field_names;
 
 fn resolve(names: &[String], pick: Pick<'_>) -> Result<usize, String> {
     if names.is_empty() {

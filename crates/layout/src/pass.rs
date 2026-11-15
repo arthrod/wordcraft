@@ -778,10 +778,9 @@ pub fn now_ms() -> f64 {
         static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
         T0.get_or_init(std::time::Instant::now).elapsed().as_secs_f64() * 1000.0
     }
-    // `Instant::now()` panics on wasm32-unknown-unknown, so ask the browser's clock.
+    // `Instant::now()` panics on wasm32-unknown-unknown, so ask the host-supplied clock.
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     {
-        let ms = js_sys::Date::now();
-        if ms.is_finite() { ms } else { 0.0 }
+        wordcraft_geom::wasm_now_ms()
     }
 }

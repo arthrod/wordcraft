@@ -70,7 +70,10 @@ impl Session {
             comment_balloons: false,
             field_codes: shown.1,
             outline: outline.clone(),
+            #[cfg(feature = "inline-proof")]
             proof: wordcraft_layout::ProofOptions { grammar: self.prefs.mark_grammar, spelling: self.prefs.spelling() },
+            #[cfg(not(feature = "inline-proof"))]
+            proof: wordcraft_layout::ProofOptions::default(),
             typing_word: typing,
             filename: filename.clone(),
             filepath: filepath.clone(),

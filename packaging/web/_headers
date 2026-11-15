@@ -1,13 +1,75 @@
-# Netlify / Cloudflare Pages header rules (see HOSTING.md). Other hosts: set the same headers.
 /*
   X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; worker-src 'self'; connect-src 'self'
 
 /*.wasm
+  ! Content-Type
   Content-Type: application/wasm
+
+# Precompressed Brotli sidecars (plan §2.2). The bytes are already br-encoded wasm; a host that
+# serves them verbatim must still label the payload so the browser decodes it. Requesters that
+# never offer `br` never fetch these (the Worker negotiates; pages don't reference them).
+/*.wasm.br
+  ! Content-Type
+  Content-Type: application/wasm
+  Content-Encoding: br
+  Vary: Accept-Encoding
   Cache-Control: public, max-age=31536000, immutable
 
-/*.js
+# Brotli sidecars of the un-hashed dedicated-worker modules follow their plain files' rule
+# (S4): `no-cache`, never `immutable`. Matching rules combine (a header set twice is sent
+# twice, comma-joined), so every header the generic `/*.wasm.br` rule above set is detached
+# here before being re-set — a joined `Content-Encoding: br, br` would make the browser
+# decode the body twice.
+/wordcraft-worker-*.wasm.br
+  ! Content-Type
+  ! Content-Encoding
+  ! Vary
+  ! Cache-Control
+  Content-Type: application/wasm
+  Content-Encoding: br
+  Vary: Accept-Encoding
+  Cache-Control: no-cache
+
+/wordcraft-web-*.wasm
+  Cache-Control: public, max-age=31536000, immutable
+
+/wordcraft-web-*.js
+  Cache-Control: public, max-age=31536000, immutable
+
+# Dedicated worker artifacts (wordcraft-worker-proof{,_bg.wasm,_loader.js}): Trunk keeps
+# worker names un-hashed because they must be named at runtime, so — unlike the content-hashed
+# wordcraft-web-* files — they can never be `immutable` (the plan's own ground rule: immutable
+# caching only on content-hashed file names). They are `no-cache`, not a short max-age window
+# (S4): the hashed main module updates at once on a deploy, and a cached worker older than the
+# module would fail the protocol version check for the window's whole duration — a missing
+# feature, not a crash, but one the user cannot fix by reloading the module. `no-cache` costs
+# one revalidation per load (a 304 when unchanged) and closes the window entirely.
+/wordcraft-worker-*.js
+  Cache-Control: no-cache
+
+/wordcraft-worker-*.wasm
+  Cache-Control: no-cache
+
+/wordcraft-*.ico
+  Cache-Control: public, max-age=31536000, immutable
+
+/snippets/*
   Cache-Control: public, max-age=31536000, immutable
 
 /index.html
+  Cache-Control: no-cache
+
+/i18n/*
+  Cache-Control: public, max-age=3600, must-revalidate
+
+/samples/*
+  Cache-Control: public, max-age=3600, must-revalidate
+
+# Pack fonts have a content hash in the file name (web-assets staging).
+/fonts/*.ttf.br
+  Cache-Control: public, max-age=31536000, immutable
+
+/fonts/manifest.json
   Cache-Control: no-cache

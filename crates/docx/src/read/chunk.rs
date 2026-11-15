@@ -30,8 +30,8 @@ pub struct AltChunk<'a> {
 }
 
 /// Turns a chunk the docx reader can't read itself into a document whose body takes the chunk's
-/// place; `None` leaves the chunk out.
-pub type ChunkImporter<'a> = &'a dyn Fn(&AltChunk) -> Option<Document>;
+/// place; an `Err` aborts the import with that message.
+pub type ChunkImporter<'a> = &'a dyn Fn(&AltChunk) -> Result<Document, String>;
 
 /// How [`crate::read_with`] reads a package.
 #[derive(Clone, Copy, Default)]
@@ -63,11 +63,29 @@ impl Reader<'_> {
         let chunk = AltChunk { content_type: &ct, part: &part, bytes };
         // A WordprocessingML chunk is a package; one that isn't Word's fails to read (logged).
         let is_docx = bytes.starts_with(b"PK\x03\x04");
-        let doc = if is_docx { self.read_nested(bytes, depth) } else { self.chunks.import.and_then(|f| f(&chunk)) };
-        let Some(mut doc) = doc else {
+        let doc = if is_docx {
+            let Some(doc) = self.read_nested(bytes, depth) else {
+                if self.chunk_error.is_none() {
+                    log::warn!("docx: alternative format chunk {part} ({ct}) is in a format WordCraft can't bring in");
+                }
+                return;
+            };
+            doc
+        } else if let Some(import) = self.chunks.import {
+            match import(&chunk) {
+                Ok(doc) => doc,
+                Err(err) => {
+                    if self.chunk_error.is_none() {
+                        self.chunk_error = Some(err);
+                    }
+                    return;
+                }
+            }
+        } else {
             log::warn!("docx: alternative format chunk {part} ({ct}) is in a format WordCraft can't bring in");
             return;
         };
+        let mut doc = doc;
         // The chunk flows in the section it stands in; its own section breaks don't come along.
         for b in &mut doc.body {
             if let Block::Para(p) = &**b
@@ -108,16 +126,28 @@ impl Reader<'_> {
             log::warn!("docx: alternative format chunks nest deeper than {MAX_CHUNK_NESTING}; the inner ones are left out");
             return None;
         }
-        let pkg =
-            Package::open_limited(bytes, MAX_PART, self.chunks.bytes).map_err(|e| log::warn!("docx: unreadable nested document chunk: {e}")).ok()?;
+        let pkg = Package::open_limited(bytes, self.chunks.part, self.chunks.bytes)
+            .map_err(|e| log::warn!("docx: unreadable nested document chunk: {e}"))
+            .ok()?;
         self.chunks.bytes = self.chunks.bytes.saturating_sub(pkg.size());
-        let state = ChunkState { nesting: self.chunks.nesting + 1, depth: depth + 1, ..self.chunks };
-        let (doc, left, bytes, graphic) =
-            super::read_opened_in(&pkg, state).map_err(|e| log::warn!("docx: unreadable nested document chunk: {e}")).ok()?;
-        self.chunks.left = left;
-        self.chunks.bytes = bytes;
-        self.chunks.graphic = graphic;
-        Some(doc)
+        let mut state = ChunkState { nesting: self.chunks.nesting + 1, depth: depth + 1, ..self.chunks };
+        let res = super::read_opened_in(&pkg, &mut state);
+        self.chunks.left = state.left;
+        self.chunks.bytes = state.bytes;
+        self.chunks.graphic = state.graphic;
+        match res {
+            Ok((doc, ..)) => Some(doc),
+            Err(crate::DocxError::AltChunk(err)) => {
+                if self.chunk_error.is_none() {
+                    self.chunk_error = Some(err);
+                }
+                None
+            }
+            Err(e) => {
+                log::warn!("docx: unreadable nested document chunk: {e}");
+                None
+            }
+        }
     }
 }
 
@@ -128,6 +158,9 @@ pub(crate) struct ChunkState<'a> {
     pub left: usize,
     /// Chunk bytes (nested packages unpacked) left in the file's budget.
     pub bytes: u64,
+    /// The per-part decompression cap nested WordprocessingML chunks are opened under: the
+    /// caller's `max_part` ([`MAX_PART`] unless it set a tighter one).
+    pub part: u64,
     /// Graphic work left in the file's budget ([`super::MAX_GRAPHIC_WORK`]): nested documents'
     /// charts and diagrams count against it too.
     pub graphic: usize,
@@ -140,7 +173,7 @@ pub(crate) struct ChunkState<'a> {
 
 impl<'a> ChunkState<'a> {
     pub fn new(import: Option<ChunkImporter<'a>>) -> Self {
-        ChunkState { left: MAX_CHUNKS, bytes: MAX_TOTAL, graphic: super::MAX_GRAPHIC_WORK, nesting: 0, depth: 0, import }
+        ChunkState { left: MAX_CHUNKS, bytes: MAX_TOTAL, part: MAX_PART, graphic: super::MAX_GRAPHIC_WORK, nesting: 0, depth: 0, import }
     }
 }
 
@@ -190,7 +223,9 @@ mod tests {
         let outer = package(r#"<w:altChunk r:id="rIdC"/>"#, ("rIdC", "aFChunk", "afchunk.docx"), ("word/afchunk.docx", &inner));
         let pkg = Package::open(&outer).unwrap();
         let read = |graphic| {
-            let (d, .., left) = super::super::read_opened_in(&pkg, ChunkState { graphic, ..ChunkState::new(None) }).unwrap();
+            let mut state = ChunkState { graphic, ..ChunkState::new(None) };
+            let (d, .., left) = super::super::read_opened_in(&pkg, &mut state).unwrap();
+            assert_eq!(state.graphic, left);
             (drawn(&d), left)
         };
         let (shown, left) = read(super::super::MAX_GRAPHIC_WORK);
@@ -198,5 +233,76 @@ mod tests {
         assert!(left < super::super::MAX_GRAPHIC_WORK, "the nested chart's work is the file's");
         // With the file's budget spent, the nested document doesn't get one of its own.
         assert_eq!(read(0), (false, 0));
+    }
+
+    /// A nested WordprocessingML chunk is a package of its own: it unpacks under the budgets the
+    /// caller gave the file (`read_limited`), charged against what the file's budget has left —
+    /// not the desktop defaults.
+    #[test]
+    fn a_nested_package_is_held_to_the_callers_decompression_budget() {
+        let ns = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#;
+        let rels =
+            |inner: &str| format!(r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{inner}</Relationships>"#);
+        let rel = |id: &str, ty: &str, target: &str| {
+            format!(r#"<Relationship Id="{id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{ty}" Target="{target}"/>"#)
+        };
+        // ~300 KB of text deflates to a few hundred bytes: the inner package fits any compressed
+        // budget but inflates well past a 64 KiB total.
+        let body = format!(r#"<w:document {ns}><w:body><w:p><w:r><w:t>INNER-MARKER {}</w:t></w:r></w:p></w:body></w:document>"#, "x".repeat(300_000));
+        let inner = crate::package::zip_entries(&[
+            ("_rels/.rels".to_string(), rels(&rel("rId1", "officeDocument", "word/document.xml")).into_bytes()),
+            ("word/document.xml".to_string(), body.into_bytes()),
+        ])
+        .unwrap();
+        let outer = package(r#"<w:altChunk r:id="rIdC"/>"#, ("rIdC", "aFChunk", "afchunk.docx"), ("word/afchunk.docx", &inner));
+        let text = |d: &Document| d.plain_text(wordcraft_doc::StoryRef::Body);
+        // The desktop defaults read the chunk; the caller's 64 KiB total doesn't.
+        let doc = super::super::read_package_limited(&outer, None, crate::package::MAX_PART, crate::package::MAX_TOTAL).unwrap();
+        assert!(text(&doc).contains("INNER-MARKER"));
+        let doc = super::super::read_package_limited(&outer, None, crate::package::MAX_PART, 64 * 1024).unwrap();
+        assert!(!text(&doc).contains("INNER-MARKER"), "the nested package must not outspend the caller's budget");
+        // A per-part cap tighter than the inner document part refuses it the same way.
+        let doc = super::super::read_package_limited(&outer, None, 128 * 1024, crate::package::MAX_TOTAL).unwrap();
+        assert!(!text(&doc).contains("INNER-MARKER"));
+    }
+
+    #[test]
+    fn failed_nested_chunk_import_still_propagates_consumed_budgets() {
+        let chart = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:ser><c:val><c:numLit><c:ptCount val="2"/><c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="1"><c:v>2</c:v></c:pt></c:numLit></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
+        let drawing = r#"<w:p><w:r><w:drawing><wp:inline><wp:extent cx="2743200" cy="1828800"/><wp:docPr id="5" name="G"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rIdChart"/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#;
+        // Inner package draws a chart AND includes a non-docx altChunk that fails import.
+        let ns = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main""#;
+        let rels =
+            |inner: &str| format!(r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{inner}</Relationships>"#);
+        let rel = |id: &str, ty: &str, target: &str| {
+            format!(r#"<Relationship Id="{id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{ty}" Target="{target}"/>"#)
+        };
+        let mut zw = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, bytes) in [
+            ("_rels/.rels", rels(&rel("rId1", "officeDocument", "word/document.xml")).into_bytes()),
+            ("word/document.xml", format!(r#"<w:document {ns}><w:body>{drawing}<w:altChunk r:id="rIdH"/></w:body></w:document>"#).into_bytes()),
+            (
+                "word/_rels/document.xml.rels",
+                rels(&format!("{}{}", rel("rIdChart", "chart", "charts/chart1.xml"), rel("rIdH", "aFChunk", "afchunk.htm"))).into_bytes(),
+            ),
+            ("word/charts/chart1.xml", chart.as_bytes().to_vec()),
+            ("word/afchunk.htm", b"<p>boom</p>".to_vec()),
+        ] {
+            zw.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+            zw.write_all(&bytes).unwrap();
+        }
+        let inner = zw.finish().unwrap().into_inner();
+        let outer = package(r#"<w:altChunk r:id="rIdC"/>"#, ("rIdC", "aFChunk", "afchunk.docx"), ("word/afchunk.docx", &inner));
+        let pkg = Package::open(&outer).unwrap();
+        let fail_import = |_: &super::AltChunk| Err("abort chunk".into());
+        let mut state = ChunkState::new(Some(&fail_import));
+        let initial_left = state.left;
+        let initial_bytes = state.bytes;
+        let initial_graphic = state.graphic;
+        let err = super::super::read_opened_in(&pkg, &mut state).unwrap_err();
+        assert!(matches!(err, crate::DocxError::AltChunk(ref msg) if msg == "abort chunk"), "{err:?}");
+        assert!(state.left < initial_left, "chunk count budget should be consumed on failure");
+        assert!(state.bytes < initial_bytes, "chunk byte budget should be consumed on failure");
+        assert!(state.graphic < initial_graphic, "graphic budget consumed in nested package should propagate on failure");
     }
 }

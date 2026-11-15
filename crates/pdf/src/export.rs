@@ -1,7 +1,7 @@
 use super::exporter::Exporter;
 use super::metadata::metadata;
 use super::options::{PdfError, PdfOptions};
-use super::paint::{clamp_side, ok, rect_path};
+use super::paint::{clamp_side, rect_path};
 use super::{
     DocLayout, Document, FillRule, HashMap, HashSet, KrillaError, LayoutCache, Page, PageSettings, Rect, Size, Transform, WriteError, Writer,
     imposition, krilla, layout, write,
@@ -177,11 +177,6 @@ pub(crate) struct Fit {
 }
 
 impl Fit {
-    /// The physical output page dimensions, shared with the imposition planner.
-    pub(crate) fn paper_size(self) -> (f32, f32) {
-        (self.paper_w, self.paper_h)
-    }
-
     /// Fit the complete logical page (including markup) within one fixed sheet cell.
     fn in_slot(page: &Page, slot: imposition::Slot) -> Self {
         let own = Self::of(page, None);
@@ -198,13 +193,8 @@ impl Fit {
 
     /// Map one document page and its markup area onto its requested paper.
     pub(crate) fn of(page: &Page, paper: Option<(f32, f32)>) -> Fit {
-        let paper_w = page.w - page.markup;
-        let own = if page.markup > 0.0 && ok(page.markup) && ok(page.w) && paper_w > 1.0 {
-            let k = paper_w / page.w;
-            Fit { paper_w, paper_h: page.h, page_w: paper_w, k, dx: 0.0, dy: page.h * (1.0 - k) / 2.0 }
-        } else {
-            Fit { paper_w: page.w, paper_h: page.h, page_w: page.w, k: 1.0, dx: 0.0, dy: 0.0 }
-        };
+        let (paper_w, paper_h, page_w, k, dy) = imposition::fit_page_dimensions(page);
+        let own = Fit { paper_w, paper_h, page_w, k, dx: 0.0, dy };
         let Some((w, h)) = paper else { return own };
         let f = wordcraft_geom::fit_to_paper(own.paper_w, own.paper_h, w, h);
         Fit { paper_w: f.paper_w, paper_h: f.paper_h, page_w: own.page_w, k: own.k * f.k, dx: f.dx, dy: own.dy * f.k + f.dy }

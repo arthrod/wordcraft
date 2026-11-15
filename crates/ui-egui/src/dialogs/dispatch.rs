@@ -139,6 +139,8 @@ fn font_dialog(app: &mut WordApp, ui: &mut Ui, d: &mut Dialog) -> bool {
                             let _ = app.run("font.add", json!({}));
                         } else if f == crate::widgets::LOAD_SYSTEM_FONTS {
                             let _ = app.run("font.loadSystem", json!({}));
+                        } else if f == crate::widgets::INSTALL_FONT_PACKS {
+                            let _ = app.run("font.installPack", json!({}));
                         } else {
                             *font_ea = f;
                         }
@@ -157,6 +159,8 @@ fn font_dialog(app: &mut WordApp, ui: &mut Ui, d: &mut Dialog) -> bool {
                         let _ = app.run("font.add", json!({}));
                     } else if f == crate::widgets::LOAD_SYSTEM_FONTS {
                         let _ = app.run("font.loadSystem", json!({}));
+                    } else if f == crate::widgets::INSTALL_FONT_PACKS {
+                        let _ = app.run("font.installPack", json!({}));
                     } else {
                         *font = f;
                     }

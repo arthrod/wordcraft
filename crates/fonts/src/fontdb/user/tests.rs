@@ -502,3 +502,133 @@ fn a_woff2_collection_font_listing_a_table_twice_is_refused() {
     let file = woff2_collection(3, &[vec![0, 1, 2], vec![0, 1, 2]]);
     assert_ne!(decode_font_file(&file), Err(UserFontError::BadWebFont(BAD_COLLECTION.into())));
 }
+
+/// Two different fonts as one TrueType collection (`a` first, then `b`).
+fn collection2(a: &[u8], b: &[u8]) -> Vec<u8> {
+    let mut out = b"ttcf\0\x01\0\0".to_vec();
+    out.extend_from_slice(&2u32.to_be_bytes());
+    let off_a = 12 + 8;
+    let off_b = off_a + a.len();
+    out.extend_from_slice(&(off_a as u32).to_be_bytes());
+    out.extend_from_slice(&(off_b as u32).to_be_bytes());
+    for (font, base) in [(a, off_a), (b, off_b)] {
+        let mut font = font.to_vec();
+        let tables = u16::from_be_bytes([font[4], font[5]]) as usize;
+        for i in 0..tables {
+            let at = 12 + 16 * i + 8;
+            let offset = u32::from_be_bytes(font[at..at + 4].try_into().unwrap()) + base as u32;
+            font[at..at + 4].copy_from_slice(&offset.to_be_bytes());
+        }
+        out.extend(font);
+    }
+    out
+}
+
+/// A family no bundled or installed font has, the length of "Source Sans 3" (see [`renamed`]).
+const PACKFAMILY: &str = "Packface Sans";
+
+#[test]
+fn pack_faces_install_beside_user_fonts() {
+    let db = db();
+    let gen0 = db.generation();
+    assert!(!db.has_family(PACKFAMILY));
+    let bold = renamed("SourceSans3-Bold.ttf", PACKFAMILY);
+    let faces = db.install_pack_font("PackfaceSans-Bold.9f27c1d0.ttf.br", &bold).unwrap();
+    assert_eq!(faces, vec![(PACKFAMILY.to_string(), "Bold".to_string())]);
+    // A pack face, not a user font: not listed, not removable, nothing stored.
+    assert!(db.user_fonts().is_empty());
+    assert!(matches!(db.remove_user_font(PACKFAMILY), Err(UserFontError::NotUserFont(_))));
+    assert_eq!(db.pack_fonts(), vec![(PACKFAMILY.to_string(), "Bold".to_string())]);
+    // Found like any face, and the addition bumped the generation (layouts re-run).
+    assert!(db.families().iter().any(|f| f == PACKFAMILY));
+    assert_eq!(db.styles(PACKFAMILY), vec!["Bold".to_string()]);
+    assert_eq!(db.face(PACKFAMILY, "Bold").family, PACKFAMILY);
+    assert!(db.generation() > gen0);
+    // The same file again adds no face — the shell reads that as "already there".
+    assert!(matches!(db.install_pack_font("again", &bold), Err(UserFontError::AlreadyAvailable(_))));
+    assert_eq!(db.pack_fonts().len(), 1);
+    // Junk is refused exactly like a user font, without touching the database.
+    assert!(matches!(db.install_pack_font("x", b""), Err(UserFontError::Empty)));
+    assert!(matches!(db.install_pack_font("x", b"not a font"), Err(UserFontError::NotAFont)));
+    // The pack left the user font budget alone: a user font still installs after it.
+    db.install_font("u.ttf", &renamed("SourceSans3-It.ttf", FAMILY)).unwrap();
+    assert_eq!(db.user_fonts().len(), 1);
+    assert_eq!(db.styles(FAMILY), vec!["Italic".to_string()]);
+}
+
+#[test]
+fn pack_faces_never_touch_the_user_font_folder() {
+    let dir = temp_dir("packstore");
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = db();
+    let _ = db.load_user_fonts(&dir);
+    db.install_pack_font("PackfaceSans-Bold.9f27c1d0.ttf.br", &renamed("SourceSans3-Bold.ttf", PACKFAMILY)).unwrap();
+    assert_eq!(db.pack_fonts().len(), 1);
+    assert!(std::fs::read_dir(&dir).unwrap().next().is_none(), "the pack is never stored; the browser re-fetches it");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn pack_faces_do_not_count_against_the_user_font_cap() {
+    // A full user font list refuses a user font, never a pack: the browser re-fetches packs
+    // each session, so they must not crowd out fonts the user chose.
+    let db = db();
+    {
+        let mut user = db.write_user();
+        for i in 0..MAX_USER_FONTS {
+            user.fonts.push(UserFont { file: format!("f{i}.ttf"), faces: vec![], path: None, face_ids: vec![] });
+        }
+    }
+    assert!(matches!(db.install_font("u.ttf", &renamed("SourceSans3-Regular.ttf", FAMILY)), Err(UserFontError::TooMany)));
+    db.install_pack_font("PackfaceSans-Bold.9f27c1d0.ttf.br", &renamed("SourceSans3-Bold.ttf", PACKFAMILY)).unwrap();
+    assert_eq!(db.pack_fonts(), vec![(PACKFAMILY.to_string(), "Bold".to_string())]);
+}
+
+#[test]
+fn a_pack_past_the_face_cap_is_refused_before_any_face_is_added() {
+    let db = db();
+    // Two slots left under the cap.
+    {
+        let mut packs = db.write_packs();
+        for i in 0..crate::packs::MAX_INSTALLED_PACK_FACES - 2 {
+            packs.installed.push((i as u32, format!("Pack {i}"), "Regular".to_string()));
+        }
+    }
+    // A two-face pack fills it exactly: the whole file's faces are counted and recorded.
+    let pair = collection2(&renamed("SourceSans3-Semibold.ttf", "Packfont Sans"), &renamed("SourceSans3-It.ttf", "Packface Mono"));
+    assert_eq!(db.install_pack_font("pair.ttc.br", &pair).unwrap().len(), 2);
+    assert_eq!(db.pack_fonts().len(), crate::packs::MAX_INSTALLED_PACK_FACES);
+    // The next pack would pass the cap: refused whole — no face committed, nothing recorded,
+    // and the generation (which re-runs layouts) doesn't move.
+    let gen0 = db.generation();
+    let err = db.install_pack_font("one.ttf.br", &renamed("SourceSans3-Bold.ttf", PACKFAMILY)).unwrap_err();
+    assert!(matches!(err, UserFontError::TooManyPacks), "{err}");
+    assert_eq!(db.generation(), gen0);
+    assert_eq!(db.pack_fonts().len(), crate::packs::MAX_INSTALLED_PACK_FACES);
+    assert!(!db.has_family(PACKFAMILY), "a refused pack commits no face");
+}
+
+#[test]
+fn a_pack_cap_counts_faces_freed_before_commit() {
+    let db = db();
+    db.install_font("a.ttf", &renamed("SourceSans3-Regular.ttf", FAMILY)).unwrap();
+    {
+        let mut packs = db.write_packs();
+        for i in 0..crate::packs::MAX_INSTALLED_PACK_FACES - 1 {
+            packs.installed.push((u32::MAX - i as u32, format!("Pack {i}"), "Regular".to_string()));
+        }
+        // One slot left: the collection's first face is already installed, so a stale count
+        // would see one fresh face. Removing it before commit makes both faces fresh, which
+        // must trip the cap under the face write lock instead of being recorded.
+        let pair = collection2(&renamed("SourceSans3-Regular.ttf", FAMILY), &renamed("SourceSans3-It.ttf", PACKFAMILY));
+        let err = db
+            .add_pack_faces_before_commit(&mut packs, pair, || {
+                db.remove_user_font(FAMILY).unwrap();
+            })
+            .unwrap_err();
+        assert!(matches!(err, UserFontError::TooManyPacks), "{err}");
+        assert_eq!(packs.installed.len(), crate::packs::MAX_INSTALLED_PACK_FACES - 1);
+    }
+    assert!(!db.has_family(FAMILY), "the interleaved removal still happened");
+    assert!(!db.has_family(PACKFAMILY), "the refused pack committed no face");
+}

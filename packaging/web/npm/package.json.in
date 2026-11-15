@@ -1,0 +1,84 @@
+{
+  "name": "wordcraft-web",
+  "version": "@VERSION@",
+  "description": "WordCraft in the browser — open-source Rust word processor compiled to WebAssembly with programmatic API",
+  "license": "MIT OR Apache-2.0",
+  "author": "ArtCraft Team and WordCraft contributors",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/storytold/wordcraft.git"
+  },
+  "homepage": "https://github.com/storytold/wordcraft/tree/main/packaging/web",
+  "bugs": {
+    "url": "https://github.com/storytold/wordcraft/issues"
+  },
+  "keywords": [
+    "wordcraft",
+    "word-processor",
+    "docx",
+    "ooxml",
+    "markdown",
+    "editor",
+    "wasm",
+    "webassembly",
+    "rust",
+    "office"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./glue": {
+      "types": "./wordcraft-web.d.ts",
+      "default": "./wordcraft-web.js"
+    },
+    "./wasm": "./wordcraft-web_bg.wasm",
+    "./worker-proof/loader": "./wordcraft-worker-proof_loader.js",
+    "./worker-proof/glue": "./wordcraft-worker-proof.js",
+    "./worker-proof/wasm": "./wordcraft-worker-proof_bg.wasm",
+    "./worker-codecs/loader": "./wordcraft-worker-codecs_loader.js",
+    "./worker-codecs/glue": "./wordcraft-worker-codecs.js",
+    "./worker-codecs/wasm": "./wordcraft-worker-codecs_bg.wasm",
+    "./worker-pdf/loader": "./wordcraft-worker-pdf_loader.js",
+    "./worker-pdf/glue": "./wordcraft-worker-pdf.js",
+    "./worker-pdf/wasm": "./wordcraft-worker-pdf_bg.wasm",
+    "./i18n/*.tsv": "./i18n/*.tsv",
+    "./samples/*.md": "./samples/*.md",
+    "./fonts/*": "./fonts/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "wordcraft-web.js",
+    "wordcraft-web.d.ts",
+    "wordcraft-web_bg.wasm",
+    "wordcraft-worker-proof.js",
+    "wordcraft-worker-proof_loader.js",
+    "wordcraft-worker-proof_bg.wasm",
+    "wordcraft-worker-codecs.js",
+    "wordcraft-worker-codecs_loader.js",
+    "wordcraft-worker-codecs_bg.wasm",
+    "wordcraft-worker-pdf.js",
+    "wordcraft-worker-pdf_loader.js",
+    "wordcraft-worker-pdf_bg.wasm",
+    "snippets/",
+    "i18n/",
+    "samples/",
+    "fonts/",
+    "LICENSES-fonts/",
+    "ATTRIBUTION.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "NOTICE",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

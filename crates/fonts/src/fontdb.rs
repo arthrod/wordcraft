@@ -24,8 +24,8 @@ mod fallback_data;
 mod lookup;
 mod names;
 
-use face::{BUNDLED, FontBytes};
-pub use face::{FALLBACK_FAMILY, FaceRef, FontFace, bundled};
+use face::FontBytes;
+pub use face::{FALLBACK_FAMILY, FaceRef, FontFace, bundled, bundled_by_stem};
 #[cfg(not(target_arch = "wasm32"))]
 use fallback_data::{CoverageIndex, SysFallback};
 use fallback_data::{FallbackCache, RunFallbackCache};
@@ -61,6 +61,10 @@ pub struct FontDb {
     catalog: RwLock<Vec<CatalogEntry>>,
     /// Fonts the user added at run time, and the folder they are stored in (#582).
     user: RwLock<user::UserFonts>,
+    /// Pack faces the host downloaded and installed, and the wanted-face record
+    /// ([`crate::packs`]). Kept apart from `user` so packs never persist, count against
+    /// [`user::MAX_USER_FONTS`], or answer to [`FontDb::remove_user_font`].
+    pub(crate) packs: RwLock<crate::packs::PackFonts>,
     /// Bumped whenever user fonts are added or removed ([`FontDb::generation`]).
     generation: AtomicU64,
     /// The folders the system font scan reads (the platform's font folders for [`FontDb::global`]).
@@ -92,6 +96,23 @@ pub struct FontDb {
 }
 
 impl FontDb {
+    /// The faces loaded from runtime bytes — user fonts, pack faces and fonts embedded in the
+    /// open document — as `(typographic family, style, file bytes)`: everything beyond the
+    /// static set, for a host to copy to a worker that must lay text out with exactly the faces
+    /// this process has (deferred-items plan §3.4; the bundled faces are compiled into such a
+    /// worker too and are not repeated). Faces removed from the database stop appearing here.
+    pub fn runtime_faces(&self) -> Vec<(String, String, std::sync::Arc<Vec<u8>>)> {
+        self.faces
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter_map(|f| match &f.bytes {
+                FontBytes::Owned(bytes) => Some((f.family.clone(), f.style.clone(), bytes.clone())),
+                FontBytes::Static(_) => None,
+            })
+            .collect()
+    }
+
     /// A database holding the bundled fonts, then the craft-fonts Japanese faces (Mincho first,
     /// so they are the fallback for Japanese text after the requested and bundled fonts), then the
     /// other craft-fonts faces: Simplified Chinese, for the ideographs the Japanese fonts lack, and
@@ -100,7 +121,7 @@ impl FontDb {
     pub fn with_font_dirs(font_dirs: Vec<std::path::PathBuf>) -> Self {
         let others = crate::CRAFT_FONTS.iter().filter(|f| !f.scripts.contains(&"Jpan"));
         let craft = crate::japanese_document_fonts().into_iter().chain(others).map(|f| f.bytes);
-        Self::with_static_fonts(font_dirs, BUNDLED.iter().copied().chain(craft))
+        Self::with_static_fonts(font_dirs, bundled().iter().copied().chain(craft))
     }
 
     fn with_static_fonts(font_dirs: Vec<std::path::PathBuf>, fonts: impl Iterator<Item = &'static [u8]>) -> Self {
@@ -123,6 +144,7 @@ impl FontDb {
             #[cfg(not(target_arch = "wasm32"))]
             catalog: RwLock::new(Vec::new()),
             user: RwLock::new(user::UserFonts::default()),
+            packs: RwLock::new(crate::packs::PackFonts::default()),
             generation: AtomicU64::new(0),
             font_dirs,
             #[cfg(not(target_arch = "wasm32"))]
@@ -172,7 +194,7 @@ impl FontDb {
             let mut installed = false;
             GLOBAL.get_or_init(|| {
                 installed = true;
-                let db = Self::with_static_fonts(Vec::new(), BUNDLED.iter().copied());
+                let db = Self::with_static_fonts(Vec::new(), bundled().iter().copied());
                 db.set_system_fallback(false);
                 db
             });

@@ -1,36 +1,109 @@
-# Hosting WordCraft for the web
+# Hosting and embedding WordCraftWeb (`wordcraft-web`)
 
-`wordcraft-web-<version>.zip` (from the GitHub release, or `packaging/web/package.sh`) holds a
-static site in `wordcraft-web-<version>/`:
+`packaging/web/package.sh` builds two release layouts from the same compiled WebAssembly engine:
+
+1. **NPM package (`wordcraft-web`)** via `packaging/web/package.sh --npm`: an unbundled ES module (`index.js` + `index.d.ts`, TypeScript types, `wordcraft-web.js` glue, `wordcraft-web_bg.wasm`, `snippets/`, `i18n/`, and `samples/`).
+2. **Static Cloudflare / web site zip (`wordcraft-web-<version>.zip`)** via `packaging/web/package.sh --static`: a hashed Trunk bundle ready for Cloudflare Pages, Cloudflare Workers static assets, or any static host:
 
 | File | What it is |
 |---|---|
-| `index.html` | The page. It loads everything through relative URLs. |
-| `wordcraft-web-<hash>.js` | wasm-bindgen glue (generated, ES module) |
-| `wordcraft-web-<hash>_bg.wasm` | The app, about 13 MB, or 5 MB with compression |
-| `_headers`, `.htaccess` | Sample header rules for Netlify/Cloudflare Pages and Apache |
+| `index.html` | Progressive loading shell (HTML/CSS skeleton + streaming WASM bootstrap). |
+| `wordcraft-web-<hash>.js` | `wasm-bindgen` glue (generated ES module). |
+| `wordcraft-web-<hash>_bg.wasm` | The compiled engine (~16.29 MB raw, ~6.69 MB gzip; 2026-11-14 build, capped under 25 MiB for Cloudflare). |
+| `i18n/` | Externalized locale TSV catalogs + `manifest.json` fetched on demand. |
+| `samples/` | Pre-bundled `.md` showcase documents (`welcome.md`, `spec.md`, `letter.md`). |
+| `_headers`, `.htaccess` | Sample header rules for Cloudflare Pages/Workers static assets, Netlify, and Apache. |
 
-There is no server-side code. Upload the folder's contents anywhere that serves static files.
+
+## Browser floor (WebAssembly SIMD)
+
+The shipped modules are built with `-C target-feature=+simd128` (`.cargo/config.toml`) and
+`wasm-opt --enable-simd` (`apps/wordcraft-web/index.html`), adopted after measuring (2026-11-14,
+plan §4.2): laying out a 235 KB Markdown document went from 204 ms to 115 ms and the module got
+8.5% smaller — 16,256,770 B raw against 17,758,276 B scalar (gzip 6,671,547 vs 6,977,543;
+Brotli q11 4,862,005 vs 5,021,646); page raster was unchanged. Every engine with WebAssembly
+SIMD support compiles it: Chrome 91+, Safari 16.4+, Firefox 89+. A browser without SIMD cannot
+compile the module, and there is no fallback build.
+
+## Quick start via npm (`wordcraft-web`)
+
+```bash
+npm install wordcraft-web
+```
+
+`wordcraft-web` exports named `start(options)`, `init(wasmUrl?)`, and `initSync` (no default export). Importing the package does not access DOM globals, so SSR/Node imports succeed cleanly until `start(...)` runs in a browser:
+
+```js
+import { start } from "wordcraft-web";
+
+const canvas = document.getElementById("wordcraft_canvas");
+const api = await start({
+  canvas, // HTMLCanvasElement or element id (defaults to "wordcraft_canvas")
+  // installGlobal: true, // optional: also expose window.wordcraft
+  // sample: true,        // optional: load welcome sample document
+});
+
+const md = await api.getMarkdown();
+await api.execute("format.bold");
+const docxBytes = await api.exportDocx();
+```
+
+### Bundler recipes (`Vite`, `Webpack`, `esbuild`)
+
+- **Vite:** exclude `"wordcraft-web"` from dependency pre-bundling (`optimizeDeps: { exclude: ["wordcraft-web"] }`) so `new URL("./wordcraft-web_bg.wasm", import.meta.url)` and `./i18n/` / `./samples/` relative URLs remain intact.
+- **CDN / custom asset paths:** serve `wordcraft-web_bg.wasm`, `i18n/`, `samples/`, `fonts/`, and all of the `wordcraft-worker-*` files (the `wordcraft-worker-{proof,codecs,pdf}_loader.js` workers and the `wordcraft-worker-*.js` / `wordcraft-worker-*_bg.wasm` files they load) from your public path and pass `{ wasmUrl, assetBase }`. Hosts that spawn the proofing worker themselves use the same base: `createProofWorker({ assetBase })` (or `createProofWorker({ loaderUrl })` for an exact loader URL):
+
+```js
+const api = await start({
+  canvas: "wordcraft_canvas",
+  wasmUrl: "/wordcraft/wordcraft-web_bg.wasm",
+  assetBase: "/wordcraft/",
+});
+```
+
+- **CSP requirements:** allow `'wasm-unsafe-eval'` in `script-src` alongside `'self'` (plus any SHA-256 hash of Trunk's inline bootstrap `<script>` when using `dist/web`), `worker-src 'self'`, and `connect-src 'self'` (same-origin fetches for `.wasm`, `i18n/*.tsv`, and `samples/*.md`). No `COOP` / `COEP` headers are required.
+- **ESM wrapper scope (House Rule 4):** `packaging/web/npm/index.js` (with `index.d.ts`) is the thin ESM entrypoint wrapper over Rust's `#[wasm_bindgen] pub fn start(options)` export, and `packaging/web/smoke/` is the consumer smoke-test harness (see its README). These are the only approved handwritten JavaScript/TypeScript in the web packaging tree. Application logic and the demo bar (`apps/wordcraft-web/src/demo.rs`) stay pure Rust.
+
+## Cloudflare deployments (static & hybrid)
+
+Two ready-to-deploy examples live in this directory (with `.assetsignore` excluding `.wasm.gz`, `.d.ts`, and `.trunk-lock` from static uploads so Cloudflare serves edge-compressed `.wasm` with a clean `Content-Type: application/wasm`):
+
+- **Static deployment (Cloudflare Pages):** <https://wordcraft-web-pages.pages.dev/?sample&demo=1> ([`examples/cloudflare-pages/`](examples/cloudflare-pages/README.md)) — zero backend, serves `dist/web/` directly (`6.39 MB` Brotli / `6.69 MB` Gzip wasm transfer, measured live 2026-11-15).
+- **Hybrid Edge deployment (Cloudflare Workers + `workers-rs`):** <https://wordcraft-web-worker.cicero-im.workers.dev/?sample&demo=1> ([`examples/cloudflare-workers/`](examples/cloudflare-workers/README.md)) — serves the same browser-first static assets via `ASSETS` (`4.87 MB` Brotli sidecar / `6.35 MB` Zstd / `6.69 MB` Gzip wasm transfer, measured live 2026-11-15) plus `GET /api/health` and an unlogged `POST /api/convert` endpoint bounded to `4 MiB` (`Cache-Control: no-store`).
+
+### Headless conversion benchmark (`wordcraft-cli`, Step 5.2a)
+
+Measured locally via `cargo build --release -p wordcraft-cli` with `/usr/bin/time -l` to size Cloudflare Workers' 128 MB isolate RAM budget:
+
+| Document | Pipeline | Real / CPU Time | Peak RSS | Fits 128 MB Isolate? |
+|---|---|---|---|---|
+| 1-page (`3.4 KB`) | `.md` → `.docx` | `0.67s` (`0.00u/0.01s`) | `14.5 MiB` | Yes |
+| 1-page (`6.6 KB`) | `.docx` → `.pdf` | `0.31s` (`0.01u/0.11s`) | `33.1 MiB` | Yes |
+| 50-page (`170 KB`) | `.md` → `.docx` | `0.02s` (`0.00u/0.00s`) | `16.4 MiB` | Yes |
+| 50-page (`8.4 KB`) | `.docx` → `.pdf` | `0.10s` (`0.07u/0.02s`) | `53.0 MiB` | Yes |
+| 500-page (`1.70 MB`) | `.md` → `.docx` | `0.05s` (`0.04u/0.00s`) | `38.0 MiB` | Yes |
+| 500-page (`24 KB`) | `.docx` → `.pdf` | `0.62s` (`0.57u/0.03s`) | `233.4 MiB` | **No** (exceeds 128 MB) |
+
+Memory safety inside the isolate is bounded by the decompression budgets and DOCX part/total limits the Worker passes to the reader, not by payload size alone; `/api/convert` still enforces a `4 MiB` upload bound and rejects oversized requests with HTTP `413` (`use 100% Browser WASM mode instead`).
 
 ## Any path works
 
 All URLs in `index.html` are relative (`public_url = "./"` in `apps/wordcraft-web/Trunk.toml`),
-so the site works at a domain root (`https://example.com/`), under a prefix
-(`https://example.com/tools/wordcraft/`) and from a CDN bucket. The asset names carry a content
-hash, so they can be cached forever. Only `index.html` needs revalidation.
+so the static site works at a domain root (`https://example.com/`), under a prefix
+(`https://example.com/tools/wordcraft/`) and from a CDN bucket. Trunk-hashed `.js`, `.wasm`, and
+`snippets/` assets carry content hashes (`immutable`), while `index.html`, `i18n/`, and `samples/`
+revalidate on fetch. Never deploy the unhashed npm package filenames under the `immutable` wildcard rule.
 
 ## Required server settings
 
 - **MIME type:** serve `.wasm` as `application/wasm`. Browsers refuse to stream-compile it under
   any other type, and the app then loads slowly or not at all. Serve `.js` as `text/javascript`.
   Most hosts already do both. For nginx, check that `mime.types` has `application/wasm wasm;`.
-- **Compression:** turn on gzip or Brotli for `.wasm`, `.js` and `.html`. That takes the
-  download from about 13 MB to about 5 MB. You can also precompress (`brotli -k *.wasm`) and let
-  the server send `Content-Encoding: br`.
-- **Caching:** `Cache-Control: public, max-age=31536000, immutable` on the hashed `.wasm` and
-  `.js` files, and `no-cache` on `index.html`.
-- **HTTPS:** WebGPU (and the clipboard) only work in a secure context, which means `https://`
-  or `http://localhost`. Over plain HTTP elsewhere, the app falls back to WebGL2.
+- **Compression:** turn on gzip or Brotli for `.wasm`, `.js` and `.html`. Gzip takes the release
+  `.wasm` from ~16.29 MB raw to ~6.69 MB (2026-11-14 build).
+- **Caching:** `Cache-Control: public, max-age=31536000, immutable` on the Trunk-hashed `.wasm`,
+  `.js`, and `snippets/` files, and `no-cache` on `index.html` (and revalidated `i18n/` / `samples/`).
+- **HTTPS:** Clipboard integration works best in a secure context (`https://` or `http://localhost`).
 - **No special isolation headers:** WordCraft doesn't use `SharedArrayBuffer`, so it doesn't
   need `Cross-Origin-Opener-Policy` or `Cross-Origin-Embedder-Policy`. If your site already sends
   COEP `require-corp`, also send `Cross-Origin-Resource-Policy: same-origin` (or `cross-origin`
@@ -43,6 +116,9 @@ location /wordcraft/ {
     types { application/wasm wasm; text/javascript js; text/html html; }
     gzip on;
     gzip_types application/wasm text/javascript text/html;
+    # Un-hashed worker files revalidate like index.html (same exception as _headers/.htaccess):
+    # a year-pinned worker older than the hashed main module fails the protocol version check.
+    location ~* /wordcraft-worker-.*\.(wasm|js)$ { add_header Cache-Control "no-cache"; }
     location ~* \.(wasm|js)$ { add_header Cache-Control "public, max-age=31536000, immutable"; }
     location ~* index\.html$ { add_header Cache-Control "no-cache"; }
 }
@@ -55,7 +131,7 @@ Local test: `python3 -m http.server 8765` inside the folder, then open http://lo
 ```html
 <iframe
   src="https://example.com/wordcraft/"
-  title="WordCraft image editor"
+  title="WordCraft word processor"
   style="width: 100%; height: 720px; border: 0;"
   allow="fullscreen; clipboard-read; clipboard-write"
   allowfullscreen>
@@ -159,28 +235,21 @@ The messages and both transports are the shared contract of [`craft-web-host`](h
 - **Files from the host are untrusted input.** An opened file goes through the same reading as one picked with File ▸ Open or dropped on the window, with the same format limits; before it is copied into the app's memory, its size is checked against the host open limit (512 MiB) and a larger file is refused, and a name is cut to 255 characters.
 - **The event and message names are the interface.** `wordcraft:ready`, `wordcraft:open`, `wordcraft:save`, `wordcraft:dirty` and `wordcraft:failed`, and the fields they carry (the same as the `?host=parent` messages), stay stable; changing one is a breaking change.
 
-### Driving it from the page (`window.wordcraft`)
+### Driving it via the Promise API (`api` or `window.wordcraft`)
 
-Every WordCraft web build puts `window.wordcraft` on the page, from [`craft-web-api`](https://github.com/storytold/craft-libs/tree/main/crates/web-api) (storytold/craft-libs#413), the same shape in every Craft app. `wordcraft.request(method, params)` calls any method of the control channel the desktop app serves (`docs/control-protocol.md`), and `execute(command, params)`, `commands()`, `docInspect(params)`, `uiInspect(params)` and `screenshot(params)` are shortcuts for the common ones. Each returns a Promise that resolves with the method's result and rejects with an `Error`; a call the app does not answer within 30 seconds rejects. WordCraft's control requests cannot be withdrawn, so a call that times out in the page still runs when the app reaches it, as it does for a desktop client.
+`start(...)` resolves to a `WordCraftApi` instance (also published to `window.wordcraft` by the standalone static demo or when `installGlobal: true` is passed), built with [`craft-web-api`](https://github.com/storytold/craft-libs/tree/main/crates/web-api). `request(method, params)` calls any control-protocol method (`docs/control-protocol.md`), alongside convenience shortcuts `execute(command, params)`, `commands()`, `docInspect(params)`, `uiInspect(params)`, `screenshot(params)`, `getMarkdown()`, `applyMarkdown(md)`, `exportDocx()`, and `loadDocx(data, password?)`. Each returns a Promise that resolves with the result and rejects with an `Error` (calls time out after 30 seconds).
 
 ```js
-const doc = await wordcraft.docInspect();                  // a summary of the open document
-await wordcraft.execute("text.insert", { text: "Hello" });
-const { data } = await wordcraft.screenshot();            // the canvas as PNG (base64)
+const doc = await api.docInspect();                  // summary of the open document
+await api.execute("text.insert", { text: "Hello" });
+const pngBase64 = await api.screenshot();            // canvas as PNG (base64)
+const md = await api.getMarkdown();                  // serialize current document as Markdown
 ```
 
-The API is there in every mode, with or without a host. Opening a file, handing a saved or exported file to the page, the file name and the unsaved flag stay with the host messages above.
+The API works in every mode, with or without a host bridge.
 
-## Renderer selection and fallback flags
+## Renderer selection
 
-WordCraft renders with wgpu. It uses **WebGPU** when the browser has it and falls back to
-**WebGL2** on its own. URL query flags override this, and they work on the iframe `src` too:
+By default, `wordcraft-web` compiles with **`glow` (WebGL2)** so `wgpu` and `naga` do not inflate the WASM binary. Optional WebGPU support can be compiled in with the `wgpu` Cargo feature on `apps/wordcraft-web`, in which case `?webgl` forces WebGL2 fallback.
 
-| Flag | Effect |
-|---|---|
-| *(none)* | WebGPU if available, otherwise WebGL2 |
-| `?webgl` | Force the WebGL2 backend (useful when a WebGPU driver misbehaves) |
-
-For example: `<iframe src="https://example.com/wordcraft/?webgl" ...>`.
-
-A browser with neither WebGPU nor WebGL2 gets a message in place of the app.
+A browser without WebGL2 (or WebGPU when enabled) receives an error message in place of the canvas.

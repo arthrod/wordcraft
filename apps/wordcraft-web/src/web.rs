@@ -2,6 +2,7 @@
 //! web runner.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use wasm_bindgen::JsCast as _;
@@ -9,31 +10,254 @@ use wordcraft_engine::Session;
 use wordcraft_ui_egui::async_saves::{AsyncSaves, SaveOutcome};
 use wordcraft_ui_egui::{Inbox, Services, WordApp};
 
+thread_local! {
+    /// Locale fetches in flight, so concurrent asks don't duplicate one. Not a record of
+    /// successes: a registered locale is guarded by `i18n::locale_registered`, and a failed
+    /// or empty fetch removes its marker so a later ask can retry.
+    static LOADING_LOCALES: RefCell<HashSet<&'static str>> = RefCell::new(HashSet::new());
+}
+
+fn default_asset_base(document: &web_sys::Document) -> String {
+    document
+        .base_uri()
+        .ok()
+        .flatten()
+        .filter(|s| !s.is_empty())
+        .and_then(|base| web_sys::Url::new_with_base("./", &base).ok().map(|u| u.href()))
+        .map_or_else(|| "./".to_string(), |resolved| normalize_asset_base(&resolved))
+}
+
+pub(crate) fn normalize_asset_base(base: &str) -> String {
+    let trimmed = base.trim();
+    if trimmed.is_empty() {
+        "./".to_string()
+    } else if trimmed.ends_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/")
+    }
+}
+
+async fn fetch_text(window: &web_sys::Window, url: &str) -> Result<String, String> {
+    let resp_val = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str(url)).await.map_err(|e| format!("{e:?}"))?;
+    let resp: web_sys::Response = resp_val.dyn_into().map_err(|_| "fetch did not return a Response".to_string())?;
+    if !resp.ok() {
+        return Err(format!("HTTP {} for {url}", resp.status()));
+    }
+    let text_prom = resp.text().map_err(|e| format!("{e:?}"))?;
+    let text_val = wasm_bindgen_futures::JsFuture::from(text_prom).await.map_err(|e| format!("{e:?}"))?;
+    Ok(text_val.as_string().unwrap_or_default())
+}
+
+pub(crate) fn ensure_locale_loaded(pref: &str, asset_base: &str, ctx: egui::Context) {
+    let code = wordcraft_ui_egui::i18n::target_locale_code(pref);
+    if code == "en" || wordcraft_ui_egui::i18n::locale_registered(code) {
+        return;
+    }
+    let in_flight = LOADING_LOCALES.with(|s| s.borrow_mut().insert(code));
+    if !in_flight {
+        return;
+    }
+    let base = normalize_asset_base(asset_base);
+    wasm_bindgen_futures::spawn_local(async move {
+        let Some(window) = web_sys::window() else {
+            LOADING_LOCALES.with(|s| s.borrow_mut().remove(code));
+            return;
+        };
+        let common_url = format!("{base}i18n/{code}/common.tsv");
+        let app_url = format!("{base}i18n/{code}/wordcraft.tsv");
+        let (common_res, app_res) = (fetch_text(&window, &common_url).await, fetch_text(&window, &app_url).await);
+        match (common_res, app_res) {
+            (Ok(common_tsv), Ok(app_tsv)) => {
+                let has_entries = app_tsv.lines().any(|line| {
+                    let t = line.trim();
+                    !t.is_empty() && !t.starts_with('#')
+                });
+                if has_entries {
+                    wordcraft_ui_egui::i18n::register_locale(code, &common_tsv, &app_tsv);
+                    ctx.request_repaint();
+                }
+            }
+            (Err(e), _) | (_, Err(e)) => {
+                log::warn!("i18n: could not load locale `{code}` ({e}); keeping English");
+            }
+        }
+        // Done one way or another: the marker only deduped this fetch. A registered locale is
+        // protected by `locale_registered`; anything else may be retried by a later ask.
+        LOADING_LOCALES.with(|s| s.borrow_mut().remove(code));
+    });
+}
+
 const DOC_EXTS: &[&str] =
     &["docx", "docm", "dotx", "dotm", "doc", "dot", "odt", "ott", "fodt", "rtf", "txt", "md", "html", "htm", "mht", "mhtml", "tex", "json", "xml"];
 const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "wmf", "emf"];
 const RECIPIENT_EXTS: &[&str] = wordcraft_engine::cmd::mailings::RECIPIENT_EXTENSIONS;
+pub(crate) mod codec_worker;
+pub(crate) mod font_packs;
 mod font_store;
+pub(crate) mod pdf_worker;
+pub(crate) mod proof_worker;
 const CANVAS_ID: &str = "wordcraft_canvas";
 const LOADING_ID: &str = "wordcraft_loading";
 
-pub fn start() {
-    eframe::WebLogger::init(log::LevelFilter::Info).ok();
-    wasm_bindgen_futures::spawn_local(async {
+thread_local! {
+    static RUNTIME_INIT: Cell<bool> = const { Cell::new(false) };
+    static STARTED_CANVASES: RefCell<Vec<(web_sys::HtmlCanvasElement, js_sys::Promise)>> = const { RefCell::new(Vec::new()) };
+}
+
+struct StartConfig {
+    canvas: web_sys::HtmlCanvasElement,
+    asset_base: String,
+    host_mode: Option<String>,
+    author: Option<String>,
+    install_global: bool,
+    force_sample: Option<bool>,
+}
+
+fn init_runtime_once() {
+    RUNTIME_INIT.with(|done| {
+        if done.get() {
+            return;
+        }
+        done.set(true);
+        eframe::WebLogger::init(log::LevelFilter::Info).ok();
+        // `wasm_now_ms` and `wasm_epoch_ms` both read `Date::now()` here. For `wasm_now_ms` that is
+        // wall-clock time, not a monotonic clock: it can decrease (or jump forward) when the system
+        // clock is adjusted, so elapsed-time readers must tolerate a negative difference.
+        wordcraft_geom::register_wasm_clock(js_sys::Date::now, js_sys::Date::now, |unix| {
+            let ms = (unix as f64) * 1000.0;
+            if !ms.is_finite() {
+                return 0;
+            }
+            let west_min = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ms)).get_timezone_offset();
+            if west_min.is_finite() && west_min.abs() <= 26.0 * 60.0 { -(west_min as i64) * 60 } else { 0 }
+        });
+        let now = js_sys::Date::now();
+        wordcraft_geom::set_wasm_clock(now, now);
+    });
+}
+
+fn opt_str_prop(obj: &wasm_bindgen::JsValue, key: &str) -> Result<Option<String>, wasm_bindgen::JsValue> {
+    let val = js_sys::Reflect::get(obj, &wasm_bindgen::JsValue::from_str(key)).unwrap_or(wasm_bindgen::JsValue::UNDEFINED);
+    if val.is_undefined() || val.is_null() {
+        Ok(None)
+    } else if let Some(s) = val.as_string() {
+        Ok(Some(s))
+    } else {
+        Err(js_sys::Error::new(&format!("start(options): `{key}` must be a string")).into())
+    }
+}
+
+fn opt_bool_prop(obj: &wasm_bindgen::JsValue, key: &str) -> Result<Option<bool>, wasm_bindgen::JsValue> {
+    let val = js_sys::Reflect::get(obj, &wasm_bindgen::JsValue::from_str(key)).unwrap_or(wasm_bindgen::JsValue::UNDEFINED);
+    if val.is_undefined() || val.is_null() {
+        Ok(None)
+    } else if let Some(b) = val.as_bool() {
+        Ok(Some(b))
+    } else {
+        Err(js_sys::Error::new(&format!("start(options): `{key}` must be a boolean")).into())
+    }
+}
+
+fn resolve_canvas(document: &web_sys::Document, value: wasm_bindgen::JsValue) -> Result<web_sys::HtmlCanvasElement, wasm_bindgen::JsValue> {
+    if value.is_undefined() || value.is_null() {
+        return document
+            .get_element_by_id(CANVAS_ID)
+            .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+            .ok_or_else(|| js_sys::Error::new(&format!("missing <canvas id=\"{CANVAS_ID}\">")).into());
+    }
+    if let Some(raw_id) = value.as_string() {
+        let id = raw_id.strip_prefix('#').unwrap_or(&raw_id);
+        return document
+            .get_element_by_id(id)
+            .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+            .ok_or_else(|| js_sys::Error::new(&format!("missing canvas element `{raw_id}`")).into());
+    }
+    value
+        .dyn_into::<web_sys::HtmlCanvasElement>()
+        .map_err(|_| js_sys::Error::new("start(options): `canvas` must be an HTMLCanvasElement or element id string").into())
+}
+
+fn parse_start_config(options: &wasm_bindgen::JsValue) -> Result<StartConfig, wasm_bindgen::JsValue> {
+    let document = web_sys::window()
+        .and_then(|w| w.document())
+        .ok_or_else(|| wasm_bindgen::JsValue::from(js_sys::Error::new("no browser document available")))?;
+
+    if options.is_undefined() || options.is_null() {
+        return Ok(StartConfig {
+            canvas: resolve_canvas(&document, wasm_bindgen::JsValue::UNDEFINED)?,
+            asset_base: default_asset_base(&document),
+            host_mode: None,
+            author: query_param("author"),
+            install_global: false,
+            force_sample: None,
+        });
+    }
+    if !options.is_object() {
+        return Err(js_sys::Error::new("start(options): expected an options object").into());
+    }
+
+    let canvas_val = js_sys::Reflect::get(options, &wasm_bindgen::JsValue::from_str("canvas")).unwrap_or(wasm_bindgen::JsValue::UNDEFINED);
+    let canvas = resolve_canvas(&document, canvas_val)?;
+    let asset_base = opt_str_prop(options, "assetBase")?.map(|b| normalize_asset_base(&b)).unwrap_or_else(|| default_asset_base(&document));
+    let host_mode = opt_str_prop(options, "host")?;
+    let author = opt_str_prop(options, "author")?.or_else(|| query_param("author"));
+    let install_global = opt_bool_prop(options, "installGlobal")?.unwrap_or(false);
+    let force_sample = opt_bool_prop(options, "sample")?;
+
+    Ok(StartConfig { canvas, asset_base, host_mode, author, install_global, force_sample })
+}
+
+/// Start WordCraft automatically when the standalone `#wordcraft_canvas` element is present.
+/// Importing the WASM module into a host page without `#wordcraft_canvas` is a harmless no-op;
+/// programmatic callers use [`start`].
+pub fn start_default_if_present() {
+    init_runtime_once();
+    let Some(document) = web_sys::window().and_then(|w| w.document()) else {
+        return;
+    };
+    let Some(canvas) = document.get_element_by_id(CANVAS_ID).and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok()) else {
+        return;
+    };
+    let asset_base = default_asset_base(&document);
+    let config = StartConfig { canvas, asset_base, host_mode: None, author: query_param("author"), install_global: true, force_sample: None };
+    let _ = launch_with_config(config);
+}
+
+/// Mount WordCraft on `options.canvas` and resolve to the `WordCraftApi` instance. Calling `start`
+/// repeatedly for the same canvas resolves to its existing instance.
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn start(options: wasm_bindgen::JsValue) -> js_sys::Promise {
+    init_runtime_once();
+    match parse_start_config(&options) {
+        Ok(cfg) => launch_with_config(cfg),
+        Err(err) => js_sys::Promise::reject(&err),
+    }
+}
+
+fn launch_with_config(config: StartConfig) -> js_sys::Promise {
+    if let Some(existing) = STARTED_CANVASES.with(|list| {
+        list.borrow()
+            .iter()
+            .find(|(existing_canvas, _)| js_sys::Object::is(existing_canvas.as_ref(), config.canvas.as_ref()))
+            .map(|(_, prom)| prom.clone())
+    }) {
+        return existing;
+    }
+
+    let canvas_key = config.canvas.clone();
+    let promise = wasm_bindgen_futures::future_to_promise(async move {
         let Some(document) = web_sys::window().and_then(|w| w.document()) else {
-            log::error!("no document");
-            return;
+            return Err(js_sys::Error::new("no document").into());
         };
-        let Some(canvas) = document.get_element_by_id(CANVAS_ID).and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok()) else {
-            log::error!("missing <canvas id=\"{CANVAS_ID}\">");
-            return;
+        let canvas = config.canvas;
+        let bridge = match crate::host::Bridge::detect_with_override(&canvas, config.host_mode.as_deref()) {
+            Ok(b) => b,
+            Err(msg) => {
+                remove_started_canvas(&canvas);
+                return Err(js_sys::Error::new(&msg).into());
+            }
         };
-        // Host modes (`craft-web-host`): `?host=parent`, a same-origin page framing WordCraft, opens documents in
-        // it and stores what it saves (`host`); unframed there is no parent, so that URL on its
-        // own stays the normal app with downloads. `data-host="page"` on the canvas opts a page
-        // in instead: it runs WordCraft in its own document and talks over DOM `CustomEvent`s
-        // on the canvas (`host`). The host guards leaving the page, so this one doesn't.
-        let bridge = crate::host::Bridge::detect(&canvas);
         let app_bridge = bridge.clone();
         let dirty = Rc::new(Cell::new(false));
         let saves = AsyncSaves::default();
@@ -42,17 +266,29 @@ pub fn start() {
         {
             log::error!("no unsaved-changes guard: {e}");
         }
+        #[cfg_attr(not(feature = "wgpu"), allow(unused_mut))]
         let mut options = eframe::WebOptions::default();
+        #[cfg(feature = "wgpu")]
         if query().contains("webgl")
             && let eframe::egui_wgpu::WgpuSetup::CreateNew(create) = &mut options.wgpu_options.wgpu_setup
         {
             create.instance_descriptor.backends = eframe::wgpu::Backends::GL;
         }
+        let initial_asset_base = config.asset_base;
+        let demo_asset_base = initial_asset_base.clone();
+        let author_override = config.author;
+        let install_global = config.install_global;
+        let force_sample = config.force_sample;
+        let created_api: Rc<RefCell<Option<js_sys::Object>>> = Rc::new(RefCell::new(None));
+        let created_api_slot = created_api.clone();
+        let shell_canvas = canvas.clone();
+
         let result = eframe::WebRunner::new()
             .start(
-                canvas,
+                canvas.clone(),
                 options,
                 Box::new(move |cc| {
+                    #[cfg(feature = "wgpu")]
                     if let Some(rs) = &cc.wgpu_render_state {
                         log::info!("wordcraft-web: wgpu backend {:?}", rs.adapter.get_info().backend);
                     }
@@ -67,7 +303,7 @@ pub fn start() {
                     // decimal separator (#838).
                     let region = wordcraft_ui_egui::i18n::system_region();
                     // In host mode the parent sends the document to edit; no sample meanwhile.
-                    let sample = app_bridge.is_none() && query().contains("sample");
+                    let sample = app_bridge.is_none() && force_sample.unwrap_or_else(|| query().contains("sample"));
                     let doc = if sample { wordcraft_engine::sample::sample_document() } else { wordcraft_engine::blank_document(&region) };
                     let mut session = Session::new(doc);
                     session.system_region = region;
@@ -76,7 +312,8 @@ pub fn start() {
                     if let Some(bridge) = &app_bridge {
                         bridge.connect(&mut services, inbox.clone(), cc.egui_ctx.clone());
                     }
-                    let control = crate::api::install(cc.egui_ctx.clone());
+                    let (control, api_obj) = crate::api::install_with_global(cc.egui_ctx.clone(), install_global, &initial_asset_base);
+                    *created_api_slot.borrow_mut() = Some(api_obj);
                     let mut app = WordApp::new(session, services).with_control(control);
                     // Pasted pictures wait apart from dropped files: the app inserts one only when the page is the edit target (#1349).
                     app.services.pasted = Some(pasted);
@@ -84,6 +321,36 @@ pub fn start() {
                     // Preferences from an earlier visit (#2132), as the desktop app reads `ui.json`.
                     let stored = stored_prefs();
                     crate::prefs::restore(&mut app, stored.as_deref());
+                    let asset_base = initial_asset_base;
+                    font_packs::init(&asset_base, messages.clone());
+                    // §3.2's smoke path (`?proof-worker`): squiggles themselves are always on
+                    // (proof_squiggles::tick starts the worker lazily with the first
+                    // document); the flag only adds a known-bad check whose console line the
+                    // smoke harness waits for.
+                    if query().contains("proof-worker") && proof_worker::ensure(&asset_base) {
+                        proof_worker::with(|w| {
+                            if let Err(e) = w.ping() {
+                                log::warn!("proofing worker ping failed to send: {e}");
+                            }
+                            let req = wordcraft_worker_proto::CheckRequest {
+                                para_id: 0,
+                                text: "Ths is a tst.".to_string(),
+                                spans: Vec::new(),
+                                skip: Vec::new(),
+                                options: None,
+                                typing: None,
+                                list_item: false,
+                            };
+                            if let Err(e) = w.check(&req, |res| match res {
+                                Ok(reply) => log::info!("proofing worker: {} issue(s) in the smoke check", reply.issues.len()),
+                                Err(e) => log::warn!("proofing worker smoke check: {} ({:?})", e.message, e.code),
+                            }) {
+                                log::warn!("proofing worker check failed to send: {e}");
+                            }
+                        });
+                    }
+                    let initial_lang = app.ui.language.clone();
+                    ensure_locale_loaded(&initial_lang, &asset_base, cc.egui_ctx.clone());
                     // A region chosen in File › Options replaces the browser's for the first blank
                     // document too (#838).
                     if !sample && app.session.prefs.region.is_some() {
@@ -97,18 +364,16 @@ pub fn start() {
                     }
                     // The host's name for the user signs this visit's work, but isn't stored as the
                     // browser's own preference, which a visit outside the host would restore.
-                    if app_bridge.is_some()
-                        && let Some(author) = query_param("author")
-                    {
+                    if let Some(author) = author_override {
                         let own = app.session.author.clone();
                         crate::host::Bridge::set_author(&mut app, &author);
                         prefs.keep_own_author(&app.session.author, &own);
                     }
-                    Ok(Box::new(WebShell { app, inbox, messages, prefs }))
+                    Ok(Box::new(WebShell { app, inbox, messages, prefs, asset_base, last_lang_pref: initial_lang, canvas: shell_canvas.clone() }))
                 }),
             )
             .await;
-        // Ready only once the runner is up: starting can still fail after the app is made.
+
         if let Some(bridge) = &bridge {
             match &result {
                 Ok(()) => bridge.post_ready(),
@@ -116,11 +381,60 @@ pub fn start() {
             }
         }
         if let Some(el) = document.get_element_by_id(LOADING_ID) {
-            match result {
+            match &result {
                 Ok(()) => el.remove(),
                 Err(e) => el.set_inner_html(&format!("<p>WordCraft failed to start: {e:?}</p><p>A browser with WebGPU or WebGL2 is required.</p>")),
             }
         }
+
+        match result {
+            Ok(()) => {
+                label_ime_input(&canvas);
+                let api_val = created_api.borrow_mut().take().unwrap_or_default();
+                crate::demo::mount_if_enabled(&document, &canvas, &demo_asset_base, &api_val);
+                Ok(api_val.into())
+            }
+            Err(e) => {
+                remove_started_canvas(&canvas);
+                Err(js_sys::Error::new(&format!("WordCraft failed to start: {e:?}")).into())
+            }
+        }
+    });
+
+    STARTED_CANVASES.with(|list| {
+        list.borrow_mut().push((canvas_key, promise.clone()));
+    });
+    promise
+}
+
+/// Gives the hidden focusable `<input>` the text agent keeps next to the canvas an accessible
+/// name, so assistive technology announces it instead of a bare "text field". Runs at mount and
+/// again on interface-language changes so the label is re-translated. The agent's input is the
+/// text-typed sibling it created with `autocapitalize="off"`; other controls are left alone.
+fn label_ime_input(canvas: &web_sys::HtmlCanvasElement) {
+    let Some(parent) = canvas.parent_element() else {
+        return;
+    };
+    let label = wordcraft_ui_egui::i18n::t("Text input");
+    let children = parent.children();
+    for i in 0..children.length() {
+        let Some(el) = children.item(i) else {
+            continue;
+        };
+        if let Ok(input) = el.dyn_into::<web_sys::HtmlInputElement>()
+            && input.type_() == "text"
+            && input.get_attribute("autocapitalize").as_deref() == Some("off")
+            && input.get_attribute("aria-label").as_deref() != Some(label)
+            && let Err(e) = input.set_attribute("aria-label", label)
+        {
+            log::warn!("IME input aria-label: {e:?}");
+        }
+    }
+}
+
+fn remove_started_canvas(canvas: &web_sys::HtmlCanvasElement) {
+    STARTED_CANVASES.with(|list| {
+        list.borrow_mut().retain(|(existing, _)| !js_sys::Object::is(existing.as_ref(), canvas.as_ref()));
     });
 }
 
@@ -139,6 +453,9 @@ struct WebShell {
     inbox: Inbox,
     messages: Rc<RefCell<Vec<String>>>,
     prefs: crate::prefs::PrefsSync,
+    asset_base: String,
+    last_lang_pref: String,
+    canvas: web_sys::HtmlCanvasElement,
 }
 
 fn local_storage() -> Option<web_sys::Storage> {
@@ -155,11 +472,23 @@ impl eframe::App for WebShell {
     /// then writes changed preferences to browser storage immediately, because a reload or closed
     /// tab never runs the exit path.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let now = js_sys::Date::now();
+        wordcraft_geom::set_wasm_clock(now, now);
         let msgs = std::mem::take(&mut *self.messages.borrow_mut());
         for msg in msgs {
             self.app.status(msg);
         }
+        if self.app.ui.language != self.last_lang_pref {
+            self.last_lang_pref = self.app.ui.language.clone();
+            ensure_locale_loaded(&self.last_lang_pref, &self.asset_base, ctx.clone());
+            label_ime_input(&self.canvas);
+        }
         self.app.logic(ctx);
+        // Wanted pack faces are recorded during layout, so drain them after the app ran.
+        font_packs::drain_wanted(ctx);
+        // §3.2: worker proofing — send what changed, apply what arrived, repaint if it drew.
+        crate::proof_squiggles::tick(&self.app.session, &self.asset_base, ctx);
+        crate::api::wake_waiters();
         // Store changed preferences straight away: a reload or closed tab runs no exit code (#2132).
         if let Some(json) = self.prefs.changed(&self.app) {
             match local_storage() {
@@ -202,6 +531,7 @@ impl eframe::App for WebShell {
             }
         }
         self.app.ui(ui);
+        crate::api::wake_waiters();
     }
 }
 
@@ -258,6 +588,7 @@ fn services(inbox: Inbox, ctx: egui::Context, dirty: Rc<Cell<bool>>, saves: Asyn
     let save_ctx = ctx.clone();
     let font_ctx = ctx.clone();
     let font_messages = messages.clone();
+    let pack_ctx = ctx.clone();
     Services {
         open_async: Some(Box::new(move |purpose: &str| {
             let inbox = open_inbox.clone();
@@ -302,6 +633,9 @@ fn services(inbox: Inbox, ctx: egui::Context, dirty: Rc<Cell<bool>>, saves: Asyn
         forget_font: Some(Box::new(font_store::forget)),
         load_system_fonts: Some(Box::new(move || {
             load_system_fonts(font_ctx.clone(), font_messages.clone());
+        })),
+        install_font_packs: Some(Box::new(move |families: Vec<String>| {
+            font_packs::install_families(families, pack_ctx.clone());
         })),
         ..Default::default()
     }
@@ -560,7 +894,7 @@ async fn write_file_handle(handle: &wasm_bindgen::JsValue, bytes: &[u8]) -> Resu
     Ok(())
 }
 
-fn trigger_anchor_download(window: &web_sys::Window, name: &str, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn trigger_anchor_download(window: &web_sys::Window, name: &str, bytes: &[u8]) -> Result<(), String> {
     let js = |e: wasm_bindgen::JsValue| format!("{e:?}");
     let document = window.document().ok_or("no document")?;
     let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(bytes));

@@ -64,16 +64,16 @@ mod tests {
                 p.insert_object(7, field, &Default::default()).unwrap();
             }
         }
-        for (name, out) in [
-            ("markdown", crate::markdown::export(&doc)),
-            ("html", crate::html::export(&doc)),
-            ("latex", crate::latex::export(&doc)),
-            ("rtf", crate::rtf::export(&doc)),
-        ] {
+        #[cfg_attr(not(feature = "all-formats"), allow(unused_mut))]
+        let mut outputs = vec![("markdown", crate::markdown::export(&doc))];
+        #[cfg(feature = "all-formats")]
+        outputs.extend([("html", crate::html::export(&doc)), ("latex", crate::latex::export(&doc)), ("rtf", crate::rtf::export(&doc))]);
+        for (name, out) in outputs {
             assert!(out.contains("Before"), "{name}: {out}");
             assert!(!out.contains("SECRETVALUE"), "{name}: {out}");
         }
         let flow = from_doc_with(&doc, FlowOpts { fields: true, ..Default::default() });
+        #[cfg(feature = "all-formats")]
         assert!(!crate::html::export_flow(&flow, "en").contains("SECRETVALUE"));
         // The flow keeps the result for ODT.
         let kept = flow

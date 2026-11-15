@@ -169,6 +169,7 @@ fn language_dialog_reads_inherited_proofing() {
 /// #2717: opening and accepting the dialog must not reset inherited proofing.
 #[test]
 fn language_dialog_ok_keeps_inherited_proofing() {
+    let _lock = crate::i18n::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     use egui_kittest::kittest::Queryable;
     let mut a = app();
     a.run("ui.language", json!({"value": "en"})).unwrap();
@@ -205,6 +206,7 @@ fn language_dialog_ok_keeps_inherited_proofing() {
 /// Set As Default and OK persist the chosen proofing language in a fresh app.
 #[test]
 fn language_dialog_default_survives_a_restart() {
+    let _lock = crate::i18n::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     use egui_kittest::kittest::Queryable;
     let mut a = app();
     a.ui.language = "en".into();

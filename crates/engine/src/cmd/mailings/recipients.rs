@@ -126,6 +126,7 @@ fn recipient_csv(text: &str, headers: bool) -> Vec<Vec<String>> {
 }
 
 pub(super) fn recipients(s: &mut Session, v: &Value) -> CmdResult {
+    #[cfg_attr(not(feature = "extra-formats"), allow(unused_mut))]
     let mut sheet = Value::Null;
     let (headers, rows) = if let Some(arr) = v.get("rows").and_then(Value::as_array) {
         table_from_rows(v.get("fields").and_then(Value::as_array), arr)?
@@ -143,9 +144,15 @@ pub(super) fn recipients(s: &mut Session, v: &Value) -> CmdResult {
             };
             // A spreadsheet by its contents, or by its name unless it is really text (a CSV or tab-
             // separated export named .xls, as some programs write).
+            #[cfg(feature = "extra-formats")]
             let named = ext.as_deref().is_some_and(wordcraft_formats::sheet::is_extension);
+            #[cfg(not(feature = "extra-formats"))]
+            let named = ext.as_deref().is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "xlsx" | "xlsm" | "xls" | "ods"));
             let text = wordcraft_formats::txt::is_text(&bytes);
+            #[cfg(feature = "extra-formats")]
             let spreadsheet = wordcraft_formats::sheet::detect(&bytes).is_some() || (named && !text);
+            #[cfg(not(feature = "extra-formats"))]
+            let spreadsheet = named && !text;
             if named && !spreadsheet {
                 let text = decode(&bytes, v)?;
                 let text = text.trim_start().trim_start_matches('\u{feff}');
@@ -163,31 +170,39 @@ pub(super) fn recipients(s: &mut Session, v: &Value) -> CmdResult {
                 }
             }
             if spreadsheet {
-                use wordcraft_formats::sheet::{Pick, read_rows, sheet_names};
-                let pick = match v.get("sheet") {
-                    Some(Value::String(n)) => Pick::Name(n.as_str()),
-                    Some(x) if x.as_u64().is_some_and(|n| n >= 1) => {
-                        Pick::Index(usize::try_from(x.as_u64().unwrap_or(1).saturating_sub(1)).unwrap_or(usize::MAX))
-                    }
-                    Some(Value::Null) | None => {
-                        let names = sheet_names(&bytes).map_err(CmdError::Failed)?;
-                        if names.len() > 1 {
-                            return Ok(json!({"sheets": names, "chooseSheet": true}));
+                #[cfg(feature = "extra-formats")]
+                {
+                    use wordcraft_formats::sheet::{Pick, read_rows, sheet_names};
+                    let pick = match v.get("sheet") {
+                        Some(Value::String(n)) => Pick::Name(n.as_str()),
+                        Some(x) if x.as_u64().is_some_and(|n| n >= 1) => {
+                            Pick::Index(usize::try_from(x.as_u64().unwrap_or(1).saturating_sub(1)).unwrap_or(usize::MAX))
                         }
-                        Pick::Index(0)
-                    }
-                    Some(_) => return Err(CmdError::Params("`sheet` must be a sheet name or number".into())),
-                };
-                let (names, rows) = read_rows(&bytes, pick).map_err(CmdError::Failed)?;
-                let chosen = match pick {
-                    Pick::Index(i) => names.get(i).cloned(),
-                    Pick::Name(n) => {
-                        names.iter().find(|s| s.as_str() == n).or_else(|| names.iter().find(|s| s.eq_ignore_ascii_case(n.trim()))).cloned()
-                    }
-                };
-                sheet = json!(chosen);
-                rows
+                        Some(Value::Null) | None => {
+                            let names = sheet_names(&bytes).map_err(CmdError::Failed)?;
+                            if names.len() > 1 {
+                                return Ok(json!({"sheets": names, "chooseSheet": true}));
+                            }
+                            Pick::Index(0)
+                        }
+                        Some(_) => return Err(CmdError::Params("`sheet` must be a sheet name or number".into())),
+                    };
+                    let (names, rows) = read_rows(&bytes, pick).map_err(CmdError::Failed)?;
+                    let chosen = match pick {
+                        Pick::Index(i) => names.get(i).cloned(),
+                        Pick::Name(n) => {
+                            names.iter().find(|s| s.as_str() == n).or_else(|| names.iter().find(|s| s.eq_ignore_ascii_case(n.trim()))).cloned()
+                        }
+                    };
+                    sheet = json!(chosen);
+                    rows
+                }
+                #[cfg(not(feature = "extra-formats"))]
+                return Err(CmdError::Failed("spreadsheet recipient import is not included in this build".into()));
             } else {
+                if !text {
+                    return Err(CmdError::Failed("not a text recipient list; save the recipient list as a CSV text file and select it again".into()));
+                }
                 recipient_csv(&decode(&bytes, v)?, p::bool(v, "headers").unwrap_or(true))
             }
         };
@@ -241,7 +256,7 @@ fn header_split(mut all: Vec<Vec<String>>, headers: bool) -> Result<(Vec<String>
     if all.is_empty() {
         return Err(CmdError::Failed("the recipient list is empty".into()));
     }
-    let fields = if headers {
+    let fields: Vec<String> = if headers {
         let first = all.remove(0);
         wordcraft_formats::sheet::field_names(&first[..first.len().min(MAX_FIELDS)])
     } else {

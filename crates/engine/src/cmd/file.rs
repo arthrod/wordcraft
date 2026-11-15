@@ -207,6 +207,10 @@ pub fn specs() -> Vec<CommandSpec> {
             sel_result(s)
         })
         .params(r#"{"text": string}"#),
+        CommandSpec::new("doc.exportDocx", "Export DOCX Bytes", "File › Export", export_docx_cmd).pure(),
+        CommandSpec::new("doc.loadDocx", "Load DOCX Bytes", "File › Open", load_docx_cmd)
+            .params(r#"{"docxBase64": string, "password"?: string}"#)
+            .pure(),
     ]
 }
 
@@ -459,6 +463,7 @@ fn save(s: &mut Session, v: &Value) -> CmdResult {
         s.relayout();
         // What the file holds now.
         s.md_file = super::md_source::FileText::saved(exact.filter(|_| super::md_source::is_markdown_file(&path)));
+        s.clear_md_latest_history();
     }
     Ok(json!({"saved": true, "path": path.to_string_lossy(), "encrypted": encrypted, "rewritten": rewritten}))
 }
@@ -739,4 +744,42 @@ fn layout_summary(s: &mut Session, _: &Value) -> CmdResult {
         .collect();
     let caret = l.caret_on(&s.sel.focus, s.page_hint).map(|c| json!({"page": c.page, "x": c.x, "y": c.top, "h": c.height}));
     Ok(json!({"pages": pages, "caret": caret, "ms": l.ms}))
+}
+
+const MAX_DOCX_BASE64_BYTES: usize = 64 * 1024 * 1024;
+
+/// Exports the active document as a base64-encoded `.docx` package.
+fn export_docx_cmd(s: &mut Session, v: &Value) -> CmdResult {
+    // A header/footer just made and left empty isn't exported, as `file.save` (#960).
+    let copy = super::insert::saved_copy(s);
+    let password = s.password.as_ref().map(crate::io::Password::as_str);
+    let opts = export_options(s, v);
+    let bytes = crate::io::save_bytes_with("document.docx", copy.as_ref().unwrap_or(&s.doc), password, &opts).map_err(CmdError::Failed)?;
+    let b64 = super::insert::base64_encode(&bytes);
+    Ok(json!({"docxBase64": b64, "bytes": bytes.len()}))
+}
+
+/// Loads a document from base64-encoded `.docx` bytes: an untouched blank document gives way to
+/// it; otherwise it opens beside the active document, as `file.open` does.
+fn load_docx_cmd(s: &mut Session, v: &Value) -> CmdResult {
+    let b64 = p::str(v, "docxBase64").or_else(|| p::str(v, "data")).ok_or_else(|| CmdError::Params("missing `docxBase64` string".into()))?;
+    if b64.len() > MAX_DOCX_BASE64_BYTES {
+        return Err(CmdError::Params("`docxBase64` payload exceeds 64 MB limit".into()));
+    }
+    let bytes = super::insert::base64_decode(b64).ok_or_else(|| CmdError::Params("invalid base64 in `docxBase64`".into()))?;
+    if !bytes.starts_with(b"PK\x03\x04") && !wordcraft_docx::is_encrypted(&bytes) {
+        return Err(CmdError::Params("payload is not a valid .docx package".into()));
+    }
+    let password = p::str(v, "password");
+    let (doc, encrypted) = crate::io::open_bytes_with("document.docx", &bytes, password).map_err(CmdError::Failed)?;
+    match s.used_because() {
+        None => s.set_document(doc),
+        Some(_) => {
+            s.add_opened_document(doc);
+        }
+    }
+    if encrypted {
+        s.password = password.map(crate::io::Password::new);
+    }
+    Ok(json!({"ok": true, "words": s.doc.word_count(), "paragraphs": s.doc.paragraph_count()}))
 }

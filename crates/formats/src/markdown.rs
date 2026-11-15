@@ -15,7 +15,10 @@ use std::sync::Arc;
 use wordcraft_doc::table::{MAX_COLS, MAX_ROWS};
 use wordcraft_doc::{Align, Document};
 
+#[cfg(feature = "all-formats")]
 use crate::html::decode_entity;
+#[cfg(not(feature = "all-formats"))]
+use crate::html_entity::decode_entity;
 use crate::model::{self, Cell, FBlock, FTable, Fmt, Inline, Kind, ListInfo, Para, make_img};
 
 mod blocks;

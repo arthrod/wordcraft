@@ -8,22 +8,30 @@ description = "WordCraft PDF export (craft-pdf / Krilla): embedded font subsets 
 [lints]
 workspace = true
 
+[features]
+default = ["writer"]
+writer = [
+    "dep:craft-pdf",
+    "dep:wordcraft-fonts",
+    "dep:wordcraft-metafile",
+    "dep:kurbo",
+    "dep:image",
+    "dep:log",
+    "dep:chrono",
+]
+
 [dependencies]
 wordcraft-doc = { workspace = true }
 wordcraft-geom = { workspace = true, features = ["image"] }
-wordcraft-fonts = { workspace = true }
-wordcraft-layout = { workspace = true }
-wordcraft-metafile = { workspace = true }
-craft-pdf = { workspace = true }
-kurbo = { workspace = true }
-image = { workspace = true }
+wordcraft-fonts = { workspace = true, optional = true }
+wordcraft-layout = { workspace = true, default-features = false }
+wordcraft-metafile = { workspace = true, optional = true }
+craft-pdf = { workspace = true, optional = true }
+kurbo = { workspace = true, optional = true }
+image = { workspace = true, optional = true }
 thiserror = { workspace = true }
-log = { workspace = true }
-chrono = { workspace = true }
-
-[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
-# The browser clock (`SystemTime::now()` panics on wasm32-unknown-unknown).
-js-sys = "0.3"
+log = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
 
 [dev-dependencies]
 hayro-syntax = "0.7.2"

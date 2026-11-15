@@ -56,8 +56,10 @@ pub(crate) enum Dropped {
     /// Runs' links and fonts past [`MAX_RUN_STRINGS`].
     RunStrings,
     /// A style name cut to [`MAX_FONT_NAME`].
+    #[cfg_attr(not(feature = "all-formats"), allow(dead_code))]
     StyleName,
     /// ODT `text:s` spaces past the document's budget.
+    #[cfg_attr(not(feature = "all-formats"), allow(dead_code))]
     Spaces,
     /// Markdown table rows and columns past the table limits or the document's cell budget.
     TableCells,

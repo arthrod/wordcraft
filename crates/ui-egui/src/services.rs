@@ -94,6 +94,10 @@ pub struct Services {
     pub forget_font: Option<Box<dyn Fn(&str)>>,
     /// Web: request browser to query and load local installed fonts (`window.queryLocalFonts()`).
     pub load_system_fonts: Option<Box<dyn Fn()>>,
+    /// Web: download the unbundled pack faces for `families` (all pack faces when empty) from
+    /// `<assetBase>/fonts/`. Backs `font.installPack`; only the browser build sets it (font packs
+    /// exist only there — desktop bundles every face).
+    pub install_font_packs: Option<Box<dyn Fn(Vec<String>)>>,
     /// Desktop: File › Options › General › Make WordCraft the default for Word documents (#295),
     /// only from that button (never a programmatic command). Windows opens the Settings app's
     /// Default apps page (apps can't set defaults themselves); Linux and BSD set it with

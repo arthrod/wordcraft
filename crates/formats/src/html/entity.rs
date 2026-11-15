@@ -237,6 +237,7 @@ fn decode_char(name: &str) -> Option<char> {
 }
 
 /// Legacy names HTML5 also decodes without a `;` (only those [`decode_char`] knows), sorted by bytes.
+#[cfg(feature = "all-formats")]
 const BARE_NAMES: &[&str] = &[
     "AElig", "AMP", "Aacute", "Acirc", "Agrave", "Aring", "Atilde", "Auml", "COPY", "Ccedil", "Eacute", "Ecirc", "Egrave", "Euml", "GT", "Iacute",
     "Icirc", "Igrave", "Iuml", "LT", "Ntilde", "Oacute", "Ocirc", "Ograve", "Oslash", "Otilde", "Ouml", "QUOT", "REG", "Uacute", "Ucirc", "Ugrave",
@@ -248,6 +249,7 @@ const BARE_NAMES: &[&str] = &[
 
 /// A reference written without its `;` at the start of `after` (the text after `&`): a numeric one,
 /// or the longest legacy name. In attribute values a name followed by `=` or an alphanumeric stays text.
+#[cfg(feature = "all-formats")]
 fn bare_reference(after: &str, attr: bool) -> Option<(char, usize)> {
     if let Some(num) = after.strip_prefix('#') {
         let hex = num.starts_with(['x', 'X']);
@@ -271,15 +273,18 @@ fn bare_reference(after: &str, attr: bool) -> Option<(char, usize)> {
 }
 
 /// Replace entity references in text `s`.
+#[cfg(feature = "all-formats")]
 pub fn unescape(s: &str) -> String {
     unescape_in(s, false)
 }
 
 /// Replace entity references in an attribute value `s`.
+#[cfg(feature = "all-formats")]
 pub fn unescape_attr(s: &str) -> String {
     unescape_in(s, true)
 }
 
+#[cfg(feature = "all-formats")]
 fn unescape_in(s: &str, attr: bool) -> String {
     if !s.contains('&') {
         return s.to_string();
@@ -310,6 +315,7 @@ fn unescape_in(s: &str, attr: bool) -> String {
     out
 }
 
+#[cfg(feature = "all-formats")]
 fn sniff_charset(head: &str) -> Option<&str> {
     let (i, n) = head.find("charset").map(|i| (i, 7)).or_else(|| head.find("encoding").map(|i| (i, 8)))?;
     let after = head.get(i + n..)?.trim_start().strip_prefix('=')?;
@@ -320,6 +326,7 @@ fn sniff_charset(head: &str) -> Option<&str> {
 }
 
 /// Decode HTML bytes: BOM, then a `charset` in the first 2 KB, else UTF-8 with a legacy fallback.
+#[cfg(feature = "all-formats")]
 pub fn decode(b: &[u8]) -> String {
     decode_as(b, None)
 }
@@ -327,6 +334,7 @@ pub fn decode(b: &[u8]) -> String {
 /// [`decode`] in the `charset` its container states (a MIME part's, a content type's), when it
 /// states one. Single-byte Windows code pages (`windows-1250`…, `iso-8859-1`, `us-ascii` as 1252)
 /// are decoded as such, other labels by their WHATWG decoders.
+#[cfg(feature = "all-formats")]
 pub fn decode_as(b: &[u8], charset: Option<&str>) -> String {
     if b.starts_with(&[0xFF, 0xFE]) || b.starts_with(&[0xFE, 0xFF]) || b.starts_with(&[0xEF, 0xBB, 0xBF]) {
         return crate::txt::decode(b);
@@ -359,6 +367,7 @@ pub fn decode_as(b: &[u8], charset: Option<&str>) -> String {
 }
 
 #[cfg(test)]
+#[cfg(feature = "all-formats")]
 mod tests {
     use super::*;
 

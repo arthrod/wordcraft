@@ -129,6 +129,10 @@ pub(super) struct Undo {
     /// The column block or whole cells the selection was (undoing brings the selection back as
     /// it was).
     pub(super) column: Option<ColumnBlock>,
+    /// Pending Markdown Source text preserved by a command that explicitly replaces it.
+    pub(super) md_source: Option<crate::cmd::md_source::MdSource>,
+    /// The latest exact Markdown source text associated with the document before this step.
+    pub(super) md_latest: Option<String>,
 }
 
 /// The number of edit locations Go Back cycles through (Word: four).

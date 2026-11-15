@@ -58,6 +58,61 @@ fn doc_extension_dispatches_to_docbin() {
     }
 }
 
+/// A known format this build leaves out is reported unavailable, not opened as plain text;
+/// plain text and unknown text extensions still open.
+#[test]
+fn formats_left_out_of_the_build_are_unavailable() {
+    for name in ["page.html", "page.htm", "archive.mht", "paper.tex", "letter.rtf", "report.odt"] {
+        let bytes: &[u8] = if name == "letter.rtf" { b"{\\rtf1 Hi}" } else { b"<html><body>Hi</body></html>" };
+        let r = crate::io::open_bytes(name, bytes);
+        if wordcraft_formats::UNAVAILABLE_EXTENSIONS.contains(&name.rsplit('.').next().unwrap_or("")) {
+            assert!(r.unwrap_err().contains("not included in this build"), "{name}");
+        }
+    }
+    assert!(crate::io::open_bytes("notes.txt", b"Hello").is_ok());
+    assert!(crate::io::open_bytes("notes.log", b"Hello").is_ok());
+}
+
+#[test]
+fn doc_docx_base64_commands_roundtrip_and_reject_invalid() {
+    let mut src = Session::new(wordcraft_doc::Document::from_text("DOCX bridge roundtrip test"));
+    let exported = src.run("doc.exportDocx", &json!({})).unwrap();
+    let b64 = exported["docxBase64"].as_str().unwrap();
+    assert!(!b64.is_empty());
+    assert!(exported["bytes"].as_u64().unwrap() > 0);
+
+    let mut dst = s();
+    let loaded = dst.run("doc.loadDocx", &json!({"docxBase64": b64})).unwrap();
+    assert_eq!(loaded["ok"], true);
+    assert!(text(&dst).contains("DOCX bridge roundtrip test"));
+
+    assert!(dst.run("doc.loadDocx", &json!({})).is_err());
+    assert!(dst.run("doc.loadDocx", &json!({"docxBase64": "%%%invalid%%%"})).is_err());
+    let junk = crate::cmd::insert::base64_encode(b"not a valid zip or docx");
+    assert!(dst.run("doc.loadDocx", &json!({"docxBase64": junk})).is_err());
+
+    let mut used = s();
+    run(&mut used, "text.insert", json!({"text": "Unsaved work"}));
+    let original = used.document_id();
+    run(&mut used, "doc.loadDocx", json!({"docxBase64": b64}));
+    assert_ne!(used.document_id(), original, "a used document stays open beside the loaded one");
+    assert_eq!(used.documents().len(), 2);
+    assert!(text(&used).contains("DOCX bridge roundtrip test"));
+    used.activate(original).unwrap();
+    assert_eq!(text(&used), "Unsaved work");
+    assert!(used.dirty);
+
+    // Password-protected documents stay encrypted on `doc.exportDocx` and reopen with `password`.
+    let mut encrypted = Session::new(wordcraft_doc::Document::from_text("Secret DOCX bridge"));
+    encrypted.run("file.encrypt", &json!({"password": "pw"})).unwrap();
+    let enc_b64 = encrypted.run("doc.exportDocx", &json!({})).unwrap()["docxBase64"].as_str().unwrap().to_string();
+    let mut reopened = s();
+    assert!(reopened.run("doc.loadDocx", &json!({"docxBase64": enc_b64})).is_err());
+    reopened.run("doc.loadDocx", &json!({"docxBase64": enc_b64, "password": "pw"})).unwrap();
+    assert!(text(&reopened).contains("Secret DOCX bridge"));
+    assert_eq!(reopened.password.as_ref().map(crate::io::Password::as_str), Some("pw"));
+}
+
 #[test]
 fn encrypted_doc_asks_for_a_password_and_rejects_a_wrong_one() {
     // #1079: a Word 97-2003 file with the encryption flag and an RC4 header whose verifier does
@@ -1395,6 +1450,7 @@ fn copying_bold_text_puts_html_on_the_clipboard() {
 }
 
 /// Bold and italic of a paragraph's character, in a document.
+#[cfg(feature = "extra-formats")]
 fn emphasis_at(d: &wordcraft_doc::Document, block: usize, off: usize) -> (bool, bool) {
     match d.body.get(block).map(|b| &**b) {
         Some(wordcraft_doc::Block::Para(p)) => {
@@ -1405,6 +1461,7 @@ fn emphasis_at(d: &wordcraft_doc::Document, block: usize, off: usize) -> (bool, 
     }
 }
 
+#[cfg(feature = "extra-formats")]
 #[test]
 fn copying_puts_rtf_on_the_clipboard() {
     // gap-clipboard-rtf: a copy carries RTF beside its text and HTML, for programs that read RTF.
@@ -1594,6 +1651,22 @@ fn paste_special_lists_formats_and_pastes_text_without_formatting() {
     let r = run(&mut s, "edit.pasteSpecial", json!({"text": "elsewhere"}));
     assert_eq!(r["formats"].as_array().unwrap().len(), 1);
     assert!(s.run("edit.pasteSpecial", &json!({"as": "formatted", "text": "elsewhere"})).is_err());
+}
+
+#[test]
+fn paste_special_format_availability_matches_build_support() {
+    let mut s = s();
+    let r = run(&mut s, "edit.pasteSpecial", json!({"html": "<b>HTML</b>", "rtf": r"{\rtf1 RTF}", "text": "plain"}));
+    let ids: Vec<&str> = r["formats"].as_array().unwrap().iter().filter_map(|f| f["id"].as_str()).collect();
+    assert!(ids.contains(&"text"));
+    assert_eq!(ids.contains(&"html"), cfg!(feature = "extra-formats"), "{ids:?}");
+    assert_eq!(ids.contains(&"rtf"), cfg!(feature = "extra-formats"), "{ids:?}");
+
+    #[cfg(not(feature = "extra-formats"))]
+    for params in [json!({"as": "html", "html": "<b>HTML</b>"}), json!({"as": "rtf", "rtf": r"{\rtf1 RTF}"})] {
+        let e = s.run("edit.pasteSpecial", &params).unwrap_err();
+        assert!(matches!(&e, crate::CmdError::Failed(m) if m == "HTML/RTF paste is not included in this build"), "{e}");
+    }
 }
 
 #[test]
@@ -5272,6 +5345,7 @@ fn arrange_bounds_resizes_and_moves_objects() {
 
 /// A frame anchored to a page and moved in WordCraft is placed by its paragraph from then on: the
 /// file's page number goes, or the save would put it back. Only resized, it stays on that page.
+#[cfg(feature = "extra-formats")]
 #[test]
 fn an_odt_frame_moved_from_its_page_loses_the_page_number() {
     let ns = r#"xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0""#;
@@ -11931,6 +12005,7 @@ fn typing_after_a_note_number_is_not_superscript() {
 
 /// Gap 19, review: text inserted by one author and deleted by another keeps both marks through
 /// an ODT save, so Reject All (undo the deletion, then the insertion) and Accept All both remove it.
+#[cfg(feature = "extra-formats")]
 #[test]
 fn odt_inserted_then_deleted_text_round_trips() {
     use std::io::Write;
@@ -11990,6 +12065,7 @@ fn odt_tracked_changes_accept_and_reject_all() {
 
 /// Gap 19, review 2: a paragraph break deleted inside an insertion range is not itself
 /// inserted, so Reject All keeps the two paragraphs (after an ODT save, too).
+#[cfg(feature = "extra-formats")]
 #[test]
 fn odt_deleted_mark_inside_an_insertion_survives_reject_all() {
     use std::io::Write;
@@ -12812,6 +12888,7 @@ fn what_the_opendocument_settings_saved_still_reads() {
     assert!(layout.tabs_from_indent);
 }
 
+#[cfg(feature = "extra-formats")]
 #[test]
 fn an_odt_charts_paragraph_is_written_as_read_after_drawing_it() {
     // Opening an ODT draws its charts (from their data); that changes nothing in the document,
@@ -12828,6 +12905,7 @@ fn an_odt_charts_paragraph_is_written_as_read_after_drawing_it() {
 
 /// A picture an OpenDocument file makes wider than the text (a rule across the whole page) stays
 /// that wide, and its paragraph is written as read: opening a file changes nothing in it.
+#[cfg(feature = "extra-formats")]
 #[test]
 fn an_odts_picture_wider_than_the_text_keeps_its_size() {
     let ns = r#"xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" xmlns:xlink="http://www.w3.org/1999/xlink""#;
@@ -12866,6 +12944,7 @@ fn an_odts_picture_wider_than_the_text_keeps_its_size() {
 
 /// Numbering or a new style makes the styles be written from the model on save: a document in
 /// German stays in German, rather than taking the default language of what opens it next.
+#[cfg(feature = "extra-formats")]
 #[test]
 fn an_odts_language_survives_a_save_after_numbering_or_a_new_style() {
     let ns = r#"xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0""#;

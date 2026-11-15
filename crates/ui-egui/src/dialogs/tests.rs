@@ -288,6 +288,7 @@ fn screen_paper_color_search_result_opens_general_options() {
 /// ASCII command IDs retain their old case-insensitive search in every interface language.
 #[test]
 fn command_search_respects_turkish_i_pairs_and_keeps_canonical_matches() {
+    let _lock = crate::i18n::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     use egui_kittest::kittest::Queryable;
     // Turkish casing follows the language code; the labels are fixtures with both I pairs.
     const LABELS: &str = "\tItalic\tİtalik\n\tHome\tGiriş\n\tFont\tYazı Tipi\n\tTable of Contents\tİçindekiler Tablosu\n\tReferences\tBaşvurular\n";
@@ -1100,6 +1101,7 @@ fn page_setup_large_numeric_margins_do_not_expand_after_leaving_field() {
 /// A clipped wide number in a mirrored form can still be clicked where it is visible.
 #[test]
 fn page_setup_rtl_large_margin_can_be_edited_again_after_blur() {
+    let _lock = crate::i18n::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     use egui::accesskit::Role;
     use egui_kittest::kittest::Queryable;
     let mut app = app_with("Page");

@@ -15,6 +15,8 @@ impl Session {
             sel: self.sel.clone(),
             pending: self.pending.clone(),
             column: self.column.clone(),
+            md_source: None,
+            md_latest: self.md_file.latest.clone(),
         }));
         if self.history.len() > MAX_UNDO {
             self.history.remove(0);
@@ -34,13 +36,35 @@ impl Session {
     /// Record `doc`/`sel` as their own undo step after the fact and close the typing group, so
     /// Undo right after an automatic change (AutoFormat, AutoCorrect) reverts only that change.
     pub fn push_undo(&mut self, label: &str, doc: Document, sel: Selection) {
-        self.history.push(Arc::new(Undo { label: label.to_string(), doc, sel, pending: self.pending.clone(), column: None }));
+        self.history.push(Arc::new(Undo {
+            label: label.to_string(),
+            doc,
+            sel,
+            pending: self.pending.clone(),
+            column: None,
+            md_source: None,
+            md_latest: self.md_file.latest.clone(),
+        }));
         if self.history.len() > MAX_UNDO {
             self.history.remove(0);
             self.undo_evicted += 1;
         }
         self.typing_open = false;
         self.join_anchor = true;
+    }
+
+    /// Keep pending Markdown Source text in the current command's undo step. Ordinary edit
+    /// checkpoints don't carry the view; this is for a command that explicitly closes and replaces it.
+    pub(crate) fn preserve_md_source_for_undo(&mut self) {
+        if self.md_source.as_ref().is_some_and(|src| src.is_pending())
+            && let Some(step) = self.history.last_mut()
+        {
+            let mut preserved = self.md_source.clone();
+            if let Some(src) = preserved.as_mut() {
+                src.restored_by_undo = true;
+            }
+            Arc::make_mut(step).md_source = preserved;
+        }
     }
 
     /// Make the next mutating command part of the previous undo step instead of a new one, so a
@@ -195,7 +219,10 @@ impl Session {
             sel: std::mem::replace(&mut self.sel, u.sel),
             pending: std::mem::replace(&mut self.pending, u.pending),
             column: std::mem::replace(&mut self.column, u.column),
+            md_source: std::mem::replace(&mut self.md_source, u.md_source),
+            md_latest: std::mem::replace(&mut self.md_file.latest, u.md_latest),
         };
+        *self.md_file.cached_exact.borrow_mut() = None;
         self.redo.push(Arc::new(cur));
         // Undo swaps the whole body back: a composition belongs to the text it showed.
         self.note_body_replaced();
@@ -221,12 +248,30 @@ impl Session {
             sel: std::mem::replace(&mut self.sel, u.sel),
             pending: std::mem::replace(&mut self.pending, u.pending),
             column: std::mem::replace(&mut self.column, u.column),
+            md_source: std::mem::replace(&mut self.md_source, u.md_source),
+            md_latest: std::mem::replace(&mut self.md_file.latest, u.md_latest),
         };
+        *self.md_file.cached_exact.borrow_mut() = None;
         self.history.push(Arc::new(cur));
         self.note_body_replaced();
         self.refresh_math_session();
         self.touch();
         true
+    }
+
+    /// Saving replaces the document's kept Markdown text with the saved file, discarding any
+    /// unsaved `md_latest` snapshots recorded on the undo/redo stacks.
+    pub(crate) fn clear_md_latest_history(&mut self) {
+        for entry in &mut self.history {
+            if entry.md_latest.is_some() {
+                Arc::make_mut(entry).md_latest = None;
+            }
+        }
+        for entry in &mut self.redo {
+            if entry.md_latest.is_some() {
+                Arc::make_mut(entry).md_latest = None;
+            }
+        }
     }
 
     /// An equation's editing session cannot ride across Undo/Redo: the equation tree, or the

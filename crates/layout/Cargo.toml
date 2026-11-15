@@ -8,11 +8,16 @@ description = "WordCraft layout: shaping, line breaking, tabs, lists, tables, pa
 [lints]
 workspace = true
 
+[features]
+default = ["inline-proof", "hyphenation"]
+inline-proof = ["dep:wordcraft-proof"]
+hyphenation = ["dep:wordcraft-proof"]
+
 [dependencies]
 wordcraft-geom = { workspace = true, features = ["image"] }
 wordcraft-doc = { workspace = true }
 wordcraft-fonts = { workspace = true }
-wordcraft-proof = { workspace = true }
+wordcraft-proof = { workspace = true, optional = true }
 wordcraft-metafile = { workspace = true }
 kurbo = { workspace = true }
 unicode-bidi = { workspace = true }
@@ -26,7 +31,3 @@ log = { workspace = true }
 [dev-dependencies]
 wordcraft-doc = { workspace = true, features = ["test-support"] }
 wordcraft-fonts = { workspace = true, features = ["test-support"] }
-
-[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
-# The browser clock (`SystemTime::now()`/`Instant::now()` panic on wasm32-unknown-unknown).
-js-sys = "0.3"

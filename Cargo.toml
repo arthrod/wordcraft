@@ -37,6 +37,7 @@ wordcraft-zotero = { path = "crates/zotero" }
 wordcraft-control-key = { path = "crates/control-key" }
 wordcraft-ui-egui = { path = "crates/ui-egui" }
 wordcraft-metafile = { path = "crates/metafile" }
+wordcraft-worker-proto = { path = "crates/worker-proto" }
 
 # foundation
 kurbo = { version = "0.13", features = ["serde"] }
@@ -131,6 +132,14 @@ opt-level = 3
 lto = "thin"
 codegen-units = 16
 debug = 0
+
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
 
 # Required by craft-pdf: the backend rejects writers that failed during unwinding.
 [patch.crates-io]

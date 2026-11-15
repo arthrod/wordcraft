@@ -35,7 +35,7 @@
 //! - [`fmt_plain`]: [`fmt`] without bidi isolate marks, for text that goes into the document.
 
 use std::cell::Cell;
-use std::sync::{LazyLock, OnceLock};
+use std::sync::{LazyLock, Mutex, OnceLock, RwLock};
 
 use craft_i18n::I18n;
 
@@ -43,14 +43,87 @@ pub use craft_i18n::{fmt, fmt_plain};
 
 include!(concat!(env!("OUT_DIR"), "/craft_i18n.rs"));
 
+type CatalogEntry = (&'static str, &'static str, &'static str);
+
+/// The embedded catalogs plus an empty entry for each offered language without one yet, so it
+/// resolves for the picker and `ui.language` before its runtime catalog registers (a web build
+/// embeds none and fetches them instead); its lookups read English until the catalog lands.
+fn base_catalogs() -> Vec<CatalogEntry> {
+    let mut out: Vec<CatalogEntry> = CRAFT_I18N.to_vec();
+    for l in LANGUAGES.iter() {
+        if l.code != "en" && !out.iter().any(|(c, ..)| c.eq_ignore_ascii_case(l.code)) {
+            out.push((l.code, "", ""));
+        }
+    }
+    out
+}
+
 /// The embedded catalogs, offering exactly the languages in [`LANGUAGES`]. Built on first use;
 /// a locale is parsed on its first lookup.
 static I18N: LazyLock<I18n> = LazyLock::new(|| {
     let offered: Vec<&str> = LANGUAGES.iter().map(|l| l.code).collect();
-    let (i18n, problems) = I18n::new(CRAFT_I18N, &offered);
+    let catalogs: &'static [CatalogEntry] = Box::leak(base_catalogs().into_boxed_slice());
+    let (i18n, problems) = I18n::new(catalogs, &offered);
     problems.iter().for_each(|p| log::warn!("interface catalogs: {p}"));
     i18n
 });
+
+static RUNTIME_CATALOGS: Mutex<Vec<CatalogEntry>> = Mutex::new(Vec::new());
+static ACTIVE_I18N: RwLock<Option<&'static I18n>> = RwLock::new(None);
+#[cfg(test)]
+pub(crate) static RUNTIME_CATALOG_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn active_i18n() -> &'static I18n {
+    if let Some(rt) = *ACTIVE_I18N.read().unwrap_or_else(std::sync::PoisonError::into_inner) {
+        return rt;
+    }
+    LazyLock::force(&I18N)
+}
+
+/// Register or replace a locale's interface catalogs at run time (for externalized web locale packs).
+pub fn register_locale(code: &str, shared_tsv: &str, app_tsv: &str) {
+    let code_s: &'static str = Box::leak(code.to_ascii_lowercase().into_boxed_str());
+    let shared_s: &'static str = Box::leak(shared_tsv.to_string().into_boxed_str());
+    let app_s: &'static str = Box::leak(app_tsv.to_string().into_boxed_str());
+
+    let mut entries = RUNTIME_CATALOGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    entries.retain(|(c, ..)| !c.eq_ignore_ascii_case(code_s));
+    entries.push((code_s, shared_s, app_s));
+
+    // Replace embedded entries in place so existing indices stay valid; append only new locales.
+    let mut used = vec![false; entries.len()];
+    let mut combined: Vec<CatalogEntry> = base_catalogs()
+        .into_iter()
+        .map(|entry| {
+            if let Some(pos) = entries.iter().position(|(rc, ..)| rc.eq_ignore_ascii_case(entry.0)) {
+                used[pos] = true;
+                entries[pos]
+            } else {
+                entry
+            }
+        })
+        .collect();
+    for (i, entry) in entries.iter().enumerate() {
+        if !used[i] {
+            combined.push(*entry);
+        }
+    }
+    let offered: Vec<&str> = LANGUAGES.iter().map(|l| l.code).collect();
+    let leaked_slice: &'static [CatalogEntry] = Box::leak(combined.into_boxed_slice());
+    let (i18n, problems) = I18n::new(leaked_slice, &offered);
+    problems.iter().for_each(|p| log::warn!("interface catalogs (runtime): {p}"));
+    let leaked_i18n: &'static I18n = Box::leak(Box::new(i18n));
+    *ACTIVE_I18N.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(leaked_i18n);
+}
+
+/// Whether `code` has real catalogs — embedded or registered at run time — rather than an
+/// offered-language entry still waiting for them. A shell that fetches locale packs (the web
+/// build) loads a locale only while this is false.
+pub fn locale_registered(code: &str) -> bool {
+    code.eq_ignore_ascii_case("en")
+        || CRAFT_I18N.iter().any(|(c, ..)| c.eq_ignore_ascii_case(code))
+        || RUNTIME_CATALOGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().any(|(c, ..)| c.eq_ignore_ascii_case(code))
+}
 
 /// The `language` setting that follows the system.
 pub const AUTO: &str = "auto";
@@ -162,7 +235,7 @@ impl Lang {
     pub const EN: Lang = Lang { lang: craft_i18n::Lang::EN, catalogs: None };
 
     fn i18n(self) -> &'static I18n {
-        self.catalogs.unwrap_or_else(|| LazyLock::force(&I18N))
+        self.catalogs.unwrap_or_else(active_i18n)
     }
 
     fn info(self) -> Option<&'static LangInfo> {
@@ -240,10 +313,15 @@ impl Lang {
         chars.into_iter().collect()
     }
 
-    /// A language by its exact code (any case): one of [`LANGUAGES`] whose catalogs are embedded.
+    /// A language by its exact code (any case): one of [`LANGUAGES`]. A locale whose catalog
+    /// hasn't loaded yet still resolves; its lookups read English until it registers
+    /// ([`locale_registered`] says which it is).
     pub fn from_code(code: &str) -> Option<Lang> {
         let info = LANGUAGES.iter().find(|l| l.code.eq_ignore_ascii_case(code))?;
-        I18N.from_code(info.code).map(|lang| Lang { lang, catalogs: None })
+        // No catalog snapshot: lookups resolve through `active_i18n` at call time, so a handle
+        // outlives `register_locale` replacing the active catalogs (locale indices are stable —
+        // every rebuild keeps `base_catalogs`' order). Only test fixtures pin `catalogs`.
+        active_i18n().from_code(info.code).map(|lang| Lang { lang, catalogs: None })
     }
 
     /// Resolve the `language` setting: a language code, or [`AUTO`] (and anything unknown, e.g. a
@@ -252,16 +330,18 @@ impl Lang {
         Lang::from_code(pref).unwrap_or_else(system_lang)
     }
 
-    /// Every language the interface can be shown in: [`LANGUAGES`] in order, those with embedded
-    /// catalogs (English only in a build without craft-i18n).
+    /// Every language WordCraft offers: [`LANGUAGES`] in order, catalog or not — a language
+    /// whose catalog isn't loaded yet shows English until it registers (the web build fetches
+    /// catalogs on demand; a build without craft-i18n still lists them).
     pub fn all() -> impl Iterator<Item = Lang> {
         LANGUAGES.iter().filter_map(|l| Lang::from_code(l.code))
     }
 
-    /// Every registered language in the order a picker lists them: English first (the source
+    /// Every offered language in the order a picker lists them: English first (the source
     /// language and the fallback), then the rest by their own name with accents folded, so
     /// Čeština sits under C rather than after Z. Names in other scripts follow the Latin ones in
-    /// code point order: Greek, Cyrillic, Arabic, then the CJK languages.
+    /// code point order: Greek, Cyrillic, Arabic, then the CJK languages. A locale without a
+    /// registered catalog yet lists under its code until the catalog brings its name.
     pub fn for_picker() -> Vec<Lang> {
         let mut rest: Vec<Lang> = Lang::all().filter(|l| l.code() != Lang::EN.code()).collect();
         rest.sort_by_cached_key(|l| name_sort_key(l.name()));
@@ -269,8 +349,10 @@ impl Lang {
     }
 }
 
-/// The canonical `language` setting for user input: [`AUTO`] or a registered code (any case).
-/// `None` for anything else, so callers keep the current setting.
+/// The canonical `language` setting for user input: [`AUTO`] or an offered code (any case).
+/// `None` for anything else, so callers keep the current setting. An offered code whose catalog
+/// isn't registered is still a valid setting: a shell with runtime catalogs fetches it, and the
+/// lookups read English until it lands.
 pub fn normalize_pref(pref: &str) -> Option<&'static str> {
     if pref.eq_ignore_ascii_case(AUTO) {
         return Some(AUTO);
@@ -287,13 +369,76 @@ fn non_brazilian_portuguese(tag: &str) -> bool {
     parts.next() == Some("pt") && !parts.any(|p| p == "br")
 }
 
+/// A language by an offered code or BCP-47 tag even before its runtime TSV catalog is loaded.
+/// Used by the web build to decide which external locale catalog to fetch.
+pub fn offered_code_from_tag(tag: &str) -> Option<&'static str> {
+    if non_brazilian_portuguese(tag) {
+        return None;
+    }
+    let lowered = tag.trim().to_ascii_lowercase();
+    let clean = lowered.split(['.', '@']).next().unwrap_or("");
+    if clean.is_empty() {
+        return None;
+    }
+    if clean == "c" || clean == "posix" {
+        return Some("en");
+    }
+    let parts: Vec<&str> = clean.split(['-', '_']).filter(|p| !p.is_empty()).collect();
+    let primary = *parts.first()?;
+    if primary == "zh" {
+        // An explicit script subtag wins over region inference: zh-Hans-HK is Simplified
+        // Chinese in Hong Kong, not Traditional. The region only decides without a script.
+        if parts.contains(&"hans") {
+            return Some("zh-hans");
+        }
+        if parts.iter().any(|p| matches!(*p, "hant" | "tw" | "hk" | "mo")) {
+            return Some("zh-hant");
+        }
+        return Some("zh-hans");
+    }
+    if primary == "sr" {
+        return Some(if parts.contains(&"latn") { "sr-latn" } else { "sr" });
+    }
+    if primary == "pt" {
+        return parts.contains(&"br").then_some("pt-br");
+    }
+    LANGUAGES.iter().find(|l| l.code == primary).map(|l| l.code)
+}
+
+/// Resolve a saved preference (`"auto"` or explicit locale code) to an offered locale code
+/// (defaulting to `"en"`) without requiring runtime catalogs to be registered yet.
+pub fn target_locale_code(pref: &str) -> &'static str {
+    let trimmed = pref.trim();
+    if !trimmed.is_empty()
+        && !trimmed.eq_ignore_ascii_case(AUTO)
+        && let Some(info) = LANGUAGES.iter().find(|l| l.code.eq_ignore_ascii_case(trimmed))
+    {
+        return info.code;
+    }
+    if !trimmed.is_empty()
+        && !trimmed.eq_ignore_ascii_case(AUTO)
+        && let Some(code) = offered_code_from_tag(trimmed)
+    {
+        return code;
+    }
+    #[cfg(test)]
+    if let Some(tags) = TEST_SYSTEM_TAGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
+        return tags.iter().find_map(|t| offered_code_from_tag(t)).unwrap_or("en");
+    }
+    if cfg!(test) {
+        return "en";
+    }
+    detect_system_tags().iter().find_map(|t| offered_code_from_tag(t)).unwrap_or("en")
+}
+
 /// The registered language for a locale tag such as `ja_JP.UTF-8` or `zh-Hant-TW`; `None` when
 /// there is no catalog for it. `C`/`POSIX` mean English.
 pub fn lang_from_tag(tag: &str) -> Option<Lang> {
     if non_brazilian_portuguese(tag) {
         return None;
     }
-    I18N.match_tag(tag).and_then(|lang| Lang::from_code(I18N.code(lang)))
+    let i18n = active_i18n();
+    i18n.match_tag(tag).and_then(|lang| Lang::from_code(i18n.code(lang)))
 }
 
 /// The first of the system's preferred languages WordCraft has, in the user's order: someone
@@ -302,24 +447,34 @@ pub fn first_supported<'a>(tags: impl IntoIterator<Item = &'a str>) -> Option<La
     tags.into_iter().find_map(lang_from_tag)
 }
 
-/// The system language (looked up once). English when it can't be determined or isn't supported.
+#[cfg(test)]
+static TEST_SYSTEM_TAGS: Mutex<Option<Vec<String>>> = Mutex::new(None);
+
+/// The system language, resolved against the currently active catalogs. English when it can't be
+/// determined or isn't supported.
 pub fn system_lang() -> Lang {
+    #[cfg(test)]
+    if let Some(tags) = TEST_SYSTEM_TAGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
+        return first_supported(tags.iter().map(String::as_str)).unwrap_or(Lang::EN);
+    }
     // Tests drive the UI by its English labels whatever the machine's language is.
     if cfg!(test) {
         return Lang::EN;
     }
-    static SYSTEM: OnceLock<Lang> = OnceLock::new();
-    *SYSTEM.get_or_init(detect_system_lang)
+    static SYSTEM_TAGS: OnceLock<Vec<String>> = OnceLock::new();
+    let tags = SYSTEM_TAGS.get_or_init(detect_system_tags);
+    first_supported(tags.iter().map(String::as_str)).unwrap_or(Lang::EN)
 }
 
-fn detect_system_lang() -> Lang {
+fn detect_system_tags() -> Vec<String> {
     // An explicit override, then the platform's preferred UI languages (Windows display language,
     // macOS preferred languages, `LC_ALL`/`LC_MESSAGES`/`LANG` on Unix, the browser on the web).
-    if let Some(l) = std::env::var("WORDCRAFT_LANGUAGE").ok().and_then(|v| lang_from_tag(&v)) {
-        return l;
+    let mut tags = Vec::new();
+    if let Ok(v) = std::env::var("WORDCRAFT_LANGUAGE") {
+        tags.push(v);
     }
-    let tags: Vec<String> = sys_locale::get_locales().take(16).collect();
-    first_supported(tags.iter().map(String::as_str)).unwrap_or(Lang::EN)
+    tags.extend(sys_locale::get_locales().take(16));
+    tags
 }
 
 /// The system region (#838): it picks the paper File › New starts on, the default measurement
@@ -561,8 +716,23 @@ fn name_sort_key(name: &str) -> String {
 mod picker_order_tests {
     use super::*;
 
+    struct RestoreRuntimeCatalog {
+        prev_entries: Vec<CatalogEntry>,
+        prev_active: Option<&'static I18n>,
+        prev_test_tags: Option<Vec<String>>,
+    }
+
+    impl Drop for RestoreRuntimeCatalog {
+        fn drop(&mut self) {
+            *RUNTIME_CATALOGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = std::mem::take(&mut self.prev_entries);
+            *ACTIVE_I18N.write().unwrap_or_else(std::sync::PoisonError::into_inner) = self.prev_active;
+            *TEST_SYSTEM_TAGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = self.prev_test_tags.take();
+        }
+    }
+
     #[test]
     fn picker_lists_english_first_then_names_alphabetically() {
+        let _lock = RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let order = Lang::for_picker();
         assert_eq!(order.first().map(|l| l.code()), Some(Lang::EN.code()));
         assert_eq!(order.len(), Lang::all().count());
@@ -570,5 +740,50 @@ mod picker_order_tests {
         assert!(keys.windows(2).all(|w| w[0] <= w[1]), "{keys:?}");
         assert_eq!(name_sort_key("Čeština"), "cestina");
         assert_eq!(name_sort_key("Türkçe"), "turkce");
+    }
+
+    #[test]
+    fn runtime_locale_registration_translates_strings() {
+        let _lock = RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = RestoreRuntimeCatalog {
+            prev_entries: RUNTIME_CATALOGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone(),
+            prev_active: *ACTIVE_I18N.read().unwrap_or_else(std::sync::PoisonError::into_inner),
+            prev_test_tags: TEST_SYSTEM_TAGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take(),
+        };
+        *TEST_SYSTEM_TAGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(vec!["fr-FR".to_string()]);
+        let empty: &'static I18n = Box::leak(Box::new(I18n::new(&[], &["fr"]).0));
+        *ACTIVE_I18N.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(empty);
+        assert_eq!(Lang::from_pref(AUTO).code(), "en", "before registration, auto falls back to English");
+
+        let existing = CRAFT_I18N.iter().find(|(c, ..)| *c == "fr");
+        let shared = existing.map(|(_, s, _)| *s).unwrap_or("");
+        let app = if let Some((_, _, orig)) = existing {
+            format!("{orig}\n\t__rt_probe__\tSonde runtime\n")
+        } else {
+            "@id\tlanguage.name\tFrançais\n\t__rt_probe__\tSonde runtime\n".to_string()
+        };
+        register_locale("fr", shared, &app);
+        let fr = Lang::from_code("fr").expect("registered fr locale should resolve");
+        assert_eq!(tr(fr, "__rt_probe__"), "Sonde runtime");
+        assert_eq!(lang_from_tag("fr-FR").map(|l| l.code()), Some("fr"));
+        assert_eq!(Lang::from_pref(AUTO).code(), "fr", "after registration, auto resolves the registered catalog");
+    }
+
+    /// A `Lang` handle kept across `register_locale` reads the replacement catalog, not the
+    /// generation it was created under.
+    #[test]
+    fn a_lang_handle_reads_the_replacement_catalog() {
+        let _lock = RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = RestoreRuntimeCatalog {
+            prev_entries: RUNTIME_CATALOGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone(),
+            prev_active: *ACTIVE_I18N.read().unwrap_or_else(std::sync::PoisonError::into_inner),
+            prev_test_tags: TEST_SYSTEM_TAGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take(),
+        };
+        register_locale("fr", "", "\t__rt_probe2__\tPremier\n");
+        let fr = Lang::from_code("fr").expect("fr resolves");
+        assert_eq!(tr(fr, "__rt_probe2__"), "Premier");
+
+        register_locale("fr", "", "\t__rt_probe2__\tRemplacé\n");
+        assert_eq!(tr(fr, "__rt_probe2__"), "Remplacé", "the retained handle uses the replacement translations");
     }
 }

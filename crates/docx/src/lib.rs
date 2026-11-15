@@ -106,6 +106,18 @@ pub fn read_with(bytes: &[u8], opts: &ReadOptions) -> Result<wordcraft_doc::Docu
     read::read_package(bytes, opts.chunks)
 }
 
+/// [`read`] with the caller's decompression budgets instead of [`package::MAX_PART`] /
+/// [`package::MAX_TOTAL`]: hosts with a smaller memory ceiling than a desktop (a Cloudflare
+/// Worker isolate) pass limits that keep inflated part bytes under it. An encrypted package is
+/// refused ([`DocxError::PasswordRequired`]) rather than opened with the default budgets.
+pub fn read_limited(bytes: &[u8], max_part: u64, max_total: u64) -> Result<wordcraft_doc::Document, DocxError> {
+    if is_encrypted(bytes) {
+        let package = zeroize::Zeroizing::new(decrypt(bytes, None)?);
+        return read::read_package_limited(&package, None, max_part, max_total);
+    }
+    read::read_package_limited(bytes, None, max_part, max_total)
+}
+
 /// Which kind of WordprocessingML package to write. The main part's content type differs per
 /// kind, and Word refuses a file whose content type doesn't match its extension.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -180,4 +192,7 @@ pub enum DocxError {
     /// (or encrypting failed).
     #[error("encrypted document: {0}")]
     Encryption(String),
+    /// An alternative format chunk (`w:altChunk`) could not be imported.
+    #[error("{0}")]
+    AltChunk(String),
 }

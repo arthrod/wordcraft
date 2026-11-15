@@ -1455,6 +1455,7 @@ dependencies = [
  "egui-wgpu",
  "egui-winit",
  "egui_glow",
+ "glow",
  "glutin",
  "glutin-winit",
  "image",
@@ -4518,6 +4519,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustc-demangle"
+version = "0.1.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b74b56ffa8bb2830709a538c2cbcae9aa062db0d2a42563bfb09bdaae44020eb"
+
+[[package]]
 name = "rustc-hash"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6933,7 +6940,6 @@ dependencies = [
  "encoding_rs",
  "getrandom 0.3.4",
  "image",
- "js-sys",
  "libc",
  "log",
  "regex",
@@ -6959,6 +6965,7 @@ dependencies = [
 name = "wordcraft-fonts"
 version = "0.18.1"
 dependencies = [
+ "brotli",
  "brotli-decompressor",
  "harfrust 0.13.3",
  "kurbo",
@@ -6982,7 +6989,6 @@ dependencies = [
  "getrandom 0.3.4",
  "hmac",
  "image",
- "js-sys",
  "log",
  "miniz_oxide 0.9.1",
  "proptest",
@@ -7010,7 +7016,6 @@ version = "0.18.1"
 dependencies = [
  "craft-proof",
  "image",
- "js-sys",
  "kurbo",
  "log",
  "serde",
@@ -7054,7 +7059,6 @@ dependencies = [
  "hayro-interpret",
  "hayro-syntax",
  "image",
- "js-sys",
  "kurbo",
  "log",
  "thiserror 2.0.21",
@@ -7130,7 +7134,67 @@ dependencies = [
  "wordcraft-doc",
  "wordcraft-engine",
  "wordcraft-fonts",
+ "wordcraft-geom",
+ "wordcraft-layout",
  "wordcraft-ui-egui",
+ "wordcraft-worker-proto",
+]
+
+[[package]]
+name = "wordcraft-worker-codecs"
+version = "0.18.1"
+dependencies = [
+ "getrandom 0.3.4",
+ "js-sys",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "web-sys",
+ "wordcraft-doc",
+ "wordcraft-docbin",
+ "wordcraft-docx",
+ "wordcraft-formats",
+ "wordcraft-worker-proto",
+]
+
+[[package]]
+name = "wordcraft-worker-pdf"
+version = "0.18.1"
+dependencies = [
+ "getrandom 0.3.4",
+ "js-sys",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "web-sys",
+ "wordcraft-doc",
+ "wordcraft-docx",
+ "wordcraft-fonts",
+ "wordcraft-layout",
+ "wordcraft-pdf",
+ "wordcraft-worker-proto",
+]
+
+[[package]]
+name = "wordcraft-worker-proof"
+version = "0.18.1"
+dependencies = [
+ "craft-proof",
+ "getrandom 0.3.4",
+ "js-sys",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "web-sys",
+ "wordcraft-worker-proto",
+]
+
+[[package]]
+name = "wordcraft-worker-proto"
+version = "0.18.1"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -7300,7 +7364,13 @@ checksum = "9440ea3e5aeabb0ac63af70daf835274065238cdd0cec83418f417eae38bacee"
 name = "xtask"
 version = "0.18.1"
 dependencies = [
+ "base64 0.23.1",
+ "brotli",
+ "brotli-decompressor",
+ "rustc-demangle",
  "serde_json",
+ "sha2 0.11.1",
+ "wordcraft-fonts",
 ]
 
 [[package]]

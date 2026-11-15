@@ -586,7 +586,36 @@ fn recipient_lists_in_legacy_and_utf16_encodings() {
     assert_eq!(s.merge.rows, [["José"]]);
 }
 
+/// Text exports keep reading as recipient CSV even when a spreadsheet extension names them,
+/// including in a build without workbook support.
+#[test]
+fn spreadsheet_named_text_recipient_lists_read_as_text() {
+    let mut s = Session::new(Document::new());
+    for (path, text, second) in
+        [("export.xls", "Name\tCity\nAda\tLondon\n", vec!["Ada", "London"]), ("export.xlsx", "Name,City\nBo,Oslo\n", vec!["Bo", "Oslo"])]
+    {
+        let r = s.run("mailings.recipients", &json!({"path": path, "data": b64(text.as_bytes())})).unwrap();
+        assert_eq!(r["fields"], json!(["Name", "City"]), "{path}");
+        assert_eq!(s.merge.rows, [second], "{path}");
+    }
+    // A non-text payload that is no spreadsheet either is never a recipient list.
+    let e = s.run("mailings.recipients", &json!({"path": "junk.bin", "data": b64(&[0, 1, 2, 3, 0xff])}));
+    assert!(matches!(e, Err(CmdError::Failed(m)) if m.contains("not a text recipient list")));
+}
+
+/// CSV recipient headers trim whitespace, name blanks `Column N`, and number repeats consistently
+/// with and without `extra-formats`.
+#[test]
+fn csv_recipient_headers_trim_name_blanks_and_number_repeats() {
+    let mut s = Session::new(Document::new());
+    let csv = " Name , , name , Name , Name 2 , Column 2 \n1,2,3,4,5,6\n";
+    let r = s.run("mailings.recipients", &json!({"csv": csv})).unwrap();
+    assert_eq!(r["fields"], json!(["Name", "Column 2", "name 2", "Name 3", "Name 2 2", "Column 2 2"]));
+    assert_eq!(s.merge.rows, [["1", "2", "3", "4", "5", "6"]]);
+}
+
 /// #778: legacy Excel 97–2003 workbooks are recipient lists; a CSV named .xls reads as text.
+#[cfg(feature = "extra-formats")]
 #[test]
 fn recipients_from_an_xls_workbook() {
     let row = |r: &[&str]| r.iter().map(|c| c.to_string()).collect::<Vec<_>>();

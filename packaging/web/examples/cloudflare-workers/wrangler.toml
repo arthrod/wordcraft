@@ -1,0 +1,17 @@
+name = "wordcraft-web-worker"
+main = "build/worker/shim.mjs"
+compatibility_date = "2026-11-13"
+
+[build]
+command = "cargo install -q worker-build && worker-build --release"
+
+[assets]
+directory = "../../../../dist/web"
+binding = "ASSETS"
+# `run_worker_first` takes Cloudflare glob patterns (see Workers Static Assets docs:
+# run_worker_first). `/\*.wasm` routes the root-level `wordcraft-web-<hash>_bg.wasm` bundles
+# trunk emits into `dist/web` so the Worker can serve the precompressed `<name>.wasm.br`
+# sidecars (plan §2.2, F8); requests without `Accept-Encoding: br` fall straight back to the
+# asset tier. Every other asset (js/css/ico/i18n/…) still bypasses the Worker entirely.
+run_worker_first = ["/api/*", "/*.wasm"]
+

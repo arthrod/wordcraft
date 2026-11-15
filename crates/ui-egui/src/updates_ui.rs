@@ -25,6 +25,7 @@ pub(crate) struct Runtime {
     pub(crate) status_message: Option<String>,
 }
 
+#[cfg_attr(target_arch = "wasm32", allow(clippy::derivable_impls))]
 impl Default for Runtime {
     fn default() -> Self {
         Self {

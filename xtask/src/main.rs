@@ -4,12 +4,16 @@
 //! invoked through `std::process::Command`.
 
 mod assets;
+mod brotli;
 mod ico;
 mod layers;
 mod parity;
 mod stats;
 mod version;
 mod visual_diff;
+mod wasm_attr;
+mod wasm_budget;
+mod web_assets;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
@@ -21,6 +25,14 @@ commands:
   assets          check that every icon/image/font/asset is attributed in ATTRIBUTION.md
   layers          enforce the crate dependency layering (plan/architecture.md §3)
   wasm            cargo check --target wasm32-unknown-unknown for the wasm-safe crates (one call)
+  wasm-budget [--report-only]
+                  check that dist/web/wordcraft-web*_bg.wasm meets the size and symbol budget
+  wasm-attr [--wasm <path>]
+                  attribute the wordcraft-web wasm code section per crate (decides cold-code
+                  splitting); writes docs/plans/wasm-attribution.md
+  brotli <input> <output>
+                  Brotli-compress one file at quality 11 (packaging/web emits .wasm.br sidecars)
+  web-assets      stage runtime i18n TSVs and demo samples into apps/wordcraft-web/target-assets
   test            workspace tests (cargo nextest when installed, else cargo test), the interface
                   audit with its missing-translation report, then doctests
   i18n-report     the interface audit: fails on text that skips the catalog, and prints the
@@ -48,6 +60,10 @@ fn main() -> ExitCode {
         Some("assets") => assets::run(&root()),
         Some("layers") => cmd_layers(),
         Some("wasm") => cmd_wasm(),
+        Some("wasm-budget") => wasm_budget::run(&root(), rest.contains(&"--report-only")),
+        Some("wasm-attr") => wasm_attr::run(&root(), &rest),
+        Some("brotli") => brotli::run(&rest),
+        Some("web-assets") => web_assets::run(&root()),
         Some("test") => cmd_test().and_then(|()| cmd_i18n_report()).and_then(|()| cmd_doctest()),
         Some("i18n-report") => cmd_i18n_report(),
         Some("language") => cmd_language(),

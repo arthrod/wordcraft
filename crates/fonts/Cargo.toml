@@ -11,6 +11,9 @@ workspace = true
 [features]
 # Opt-in test harness support; enabling this alone never changes the application database.
 test-support = []
+# Minimal core font set (brotli-compressed into OUT_DIR) for slim WASM builds.
+# The Arabic and Georgian interface faces from craft-fonts are not bundled in this configuration.
+minimal-wasm-fonts = []
 
 [dependencies]
 kurbo = { workspace = true }
@@ -21,3 +24,10 @@ brotli-decompressor = { workspace = true }
 unicode-bidi = { workspace = true }
 unicode-script = { workspace = true }
 log = { workspace = true }
+
+[dev-dependencies]
+# Tests compress pack fixtures the way `cargo xtask web-assets` ships them (quality 11).
+brotli = "8"
+
+[build-dependencies]
+brotli = "8"

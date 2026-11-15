@@ -112,6 +112,8 @@ pub(crate) struct Reader<'p> {
     embedded: EmbeddedManifest,
     /// What alternative format chunks may still bring in, and how (see [`chunk`]).
     chunks: ChunkState<'p>,
+    /// First error returned by the caller's [`ChunkImporter`] while reading this package.
+    pub(crate) chunk_error: Option<String>,
     /// Linked text boxes as read: (`wps:txbx/@id` or `wps:linkedTxbx/@id`, `seq` (0 for the box
     /// holding the text), text box part). See [`link_text_boxes`].
     pub txbx_links: Vec<(u32, u32, u32)>,
@@ -143,15 +145,32 @@ pub(crate) fn read_package(bytes: &[u8], chunks: Option<ChunkImporter>) -> Resul
     read_opened(&Package::open(bytes)?, chunks)
 }
 
+/// [`read_package`] with the caller's decompression budgets ([`crate::package::MAX_PART`] and
+/// [`crate::package::MAX_TOTAL`] unless it has tighter ones, e.g. a Worker isolate).
+pub(crate) fn read_package_limited(bytes: &[u8], chunks: Option<ChunkImporter>, max_part: u64, max_total: u64) -> Result<Document, DocxError> {
+    read_opened_limited(&Package::open_limited(bytes, max_part, max_total)?, chunks, max_part, max_total)
+}
+
 /// Read a package whose parts are already unpacked (from a zip, a Flat OPC file or a converted
 /// Word 2003 XML document).
 pub(crate) fn read_opened(pkg: &Package, chunks: Option<ChunkImporter>) -> Result<Document, DocxError> {
-    read_opened_in(pkg, ChunkState::new(chunks)).map(|(doc, ..)| doc)
+    let mut state = ChunkState::new(chunks);
+    read_opened_in(pkg, &mut state).map(|(doc, ..)| doc)
+}
+
+/// [`read_opened`] for a package opened under the caller's decompression budgets: nested
+/// WordprocessingML chunks are held to them too, their unpacked bytes charged against the
+/// `max_total` `pkg` hasn't already spent (see [`ChunkState`]).
+pub(crate) fn read_opened_limited(pkg: &Package, chunks: Option<ChunkImporter>, max_part: u64, max_total: u64) -> Result<Document, DocxError> {
+    let mut state = ChunkState::new(chunks);
+    state.part = max_part;
+    state.bytes = state.bytes.min(max_total.saturating_sub(pkg.size()));
+    read_opened_in(pkg, &mut state).map(|(doc, ..)| doc)
 }
 
 /// [`read_opened`] with what chunks may still bring in; also gives the chunks, chunk bytes and
-/// graphic work left of that.
-fn read_opened_in(pkg: &Package, chunks: ChunkState) -> Result<(Document, usize, u64, usize), DocxError> {
+/// graphic work left of that, updating `chunks` even on an [`DocxError::AltChunk`] abort.
+fn read_opened_in(pkg: &Package, chunks: &mut ChunkState) -> Result<(Document, usize, u64, usize), DocxError> {
     let root_rels = pkg.rels("");
     let main = root_rels.by_type(rt::OFFICE_DOC).filter(|r| !r.external).map(|r| r.target.clone()).unwrap_or_else(|| "word/document.xml".to_string());
     let Some(root) = pkg.xml_strict(&main)? else {
@@ -192,7 +211,8 @@ fn read_opened_in(pkg: &Package, chunks: ChunkState) -> Result<(Document, usize,
         txbx_links: Vec::new(),
         theme_fills: Default::default(),
         group_fill: None,
-        chunks,
+        chunks: *chunks,
+        chunk_error: None,
     };
     r.doc.missing_pictures.main = main.clone();
     r.pc.major_font = r.doc.settings.major_font.clone();
@@ -345,8 +365,14 @@ fn read_opened_in(pkg: &Package, chunks: ChunkState) -> Result<(Document, usize,
         keep_glued_ids(&mut r.doc, &r.glued);
     }
     let (left, bytes, graphic) = (r.chunks.left, r.chunks.bytes, r.chunks.graphic);
+    chunks.left = left;
+    chunks.bytes = bytes;
+    chunks.graphic = graphic;
     let mut doc = r.doc;
     doc.ensure_nonempty();
+    if let Some(err) = r.chunk_error.take() {
+        return Err(DocxError::AltChunk(err));
+    }
     Ok((doc, left, bytes, graphic))
 }
 

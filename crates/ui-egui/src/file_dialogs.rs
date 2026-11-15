@@ -483,6 +483,16 @@ impl WordApp {
             self.status(tl!("All system fonts are already available."));
         }
     }
+
+    /// Download the unbundled pack faces of `families` (all pack faces when empty; web only —
+    /// `font.installPack` is disabled elsewhere, and a host without the callback gets a status).
+    pub(crate) fn install_font_packs(&mut self, families: Vec<String>) {
+        if let Some(f) = &self.services.install_font_packs {
+            f(families);
+        } else {
+            self.status(tl!("Font packs aren't available."));
+        }
+    }
 }
 
 #[cfg(test)]
