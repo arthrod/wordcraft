@@ -257,19 +257,8 @@ fn emit_font_packs(root: &Path, out_dir: &Path) -> Result<(), String> {
     let fonts_out = out_dir.join("fonts");
     std::fs::create_dir_all(&fonts_out).map_err(|e| format!("{}: {e}", fonts_out.display()))?;
 
-    // Pack files that no longer match a spec (a face moved out of the pack set) must not ship.
-    for entry in std::fs::read_dir(&fonts_out).map_err(|e| format!("{}: {e}", fonts_out.display()))?.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name == "manifest.json" {
-            continue;
-        }
-        let keep = PACK_FACES.iter().any(|p| name.starts_with(&format!("{}.", p.stem)));
-        if !keep {
-            std::fs::remove_file(entry.path()).map_err(|e| format!("{}: {e}", entry.path().display()))?;
-        }
-    }
-
     let mut faces = Vec::with_capacity(PACK_FACES.len());
+    let mut written = std::collections::BTreeSet::new();
     for spec in PACK_FACES {
         let path = fonts_dir.join(format!("{}.ttf", spec.stem));
         let ttf = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -279,6 +268,7 @@ fn emit_font_packs(root: &Path, out_dir: &Path) -> Result<(), String> {
         brotli::BrotliCompress(&mut ttf.as_slice(), &mut compressed, &params).map_err(|e| format!("brotli {}: {e}", spec.stem))?;
         let file = format!("{}.{hash8}.ttf.br", spec.stem);
         std::fs::write(fonts_out.join(&file), &compressed).map_err(|e| format!("{}: {e}", fonts_out.join(&file).display()))?;
+        written.insert(file.clone());
         faces.push(serde_json::json!({
             "family": spec.family,
             "weight": spec.weight,
@@ -292,6 +282,16 @@ fn emit_font_packs(root: &Path, out_dir: &Path) -> Result<(), String> {
     let manifest = serde_json::json!({ "faces": faces });
     let bytes = serde_json::to_vec_pretty(&manifest).map_err(|e| format!("serialize font manifest: {e}"))?;
     std::fs::write(fonts_out.join("manifest.json"), bytes).map_err(|e| format!("{}: {e}", fonts_out.join("manifest.json").display()))?;
+
+    // Keep only this run's files plus the manifest: a file whose stem still matches a spec but
+    // whose hash is stale (the TTF changed since the last staging) must not ship either —
+    // deployed static-file limits count every file left behind.
+    for entry in std::fs::read_dir(&fonts_out).map_err(|e| format!("{}: {e}", fonts_out.display()))?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name != "manifest.json" && !written.contains(&name) {
+            std::fs::remove_file(entry.path()).map_err(|e| format!("{}: {e}", entry.path().display()))?;
+        }
+    }
     Ok(())
 }
 
@@ -438,10 +438,13 @@ mod tests {
             brotli_decompressor::Decompressor::new(packed.as_slice(), 4096).take(ttf.len() as u64 + 1).read_to_end(&mut decoded).unwrap();
             assert_eq!(decoded, ttf, "{} does not decode to the TTF", spec.stem);
         }
-        // A stale pack file is removed on the next staging run.
+        // Stale pack files are removed on the next staging run: one whose stem left the spec
+        // set, and one whose stem still matches but whose hash is out of date.
         std::fs::write(out.join("fonts/RemovedFace-Regular.deadbeef.ttf.br"), b"x").unwrap();
+        std::fs::write(out.join("fonts/SourceSans3-Bold.deadbeef.ttf.br"), b"x").unwrap();
         emit_font_packs(&root, &out).unwrap();
         assert!(!out.join("fonts/RemovedFace-Regular.deadbeef.ttf.br").exists());
+        assert!(!out.join("fonts/SourceSans3-Bold.deadbeef.ttf.br").exists());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

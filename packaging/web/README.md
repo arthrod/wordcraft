@@ -9,7 +9,7 @@
 |---|---|
 | `index.html` | Progressive loading shell (HTML/CSS skeleton + streaming WASM bootstrap). |
 | `wordcraft-web-<hash>.js` | `wasm-bindgen` glue (generated ES module). |
-| `wordcraft-web-<hash>_bg.wasm` | The compiled engine (~17.69 MB raw, ~6.95 MB gzip; capped under 25 MiB for Cloudflare). |
+| `wordcraft-web-<hash>_bg.wasm` | The compiled engine (~16.29 MB raw, ~6.69 MB gzip; 2026-11-14 build, capped under 25 MiB for Cloudflare). |
 | `i18n/` | Externalized locale TSV catalogs + `manifest.json` fetched on demand. |
 | `samples/` | Pre-bundled `.md` showcase documents (`welcome.md`, `spec.md`, `letter.md`). |
 | `_headers`, `.htaccess` | Sample header rules for Cloudflare Pages/Workers static assets, Netlify, and Apache. |
@@ -62,14 +62,14 @@ const api = await start({
 ```
 
 - **CSP requirements:** allow `'wasm-unsafe-eval'` in `script-src` alongside `'self'` (plus any SHA-256 hash of Trunk's inline bootstrap `<script>` when using `dist/web`), `worker-src 'self'`, and `connect-src 'self'` (same-origin fetches for `.wasm`, `i18n/*.tsv`, and `samples/*.md`). No `COOP` / `COEP` headers are required.
-- **ESM wrapper scope (House Rule 4):** `packaging/web/npm/index.js` (with `index.d.ts`) is the thin ESM entrypoint wrapper over Rust's `#[wasm_bindgen] pub fn start(options)` export. Application logic and the demo bar (`apps/wordcraft-web/src/demo.rs`) stay pure Rust.
+- **ESM wrapper scope (House Rule 4):** `packaging/web/npm/index.js` (with `index.d.ts`) is the thin ESM entrypoint wrapper over Rust's `#[wasm_bindgen] pub fn start(options)` export, and `packaging/web/smoke/` is the consumer smoke-test harness (see its README). These are the only approved handwritten JavaScript/TypeScript in the web packaging tree. Application logic and the demo bar (`apps/wordcraft-web/src/demo.rs`) stay pure Rust.
 
 ## Cloudflare deployments (static & hybrid)
 
 Two ready-to-deploy examples live in this directory (with `.assetsignore` excluding `.wasm.gz`, `.d.ts`, and `.trunk-lock` from static uploads so Cloudflare serves edge-compressed `.wasm` with a clean `Content-Type: application/wasm`):
 
-- **Static deployment (Cloudflare Pages):** <https://wordcraft-web-pages.pages.dev/?sample&demo=1> ([`examples/cloudflare-pages/`](examples/cloudflare-pages/README.md)) — zero backend, serves `dist/web/` directly (`6.61 MB` Brotli / `6.95 MB` Gzip transfer).
-- **Hybrid Edge deployment (Cloudflare Workers + `workers-rs`):** <https://wordcraft-web-worker.cicero-im.workers.dev/?sample&demo=1> ([`examples/cloudflare-workers/`](examples/cloudflare-workers/README.md)) — serves the same browser-first static assets via `ASSETS` (`6.61 MB` Brotli / `6.57 MB` Zstd / `6.95 MB` Gzip) plus `GET /api/health` and an unlogged `POST /api/convert` endpoint bounded to `4 MiB` (`Cache-Control: no-store`).
+- **Static deployment (Cloudflare Pages):** <https://wordcraft-web-pages.pages.dev/?sample&demo=1> ([`examples/cloudflare-pages/`](examples/cloudflare-pages/README.md)) — zero backend, serves `dist/web/` directly (`6.39 MB` Brotli / `6.69 MB` Gzip wasm transfer, measured live 2026-11-15).
+- **Hybrid Edge deployment (Cloudflare Workers + `workers-rs`):** <https://wordcraft-web-worker.cicero-im.workers.dev/?sample&demo=1> ([`examples/cloudflare-workers/`](examples/cloudflare-workers/README.md)) — serves the same browser-first static assets via `ASSETS` (`4.87 MB` Brotli sidecar / `6.35 MB` Zstd / `6.69 MB` Gzip wasm transfer, measured live 2026-11-15) plus `GET /api/health` and an unlogged `POST /api/convert` endpoint bounded to `4 MiB` (`Cache-Control: no-store`).
 
 ### Headless conversion benchmark (`wordcraft-cli`, Step 5.2a)
 
@@ -84,7 +84,7 @@ Measured locally via `cargo build --release -p wordcraft-cli` with `/usr/bin/tim
 | 500-page (`1.70 MB`) | `.md` → `.docx` | `0.05s` (`0.04u/0.00s`) | `38.0 MiB` | Yes |
 | 500-page (`24 KB`) | `.docx` → `.pdf` | `0.62s` (`0.57u/0.03s`) | `233.4 MiB` | **No** (exceeds 128 MB) |
 
-Because 500-page `.docx` → `.pdf` rendering exceeds 128 MB, `/api/convert` enforces a `4 MiB` payload limit and rejects oversized requests with HTTP `413` (`use 100% Browser WASM mode instead`).
+Memory safety inside the isolate is bounded by the decompression budgets and DOCX part/total limits the Worker passes to the reader, not by payload size alone; `/api/convert` still enforces a `4 MiB` upload bound and rejects oversized requests with HTTP `413` (`use 100% Browser WASM mode instead`).
 
 ## Any path works
 
@@ -100,7 +100,7 @@ revalidate on fetch. Never deploy the unhashed npm package filenames under the `
   any other type, and the app then loads slowly or not at all. Serve `.js` as `text/javascript`.
   Most hosts already do both. For nginx, check that `mime.types` has `application/wasm wasm;`.
 - **Compression:** turn on gzip or Brotli for `.wasm`, `.js` and `.html`. Gzip takes the release
-  `.wasm` from ~17.69 MB raw to ~6.95 MB.
+  `.wasm` from ~16.29 MB raw to ~6.69 MB (2026-11-14 build).
 - **Caching:** `Cache-Control: public, max-age=31536000, immutable` on the Trunk-hashed `.wasm`,
   `.js`, and `snippets/` files, and `no-cache` on `index.html` (and revalidated `i18n/` / `samples/`).
 - **HTTPS:** Clipboard integration works best in a secure context (`https://` or `http://localhost`).
@@ -116,6 +116,9 @@ location /wordcraft/ {
     types { application/wasm wasm; text/javascript js; text/html html; }
     gzip on;
     gzip_types application/wasm text/javascript text/html;
+    # Un-hashed worker files revalidate like index.html (same exception as _headers/.htaccess):
+    # a year-pinned worker older than the hashed main module fails the protocol version check.
+    location ~* /wordcraft-worker-.*\.(wasm|js)$ { add_header Cache-Control "no-cache"; }
     location ~* \.(wasm|js)$ { add_header Cache-Control "public, max-age=31536000, immutable"; }
     location ~* index\.html$ { add_header Cache-Control "no-cache"; }
 }

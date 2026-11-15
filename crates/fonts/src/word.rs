@@ -965,6 +965,9 @@ mod tests {
 
     #[test]
     fn resolves_weights_named_as_their_own_family() {
+        // Records a wanted pack (Inter bold+italic synthesizes on the Medium face): hold the
+        // shared lock so a concurrent wanted-pack drain can't steal or pollute the record.
+        let _guard = crate::packs::wanted_packs_test_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // Word stores a Medium face as the family "Inter Medium" (#219).
         let r = resolve("Inter Medium", false, false);
         assert!(!r.substituted && !r.synth_bold && !r.synth_italic);
@@ -977,6 +980,8 @@ mod tests {
 
     #[test]
     fn synthesizes_missing_styles() {
+        // Records a wanted pack (JetBrains Mono has no bold/italic face): hold the shared lock.
+        let _guard = crate::packs::wanted_packs_test_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // JetBrains Mono ships only Regular here.
         let r = resolve("JetBrains Mono", true, true);
         assert!(r.synth_bold && r.synth_italic);
@@ -1183,6 +1188,7 @@ mod tests {
     /// the pack family's canonical name ("JetBrains Mono CE" → JetBrains Mono).
     #[test]
     fn a_skipped_charset_alias_records_its_pack_family() {
+        let _guard = crate::packs::wanted_packs_test_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let db = FontDb::global();
         db.take_wanted_packs();
         let face = db.face("Source Sans 3", "Regular");

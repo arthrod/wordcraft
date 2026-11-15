@@ -90,8 +90,20 @@ pub fn run(args: &[&str]) -> Result<(), String> {
     if output_is_input {
         return Err(format!("{}: output refers to the input file", output_path.display()));
     }
-    let out_file = File::create(output_path).map_err(|e| format!("{}: {e}", output_path.display()))?;
-    compress(&mut BufReader::new(in_file), &mut BufWriter::new(out_file))?;
+    // Write to a sibling temp file and rename only after compression succeeds, so a failed or
+    // interrupted run never leaves a truncated sidecar at `output_path`.
+    let mut tmp_os = output_path.as_os_str().to_os_string();
+    tmp_os.push(format!(".tmp-{}", std::process::id()));
+    let tmp_path = PathBuf::from(tmp_os);
+    let out_file = File::create(&tmp_path).map_err(|e| format!("{}: {e}", tmp_path.display()))?;
+    if let Err(e) = compress(&mut BufReader::new(in_file), &mut BufWriter::new(out_file)) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+    if let Err(e) = fs::rename(&tmp_path, output_path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!("{}: {e}", output_path.display()));
+    }
 
     let output_bytes = usize::try_from(std::fs::metadata(output_path).map_err(|e| format!("{}: {e}", output_path.display()))?.len())
         .map_err(|_| format!("{}: file too large", output_path.display()))?;

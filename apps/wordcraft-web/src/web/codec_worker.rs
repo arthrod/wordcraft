@@ -242,8 +242,16 @@ thread_local! {
 
 /// Start the codec worker if it isn't already; `true` when it is running (or already was).
 pub(crate) fn ensure(asset_base: &str) -> bool {
-    let running = WORKER.with(|w| w.borrow().is_some());
-    if running {
+    // A worker that errored at runtime is dead weight: drop it (its `Drop` terminates the JS
+    // worker) and start fresh below. `WORKER_FAILED` stays reserved for `start` failures.
+    let alive = WORKER.with(|w| {
+        let mut slot = w.borrow_mut();
+        if slot.as_ref().is_some_and(|worker| worker.inner.borrow().failed) {
+            *slot = None;
+        }
+        slot.is_some()
+    });
+    if alive {
         return true;
     }
     if WORKER_FAILED.with(|f| f.get()) {

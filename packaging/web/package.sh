@@ -6,7 +6,8 @@
 #   - --skip-build: reuse existing Trunk output without invoking `trunk build`
 #   - --check: validate $DIST/npm (Node SSR import safety, checkJs, tsc bundler + nodenext, npm pack --dry-run)
 #
-# Needs: trunk (cargo install trunk --locked) and the wasm32-unknown-unknown target.
+# Needs: trunk (cargo install trunk --locked), wasm-bindgen, wasm-opt (cargo install wasm-opt),
+# and the wasm32-unknown-unknown target.
 
 set -euo pipefail
 
@@ -62,6 +63,7 @@ fi
 # sidecars and SRI below run after this).
 rebuild_workers_scalar() {
   local dist="$1" w tmp
+  command -v wasm-opt >/dev/null || { echo "error: wasm-opt not found (cargo install wasm-opt)" >&2; exit 1; }
   # Trunk's own pinned copy first: the CLI version must match the crates' wasm-bindgen exactly,
   # and another wasm-bindgen on PATH (0.2.100, say) fails against a 0.2.129 build. Resolve the
   # version Trunk.toml pins, then accept only an executable that reports that version —

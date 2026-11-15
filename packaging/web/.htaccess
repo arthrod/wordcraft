@@ -17,11 +17,16 @@ AddType text/javascript .js
     RewriteCond %{HTTP:Range} !^.
     RewriteCond %{REQUEST_FILENAME}.br -f
     RewriteRule ^(.+\.wasm)$ $1.br [L]
+    # The .br payload must not be gzip'd by mod_deflate below. The rewrite above lands here
+    # after an internal redirect (where [E=] vars would gain a REDIRECT_ prefix mod_deflate
+    # can't see), and Request_URI still shows the original .wasm, so SetEnvIf can't match
+    # either. Rewriting to `-` sets the env var on this final pass without another redirect;
+    # it also covers clients that ask for the .wasm.br sidecar directly.
+    RewriteRule \.wasm\.br$ - [E=no-gzip:1]
   </IfModule>
 </IfModule>
 
 <IfModule mod_deflate.c>
-  SetEnvIfNoCase Request_URI \.wasm\.br$ no-gzip
   AddOutputFilterByType DEFLATE application/wasm text/javascript text/html
 </IfModule>
 

@@ -10,10 +10,12 @@ use base64::Engine as _;
 use sha2::{Digest as _, Sha384};
 
 /// Main-module ceilings ratchet to measured size plus a small headroom (plan §3.5); lower them
-/// whenever the artifact shrinks. Ratcheted 2026-11-14 (S1) on an optimized release build
-/// (`trunk build --release`, so `wasm-opt` ran): 17,749,525 measured → 17.9 MB. The 2026-11-13
-/// ratchet to 19.5 MB had measured an artifact `wasm-opt` had not run on (a plain `trunk build`
-/// skips it outside release mode), which the `name`-section guard below now catches.
+/// whenever the artifact shrinks. Ratcheted 2026-11-14 on the SIMD release build
+/// (`trunk build --release` with `-C target-feature=+simd128`, plan §4.2, so `wasm-opt` ran):
+/// 16,289,048 measured → 16.5 MB raw / 6,750,000 gzip. This supersedes the same-day scalar
+/// ratchet (17,749,525 → 17.9 MB); the 2026-11-13 19.5 MB ceiling had measured an artifact
+/// `wasm-opt` had not run on (a plain `trunk build` skips it outside release mode), which the
+/// `name`-section guard below now catches.
 pub const MAX_UNCOMPRESSED_BYTES: usize = 16_500_000;
 pub const MAX_GZIPPED_BYTES: usize = 6_750_000;
 pub const MAX_DATA_SECTION_BYTES: usize = 2_750_000;

@@ -4,7 +4,7 @@
 //! `applyMarkdown`), `.docx` import/export, quick command execution (`execute`), and toggling
 //! between `100% Browser (Local WASM)` and `Hybrid Cloudflare Edge` mode.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use wasm_bindgen::closure::Closure;
@@ -61,14 +61,15 @@ pub fn mount_if_enabled(document: &web_sys::Document, canvas: &web_sys::HtmlCanv
 
     add_badge(document, &bar, "WordCraftWeb Demo");
 
-    // A sample's fetch can land after a later click started its own; only the newest
-    // selection may touch the document and the status line.
-    let sample_generation = Rc::new(Cell::new(0u64));
+    // A document replacement (sample fetch, Markdown Apply, .docx import) can land after a
+    // later one started; only the newest selection may touch the document and the status line.
+    let doc_generation = Rc::new(Cell::new(0u64));
+    let synced_md = Rc::new(RefCell::new(String::new()));
     for (label, file) in [("Welcome", "samples/welcome.md"), ("Tech Spec", "samples/spec.md"), ("Letter", "samples/letter.md")] {
         let doc_c = document.clone();
         let api_c = api.clone();
         let base_c = asset_base.to_string();
-        let generation_c = sample_generation.clone();
+        let generation_c = doc_generation.clone();
         add_button(document, &bar, label, false, move || {
             let doc_c = doc_c.clone();
             let api_c = api_c.clone();
@@ -115,14 +116,30 @@ pub fn mount_if_enabled(document: &web_sys::Document, canvas: &web_sys::HtmlCanv
         let doc_apply = document.clone();
         let api_apply = api.clone();
         let area_apply = md_area.clone();
+        let generation_apply = doc_generation.clone();
+        let synced_apply = synced_md.clone();
         add_button(document, hdr, "Apply to Document", true, move || {
             let doc_c = doc_apply.clone();
             let api_c = api_apply.clone();
-            let md = area_apply.value();
+            let area_c = area_apply.clone();
+            let synced_c = synced_apply.clone();
+            let md = area_c.value();
+            let generation = generation_apply.get() + 1;
+            generation_apply.set(generation);
+            let generation_c = generation_apply.clone();
             wasm_bindgen_futures::spawn_local(async move {
+                let current = || generation_c.get() == generation;
+                if !current() {
+                    return;
+                }
                 match call_api_str(&api_c, "applyMarkdown", &md).await {
-                    Ok(_) => set_status(&doc_c, "Applied Markdown to document"),
-                    Err(err) => set_status(&doc_c, &format!("applyMarkdown failed: {err}")),
+                    Ok(_) if current() => {
+                        *synced_c.borrow_mut() = md;
+                        set_status(&doc_c, "Applied Markdown to document");
+                    }
+                    Ok(_) => {}
+                    Err(err) if current() => set_status(&doc_c, &format!("applyMarkdown failed: {err}")),
+                    Err(_) => {}
                 }
             });
         });
@@ -138,6 +155,7 @@ pub fn mount_if_enabled(document: &web_sys::Document, canvas: &web_sys::HtmlCanv
         let pane_c = pane.clone();
         let pane_open_c = pane_open.clone();
         let area_c = md_area;
+        let synced_pane = synced_md.clone();
         add_button(document, &bar, "Markdown Pane", false, move || {
             let next = !pane_open_c.get();
             pane_open_c.set(next);
@@ -147,11 +165,20 @@ pub fn mount_if_enabled(document: &web_sys::Document, canvas: &web_sys::HtmlCanv
                 let doc_async = doc_c.clone();
                 let api_async = api_c.clone();
                 let area_async = area_c.clone();
+                let synced_async = synced_pane.clone();
                 wasm_bindgen_futures::spawn_local(async move {
                     match call_api0(&api_async, "getMarkdown").await {
                         Ok(val) => {
-                            area_async.set_value(&val.as_string().unwrap_or_default());
-                            set_status(&doc_async, "Synced Markdown pane");
+                            // Reopening must not clobber a draft the user hasn't applied:
+                            // refresh only when the pane still holds the last synced text.
+                            let fresh = val.as_string().unwrap_or_default();
+                            if area_async.value() == *synced_async.borrow() {
+                                area_async.set_value(&fresh);
+                                *synced_async.borrow_mut() = fresh;
+                                set_status(&doc_async, "Synced Markdown pane");
+                            } else {
+                                set_status(&doc_async, "Kept unsaved Markdown edits");
+                            }
                         }
                         Err(err) => set_status(&doc_async, &format!("getMarkdown failed: {err}")),
                     }
@@ -170,24 +197,37 @@ pub fn mount_if_enabled(document: &web_sys::Document, canvas: &web_sys::HtmlCanv
         let doc_change = document.clone();
         let api_change = api.clone();
         let input_change = file_input.clone();
+        let generation_change = doc_generation.clone();
         let on_change = Closure::<dyn FnMut()>::new(move || {
             let Some(file) = input_change.files().and_then(|files| files.get(0)) else {
                 return;
             };
             let file_name = file.name();
+            // Clear the input so picking the same file again still fires `change`.
+            input_change.set_value("");
             let doc_c = doc_change.clone();
             let api_c = api_change.clone();
+            let generation = generation_change.get() + 1;
+            generation_change.set(generation);
+            let generation_c = generation_change.clone();
             wasm_bindgen_futures::spawn_local(async move {
+                let current = || generation_c.get() == generation;
                 set_status(&doc_c, &format!("Importing {file_name}..."));
                 match JsFuture::from(file.array_buffer()).await {
                     Ok(buf) => {
+                        if !current() {
+                            return;
+                        }
                         let bytes = js_sys::Uint8Array::new(&buf);
                         match call_api_val(&api_c, "loadDocx", bytes.as_ref()).await {
-                            Ok(_) => set_status(&doc_c, &format!("Opened {file_name} locally")),
-                            Err(err) => set_status(&doc_c, &format!("loadDocx failed: {err}")),
+                            Ok(_) if current() => set_status(&doc_c, &format!("Opened {file_name} locally")),
+                            Ok(_) => {}
+                            Err(err) if current() => set_status(&doc_c, &format!("loadDocx failed: {err}")),
+                            Err(_) => {}
                         }
                     }
-                    Err(err) => set_status(&doc_c, &format!("Read failed: {err:?}")),
+                    Err(err) if current() => set_status(&doc_c, &format!("Read failed: {err:?}")),
+                    Err(_) => {}
                 }
             });
         });

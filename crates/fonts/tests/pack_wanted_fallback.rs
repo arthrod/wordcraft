@@ -6,10 +6,13 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use wordcraft_fonts::FontDb;
+use wordcraft_fonts::packs::wanted_packs_test_lock;
 use wordcraft_fonts::word::resolve;
 
 #[test]
 fn fallback_list_notes_the_skipped_pack_family() {
+    // Both tests drain and assert the same process-wide wanted-pack record: serialize them.
+    let _guard = wanted_packs_test_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     assert!(FontDb::init_test_fonts());
     let db = FontDb::global();
     db.take_wanted_packs();
@@ -29,6 +32,7 @@ fn fallback_list_notes_the_skipped_pack_family() {
 /// is recorded under the pack family's canonical name rather than dropped.
 #[test]
 fn fallback_list_notes_the_skipped_pack_family_alias() {
+    let _guard = wanted_packs_test_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     assert!(FontDb::init_test_fonts());
     let db = FontDb::global();
     db.take_wanted_packs();

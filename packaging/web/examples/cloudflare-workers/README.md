@@ -25,11 +25,11 @@ npx wrangler dev
 npx wrangler deploy
 ```
 
-Notice that static routes (`/`, `/*.js`, `/i18n/*`, `/samples/*`) are served directly by Cloudflare's static asset tier without invoking the Worker isolate; only `/api/*` enters Rust Worker code.
+Notice that static routes (`/`, `/*.js`, `/i18n/*`, `/samples/*`) are served directly by Cloudflare's static asset tier without invoking the Worker isolate; only `/api/*` and the root-level `/*.wasm` bundles (see below) enter Rust Worker code.
 
 ### Precompressed wasm sidecars (`run_worker_first` + `Accept-Encoding: br`)
 
-`run_worker_first = ["/api/*", "/*.wasm"]` also routes the root-level `wordcraft-web-<hash>_bg.wasm` bundles through the Worker so it can serve the Brotli quality-11 sidecars (`<name>.wasm.br`) emitted by `packaging/web/package.sh` instead of letting the edge compress the plain wasm on every miss (measured: ~4.98 MB transferred with the sidecar vs ~6.61 MB edge-compressed). Note the billing trade-off: every `*.wasm` download whose `Accept-Encoding` offers `br` (all modern browsers) becomes a Worker invocation that counts against the Free plan's daily request quota, while static asset requests do not. Brotli-ineligible requests (no `br` token, `q=0`, `Range`) and missing sidecars fall through to the plain asset untouched.
+`run_worker_first = ["/api/*", "/*.wasm"]` also routes the root-level `wordcraft-web-<hash>_bg.wasm` bundles through the Worker so it can serve the Brotli quality-11 sidecars (`<name>.wasm.br`) emitted by `packaging/web/package.sh` instead of letting the edge compress the plain wasm on every miss (measured live 2026-11-15: ~4.87 MB transferred with the sidecar vs ~6.39 MB edge-compressed). Note the billing trade-off: every `*.wasm` download whose `Accept-Encoding` offers `br` (all modern browsers) becomes a Worker invocation that counts against the Free plan's daily request quota, while static asset requests do not. Brotli-ineligible requests (no `br` token, `q=0`, `Range`) and missing sidecars fall through to the plain asset untouched.
 
 ## Feasibility Gate & Limits (`5.2a` Benchmark)
 
@@ -44,7 +44,7 @@ Measured on release `wordcraft-cli convert`:
 | 500 pages (`1.70 MB` `.md`) | `.md` -> `.docx` | `0.05 s` | `40 ms` | `38.0 MiB` | Paid CPU (`>10 ms`) |
 | 500 pages (`24 KB` `.docx`) | `.docx` -> `.pdf` | `0.62 s` | `600 ms` | `233.4 MiB` | Exceeds 128 MB isolate RAM |
 
-Because PDF pagination/font-subsetting on large documents exceeds Cloudflare's 128 MB isolate memory cap, `/api/convert` limits payloads to `4 MiB` (`413 Payload Too Large`) and scopes edge conversions to lightweight format codecs (`md`, `html`, `txt`, `docx`), while client-side WebAssembly handles arbitrary full-document editing locally without uploads.
+Because a request's expansion inside the isolate is bounded by the decompression budgets and DOCX part/total limits rather than by payload size alone, `/api/convert` caps uploads at `4 MiB` (`413 Payload Too Large`) as a bound on request size, and scopes edge conversions to lightweight format codecs (`md`, `html`, `txt`, `docx`), while client-side WebAssembly handles arbitrary full-document editing locally without uploads.
 
 ### `/api/preview-page` gate (4.3, measured 2026-11-14)
 

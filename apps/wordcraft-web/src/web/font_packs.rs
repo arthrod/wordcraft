@@ -319,10 +319,19 @@ pub(crate) fn install_families(families: Vec<String>, ctx: egui::Context) {
         ctx.request_repaint();
         return;
     };
-    let needed: Vec<ManifestEntry> =
-        entries_for_families(&m, &families).into_iter().filter(|e| !attempted(&e.file) && !in_flight(&e.file) && !is_installed(e)).cloned().collect();
+    let matched = entries_for_families(&m, &families);
+    // A manual ask retries faces an earlier fetch failed: `ATTEMPTED` only gates the automatic
+    // wanted-face path, so a failed pack isn't stuck for the session. In-flight fetches and
+    // installed faces still don't refetch.
+    let needed: Vec<ManifestEntry> = matched.iter().filter(|e| !in_flight(&e.file) && !is_installed(e)).map(|e| (**e).clone()).collect();
     if needed.is_empty() {
-        status(wordcraft_ui_egui::i18n::t("All fonts are already available.").to_string());
+        if matched.is_empty() {
+            status(wordcraft_ui_egui::i18n::t("None of the requested families have downloadable fonts.").to_string());
+        } else if matched.iter().any(|e| in_flight(&e.file)) {
+            status(wordcraft_ui_egui::i18n::t("Downloading fonts…").to_string());
+        } else {
+            status(wordcraft_ui_egui::i18n::t("All fonts are already available.").to_string());
+        }
         ctx.request_repaint();
         flush_waiters();
         return;

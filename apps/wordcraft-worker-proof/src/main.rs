@@ -110,20 +110,26 @@ fn configure(payload: &[u8]) -> Result<(Kind, Vec<u8>), (ErrorCode, String)> {
     if let Some(opts) = cfg.options {
         CONFIGURED_OPTIONS.with(|o| o.set(Some(opts)));
     }
-    for w in &cfg.add_words {
-        if let Some(word) = wordcraft_proof::custom_word(w) {
-            wordcraft_proof::add_word(&word);
-        }
+    // Validate every word before mutating any dictionary: a rejected word fails the whole
+    // configure with a typed error instead of being silently skipped behind an `Ack`, so the
+    // worker's dictionaries can't diverge from what the client believes was applied.
+    let validate = |words: &[String]| -> Result<Vec<String>, (ErrorCode, String)> {
+        words
+            .iter()
+            .map(|w| wordcraft_proof::custom_word(w).ok_or_else(|| (ErrorCode::BadRequest, format!("invalid dictionary word {w:?}"))))
+            .collect()
+    };
+    let add = validate(&cfg.add_words)?;
+    let remove = validate(&cfg.remove_words)?;
+    let ignore = validate(&cfg.ignore_words)?;
+    for word in add {
+        wordcraft_proof::add_word(&word);
     }
-    for w in &cfg.remove_words {
-        if let Some(word) = wordcraft_proof::custom_word(w) {
-            wordcraft_proof::remove_word(&word);
-        }
+    for word in remove {
+        wordcraft_proof::remove_word(&word);
     }
-    for w in &cfg.ignore_words {
-        if let Some(word) = wordcraft_proof::custom_word(w) {
-            wordcraft_proof::ignore_word(&word);
-        }
+    for word in ignore {
+        wordcraft_proof::ignore_word(&word);
     }
     Ok((Kind::Ack, EMPTY_BODY.to_vec()))
 }
@@ -411,5 +417,21 @@ mod tests {
         let (rh, rp) = handle_message(&h, &p);
         assert_eq!(decode_reply(&rh, &rp).0.kind, Kind::Ack);
         assert!(wordcraft_proof::is_correct("qwzxy"), "the configure added the user word");
+    }
+
+    #[test]
+    fn configure_rejects_invalid_words_without_partial_application() {
+        let cfg = proto::ConfigureRequest {
+            options: None,
+            add_words: vec!["zqxjvw".into(), "two words".into()],
+            remove_words: Vec::new(),
+            ignore_words: Vec::new(),
+        };
+        let (h, p) = request(Kind::Configure, &cfg, 4);
+        let (rh, rp) = handle_message(&h, &p);
+        let (header, payload) = decode_reply(&rh, &rp);
+        assert_eq!(header.kind, Kind::Error);
+        assert_eq!(payload["code"], serde_json::json!("badRequest"));
+        assert!(!wordcraft_proof::is_correct("zqxjvw"), "a rejected configure must not partially apply");
     }
 }

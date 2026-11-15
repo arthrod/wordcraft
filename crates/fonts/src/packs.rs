@@ -99,6 +99,15 @@ fn wanted_record() -> &'static Mutex<BTreeSet<WantedPackFace>> {
     WANTED.get_or_init(|| Mutex::new(BTreeSet::new()))
 }
 
+/// Serializes tests that record or drain the wanted-pack record. `resolve` records wants as a
+/// side effect, so a test asserting on [`FontDb::take_wanted_packs`] must not interleave with
+/// one that resolves pack families. Shared with `tests/` through `test-support`.
+#[cfg(any(test, feature = "test-support"))]
+pub fn wanted_packs_test_lock() -> &'static Mutex<()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    &LOCK
+}
+
 /// Remember a want, applying the caps: the only writer to the record.
 fn record_wanted(w: WantedPackFace) {
     let mut set = wanted_record().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -315,6 +324,7 @@ mod tests {
     /// resolution-side without depending on a machine's installed fonts.
     #[test]
     fn wanted_packs_record_drains_filters_and_caps() {
+        let _guard = wanted_packs_test_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         FontDb::global().take_wanted_packs();
         note_wanted("Source Serif 4", false, true);
         note_wanted("source sans 3", true, false);
