@@ -46,6 +46,12 @@ struct Inner {
     ready: bool,
     /// The worker failed to start or errored: the feature is unavailable.
     failed: bool,
+
+    /// Jobs posted before the worker's `ready` notice: a module worker still evaluating its
+    /// top-level `await init()` silently DROPS transferred messages (measured 2026-11-15: a
+    /// renderPdf posted pre-ready never arrives; the same bytes posted after `ready` answer),
+    /// so early posts wait here and flush when `ready` lands.
+    queued: Vec<(u32, proto::Kind, Vec<u8>)>,
     pending: HashMap<u32, Pending>,
 }
 
@@ -73,6 +79,7 @@ impl ProofWorker {
             ready: false,
             failed: false,
             pending: HashMap::new(),
+            queued: Vec::new(),
         }));
 
         let handler = inner.clone();
@@ -116,6 +123,10 @@ impl ProofWorker {
             return Err("proofing worker failed".into());
         }
         let id = inner.ids.next_id();
+        if !inner.ready {
+            inner.queued.push((id, kind, payload.to_vec()));
+            return Ok(id);
+        }
         let env = proto::Envelope::request(id, kind, revision);
         let header = proto::encode_envelope(&env).map_err(|e| e.to_string())?;
         let header = String::from_utf8(header).map_err(|_| "envelope was not UTF-8".to_string())?;
@@ -204,6 +215,25 @@ fn on_message(inner: &Rc<RefCell<Inner>>, data: &wasm_bindgen::JsValue) {
         let mut inner = inner.borrow_mut();
         if env.kind == proto::Kind::Ready {
             inner.ready = true;
+            let queued = std::mem::take(&mut inner.queued);
+            let worker = inner.worker.clone();
+            drop(inner);
+            for (id, kind, payload) in queued {
+                let env = proto::Envelope::request(id, kind, 0);
+                let Ok(header) = proto::encode_envelope(&env)
+                    .map_err(|e| e.to_string())
+                    .and_then(|h| String::from_utf8(h).map_err(|_| "envelope was not UTF-8".to_string()))
+                else {
+                    log::warn!("worker: cannot encode a queued message");
+                    continue;
+                };
+                let bytes = js_sys::Uint8Array::from(payload.as_slice());
+                let msg = js_sys::Array::of2(&wasm_bindgen::JsValue::from_str(&header), &bytes);
+                let transfer = js_sys::Array::of1(&bytes.buffer());
+                if let Err(e) = worker.post_message_with_transfer(&msg, &transfer) {
+                    log::warn!("worker: a queued message failed to send: {e:?}");
+                }
+            }
             return;
         }
         match inner.pending.remove(&env.id) {

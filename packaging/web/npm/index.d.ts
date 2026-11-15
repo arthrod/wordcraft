@@ -57,6 +57,14 @@ export interface WordCraftApi {
    * the output where the format supports it.
    */
   convertDocument(options: { from: string; to: string; data: Uint8Array | ArrayBuffer | string; password?: string }): Promise<Uint8Array>;
+  /**
+   * Export the document as PDF on the dedicated worker, started lazily by this call. The
+   * document crosses as the same `.docx` package `exportDocx` writes, with the non-bundled
+   * font faces (user fonts, packs, document-embedded) as copies so the worker's layout matches
+   * the page's; resolves to the PDF bytes as a `Uint8Array`. A password-protected session
+   * exports an encrypted package the worker cannot read (it rejects, saying so).
+   */
+  exportPdf(options?: { markup?: boolean }): Promise<Uint8Array>;
 }
 
 /** Incoming CustomEvent names emitted by `<canvas data-host="page">`. */

@@ -51,11 +51,46 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
   command -v trunk >/dev/null || { echo "error: trunk not found (cargo install trunk --locked)" >&2; exit 1; }
 fi
 
+
+# Rebuild the dedicated workers WITHOUT `-C target-feature=+simd128` and overwrite the artifacts
+# Trunk emitted for them (§4.2's flag lives in .cargo/config.toml and applies to every wasm32
+# build, workers included). Measured 2026-11-15: the main module keeps the flag (layout 43%
+# faster, module 8.5% smaller), but the PDF worker built with it never answers a renderPdf —
+# the same bytes render in 264 ms natively and in the browser once the worker drops the flag —
+# so the workers ship scalar until that miscompile is understood. The loader shims Trunk wrote
+# are static and stay; the glue and wasm are byte-replaced before anything digests them (the
+# sidecars and SRI below run after this).
+rebuild_workers_scalar() {
+  local dist="$1" w tmp
+  local wb
+  # Trunk's own pinned copy first: the CLI version must match the crates' wasm-bindgen exactly,
+  # and another wasm-bindgen on PATH (0.2.100, say) fails against a 0.2.129 build.
+  for c in "$HOME/Library/Caches/dev.trunkrs.trunk"/wasm-bindgen-*/wasm-bindgen; do
+    [[ -x "$c" ]] && wb="$c"
+  done
+  wb="${wb:-$(command -v wasm-bindgen || true)}"
+  [[ -n "$wb" ]] || { echo "error: wasm-bindgen not found for the scalar worker rebuild" >&2; exit 1; }
+  for w in wordcraft-worker-proof wordcraft-worker-codecs wordcraft-worker-pdf; do
+    tmp="$(mktemp -d)"
+    (cd "$ROOT" && CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS="-C debuginfo=0" \
+      cargo build -q -p "$w" --target wasm32-unknown-unknown --profile wasm-release) || { echo "error: scalar build of $w failed" >&2; exit 1; }
+    "$wb" --target web --out-dir "$tmp" "$ROOT/target/wasm32-unknown-unknown/wasm-release/$w.wasm" >/dev/null \
+      || { echo "error: wasm-bindgen failed for $w" >&2; exit 1; }
+    wasm-opt -Oz --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-simd \
+      "$tmp/${w}_bg.wasm" -o "$dist/${w}_bg.wasm" \
+      || { echo "error: wasm-opt failed for $w" >&2; exit 1; }
+    /bin/cp -f "$tmp/$w.js" "$dist/$w.js"
+    rm -rf "$tmp"
+    echo "rebuilt $w without simd"
+  done
+}
+
 STATIC_DIST="$ROOT/dist/web"
 
 if [[ "$BUILD_STATIC" -eq 1 ]]; then
   if [[ "$SKIP_BUILD" -eq 0 ]]; then
     (cd "$ROOT/apps/wordcraft-web" && trunk build --release)
+    rebuild_workers_scalar "$STATIC_DIST"
   fi
   [[ -f "$STATIC_DIST/index.html" ]] || { echo "error: missing $STATIC_DIST/index.html (build static site first)" >&2; exit 1; }
   cat > "$STATIC_DIST/.assetsignore" << 'EOF'
@@ -117,6 +152,7 @@ if [[ "$BUILD_NPM" -eq 1 ]]; then
   if [[ "$SKIP_BUILD" -eq 0 ]]; then
     mkdir -p "$NPM_TRUNK_OUT"
     (cd "$ROOT/apps/wordcraft-web" && trunk build --release --filehash=false --dist "$NPM_TRUNK_OUT")
+    rebuild_workers_scalar "$NPM_TRUNK_OUT"
   else
     NPM_TRUNK_OUT="$NPM_STAGE"
   fi
@@ -211,6 +247,7 @@ async function check(canvas: HTMLCanvasElement, precompiled: WebAssembly.Module)
   await api.loadDocx(bytes);
   const fonts: { installed: string[]; failed: string[] } = await api.installFonts(["Inter"]);
   const rtf = new Uint8Array(await api.convertDocument({ from: "docx", to: "rtf", data: bytes })); void rtf;
+  const pdf = new Uint8Array(await api.exportPdf()); void pdf;
   await init();
   initSync(precompiled);
   await rawInit();

@@ -88,6 +88,7 @@ const RECIPIENT_EXTS: &[&str] = wordcraft_engine::cmd::mailings::RECIPIENT_EXTEN
 pub(crate) mod codec_worker;
 pub(crate) mod font_packs;
 mod font_store;
+pub(crate) mod pdf_worker;
 mod proof_squiggles;
 mod proof_worker;
 const CANVAS_ID: &str = "wordcraft_canvas";

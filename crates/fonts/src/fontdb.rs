@@ -96,6 +96,23 @@ pub struct FontDb {
 }
 
 impl FontDb {
+    /// The faces loaded from runtime bytes — user fonts, pack faces and fonts embedded in the
+    /// open document — as `(typographic family, style, file bytes)`: everything beyond the
+    /// static set, for a host to copy to a worker that must lay text out with exactly the faces
+    /// this process has (deferred-items plan §3.4; the bundled faces are compiled into such a
+    /// worker too and are not repeated). Faces removed from the database stop appearing here.
+    pub fn runtime_faces(&self) -> Vec<(String, String, std::sync::Arc<Vec<u8>>)> {
+        self.faces
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter_map(|f| match &f.bytes {
+                FontBytes::Owned(bytes) => Some((f.family.clone(), f.style.clone(), bytes.clone())),
+                FontBytes::Static(_) => None,
+            })
+            .collect()
+    }
+
     /// A database holding the bundled fonts, then the craft-fonts Japanese faces (Mincho first,
     /// so they are the fallback for Japanese text after the requested and bundled fonts), then the
     /// other craft-fonts faces: Simplified Chinese, for the ideographs the Japanese fonts lack, and

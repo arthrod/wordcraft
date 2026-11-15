@@ -314,6 +314,30 @@ fn postscript_names_select_faces() {
 
 /// A variable font holding just `name` and `fvar` tables: family "Var Test", one `wght` axis
 /// and `instances` named instances, each with its own style name.
+/// `runtime_faces` lists exactly what a worker needs beside its compiled-in set: faces loaded
+/// from runtime bytes, never the bundled ones (deferred-items plan §3.4). Exercised through
+/// the document-fonts path: on native every repository font is bundled, so the user and pack
+/// paths dedup against the full bundle here — the browser build exercises them live
+/// (`installFonts`, the font packs).
+#[test]
+fn runtime_faces_list_installed_not_bundled() {
+    let db = FontDb::with_font_dirs(vec![]);
+    assert!(db.runtime_faces().is_empty(), "the bundled faces are compiled into the worker");
+
+    // A bundled file re-added as a document font under a new family name: it becomes a runtime
+    // face (a substitute the document asks for), so its bytes must ride along to the worker.
+    let bytes = include_bytes!("../../../../assets/fonts/SourceSans3-Bold.ttf").to_vec();
+    let added = db.add_document_fonts(vec![(bytes.clone(), "Contract Bold".to_string())]);
+    assert_eq!(added, 1, "the document's face is new under its own name");
+    let faces = db.runtime_faces();
+    assert_eq!(faces.len(), 1, "only the runtime face, never the bundled set");
+    assert_eq!((faces[0].0.as_str(), faces[0].1.as_str()), ("Contract Bold", "Bold"));
+    assert_eq!(faces[0].2.len(), bytes.len(), "the file's bytes ride along");
+
+    // The bundled original is not listed beside it: one runtime face, not two.
+    assert_eq!(db.runtime_faces().len(), 1);
+}
+
 fn variable_font(instances: u16) -> Vec<u8> {
     variable_font_named("Var Test", &[], instances)
 }

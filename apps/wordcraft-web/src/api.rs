@@ -147,6 +147,9 @@ fn attach_doc_helpers(api: &js_sys::Object, queue: Sender<ControlRequest>, ctx: 
 
     let q_exp = queue.clone();
     let c_exp = ctx.clone();
+    // Cloned ahead of the later closures, which move `queue`/`ctx` into themselves.
+    let queue_for_pdf = queue.clone();
+    let ctx_for_pdf = ctx.clone();
     let export_docx = wasm_bindgen::closure::Closure::<dyn Fn() -> js_sys::Promise>::new(move || {
         let q = q_exp.clone();
         let c = c_exp.clone();
@@ -262,6 +265,92 @@ fn attach_doc_helpers(api: &js_sys::Object, queue: Sender<ControlRequest>, ctx: 
     });
     let _ = js_sys::Reflect::set(api, &JsValue::from_str("convertDocument"), convert_document.as_ref().unchecked_ref());
     convert_document.forget();
+
+    // PDF export through the dedicated worker (plan §3.4): the document crosses as the same
+    // `.docx` interchange package `exportDocx` writes, with the non-bundled font faces as copies
+    // (user fonts, pack faces, fonts embedded in the document) so the worker lays out with
+    // exactly the faces the page shows — its bundled four are compiled in. The worker starts
+    // lazily here, never on page load. Resolves to the PDF bytes as a `Uint8Array`; rejects
+    // with an `Error` carrying the worker's message (a password-protected session exports an
+    // encrypted package the worker cannot read, and its error says so).
+    let export_pdf = wasm_bindgen::closure::Closure::<dyn Fn(JsValue) -> js_sys::Promise>::new(move |val: JsValue| {
+        let q = queue_for_pdf.clone();
+        let c = ctx_for_pdf.clone();
+        future_to_promise(async move {
+            let mut params = json!({});
+            if js_sys::Reflect::get(&val, &JsValue::from_str("markup")).ok().and_then(|v| v.as_bool()) == Some(true) {
+                params["markup"] = json!(true);
+            }
+            let res = execute_command(q, c, "doc.exportDocx", params).await?;
+            let b64 = res.get("docxBase64").and_then(Value::as_str).ok_or_else(|| js_err("missing docxBase64"))?;
+            let docx = base64_decode(b64).ok_or_else(|| js_err("invalid docxBase64"))?;
+            if docx.is_empty() {
+                return Err(js_err("nothing to export"));
+            }
+            if docx.len() > wordcraft_worker_proto::MAX_PDF_DOC_BYTES {
+                return Err(js_err(&format!("the document is too large to export as PDF in the browser ({} bytes)", docx.len())));
+            }
+            // The font copies: every face beyond the worker's compiled-in set, within the
+            // protocol's count and byte budgets (what does not fit is left out with a log, and
+            // the export still runs — those faces fall back inside the worker).
+            let mut fonts: Vec<wordcraft_worker_proto::FontCopy> = Vec::new();
+            let mut total = 0usize;
+            for (family, style, bytes) in wordcraft_fonts::FontDb::global().runtime_faces() {
+                if fonts.len() >= wordcraft_worker_proto::MAX_FONT_COPIES
+                    || total.saturating_add(bytes.len()) > wordcraft_worker_proto::MAX_FONT_TOTAL_BYTES
+                {
+                    log::warn!("pdf export: the font copies hit a protocol budget; {family:?} is left to the worker's fallback");
+                    continue;
+                }
+                total = total.saturating_add(bytes.len());
+                fonts.push(wordcraft_worker_proto::FontCopy { family, style, bytes: (*bytes).clone() });
+            }
+            let req = wordcraft_worker_proto::PdfRenderRequest { docx, fonts };
+            let asset_base = crate::web::current_asset_base();
+            if !crate::web::pdf_worker::ensure(&asset_base) {
+                return Err(js_err("the pdf worker is unavailable in this browser"));
+            }
+            // The reply lands on a later task turn; the shared waker set (drained every shell
+            // frame by `wake_waiters`, and woken here from the reply closure) completes it.
+            let (tx, rx) = std::sync::mpsc::channel::<Result<Vec<u8>, String>>();
+            let sent = crate::web::pdf_worker::with(|w| {
+                w.render_pdf(&req, move |reply| {
+                    let _ = tx.send(reply.map_err(|e| format!("pdf export failed: {}", e.message)));
+                    wake_waiters();
+                })
+            });
+            if !matches!(sent, Some(Ok(_))) {
+                return Err(js_err("the pdf worker is unavailable in this browser"));
+            }
+            let bytes = ChannelFuture(rx).await.map_err(|e| js_err(&e))?;
+            if !bytes.starts_with(b"%PDF") {
+                return Err(js_err("the pdf worker answered bytes that are not a PDF"));
+            }
+            Ok(wasm_bindgen::JsValue::from(js_sys::Uint8Array::from(bytes.as_slice())))
+        })
+    });
+    let _ = js_sys::Reflect::set(api, &JsValue::from_str("exportPdf"), export_pdf.as_ref().unchecked_ref());
+    export_pdf.forget();
+}
+
+/// A one-shot answer that arrives outside the frame loop (a dedicated worker's reply): polled
+/// like [`ReplyFuture`], woken by [`wake_waiters`] — which the reply closure itself calls, so an
+/// answer between frames still completes the awaiting promise without waiting for the next one.
+struct ChannelFuture(std::sync::mpsc::Receiver<Result<Vec<u8>, String>>);
+
+impl Future for ChannelFuture {
+    type Output = Result<Vec<u8>, String>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.0.try_recv() {
+            Ok(reply) => Poll::Ready(reply),
+            Err(TryRecvError::Disconnected) => Poll::Ready(Err("the pdf worker went away before answering".into())),
+            Err(TryRecvError::Empty) => {
+                PENDING_WAKERS.with(|p| p.borrow_mut().push(Rc::new(RefCell::new(Some(cx.waker().clone())))));
+                Poll::Pending
+            }
+        }
+    }
 }
 
 struct ReplyFuture {
