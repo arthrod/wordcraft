@@ -2,10 +2,11 @@
 //! the dedicated worker, and its spans draw as overlays in the page.
 //!
 //! [`tick`](fn.tick) runs once per shell frame with the session in hand. It scans a small
-//! round-robin window of body paragraphs, sends a `check` for each whose text changed since it
-//! was last checked (or was never checked), and applies the replies that arrived since the last
-//! frame — storing a paragraph's spans only while its text is still the text that was checked,
-//! so a late or raced reply can only be dropped, never drawn misaligned. Applying on the next
+//! round-robin window of body paragraphs, sends a `check` for each whose check inputs (text,
+//! languages, unchecked ranges, list status — [`check_key`]) changed since it was last checked
+//! (or were never checked), and applies the replies that arrived since the last frame —
+//! storing a paragraph's spans only while its inputs are still the ones that were checked, so
+//! a late or raced reply can only be dropped, never drawn misaligned. Applying on the next
 //! tick, not in the reply closure, is what makes that comparison possible: the closure has no
 //! session, the tick does.
 //!
@@ -37,25 +38,29 @@ const SCAN_PER_TICK: usize = 4;
 /// deleted ones); comparing it every frame would cost more than the checks.
 const PATHS_REFRESH: u32 = 30;
 
-/// Paragraphs remembered (checked text + pending state). Past it, new paragraphs are not
-/// checked until earlier ones drop out of the window; overlays are bounded independently by
-/// `wordcraft_layout::proof_overlay`.
+/// Paragraphs remembered (check-input hash + pending state). When it is full, a new paragraph
+/// evicts one completed entry (pending ones are kept: their replies are due), so the
+/// round-robin scan still reaches the end of a longer document instead of stopping at the cap
+/// forever; overlays are bounded independently by `wordcraft_layout::proof_overlay`.
 const MAX_TRACKED: usize = 2048;
 
-/// One remembered paragraph: the text it was last checked at, and whether a reply is due.
+/// One remembered paragraph: the [`check_key`] hash it was last checked at, and whether a
+/// reply is due.
 struct Tracked {
-    text: String,
+    key: u64,
     pending: bool,
 }
 
-/// A reply waiting for the next tick to apply: the request's paragraph, the text it was checked
-/// at, and what came back.
+/// A reply waiting for the next tick to apply: the request's paragraph, the check-input hash
+/// it was checked at, and what came back.
 struct Apply {
     /// The request's id, to free its in-flight slot (an error reply names no paragraph).
     id: u32,
     story: StoryRef,
     path: Path,
-    checked_text: String,
+    /// The [`check_key`] hash the check ran at: the reply applies only while the paragraph
+    /// still checks the same.
+    checked_key: u64,
     reply: Result<proto::CheckReply, proto::ErrorReply>,
 }
 
