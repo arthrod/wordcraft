@@ -137,6 +137,7 @@ impl PageCache {
     }
 
     /// Bytes of pixels held by painted pages.
+    #[cfg(test)]
     pub fn used_bytes(&self) -> u64 {
         self.used
     }

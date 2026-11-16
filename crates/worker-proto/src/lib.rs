@@ -591,6 +591,35 @@ pub fn encode_view_open_request(req: &ViewOpenRequest) -> Result<Vec<u8>, ProtoE
     pack_binary(&[&meta, &req.docx])
 }
 
+/// Everything of a `viewOpen` payload that comes before the file's bytes, for a file of
+/// `docx_len` bytes: `prefix ‖ file` is exactly what [`encode_view_open_request`] returns.
+///
+/// For a client that holds the file outside its own memory (a page holding a `Uint8Array`):
+/// it writes this prefix and the file into one buffer, and the file is never copied through
+/// the client's heap. The same bounds as decoding apply.
+pub fn view_open_request_prefix(password: Option<&str>, docx_len: usize) -> Result<Vec<u8>, ProtoError> {
+    if let Some(password) = password
+        && password.len() > MAX_PASSWORD_BYTES
+    {
+        return Err(ProtoError::TooLarge { limit: MAX_PASSWORD_BYTES, got: password.len() });
+    }
+    if docx_len > MAX_VIEW_DOC_BYTES {
+        return Err(ProtoError::TooLarge { limit: MAX_VIEW_DOC_BYTES, got: docx_len });
+    }
+    if docx_len == 0 {
+        return Err(ProtoError::Decode("viewOpen payload has an empty .docx".into()));
+    }
+    let meta = encode_payload(&ViewOpenMeta { password: password.map(str::to_string) })?;
+    let len = |n: usize| u32::try_from(n).map_err(|_| ProtoError::TooLarge { limit: u32::MAX as usize, got: n });
+    let mut out = Vec::with_capacity(BINARY_MAGIC.len() + 12 + meta.len());
+    out.extend_from_slice(&BINARY_MAGIC);
+    out.extend_from_slice(&2u32.to_le_bytes());
+    out.extend_from_slice(&len(meta.len())?.to_le_bytes());
+    out.extend_from_slice(&len(docx_len)?.to_le_bytes());
+    out.extend_from_slice(&meta);
+    Ok(out)
+}
+
 /// Decode a `viewOpen` payload. The bounds are checked on the borrowed frame slices, so an
 /// over-limit request is refused before the file is copied.
 pub fn decode_view_open_request(bytes: &[u8]) -> Result<ViewOpenRequest, ProtoError> {
@@ -1418,6 +1447,22 @@ mod tests {
         let wide_meta = vec![b' '; MAX_PAYLOAD_BYTES];
         assert!(pack_binary(&[&wide_meta, &at_cap]).unwrap().len() <= request_payload_limit(Kind::ViewOpen));
         assert!(pack_binary(&[&wide_meta, &big]).unwrap().len() > request_payload_limit(Kind::ViewOpen));
+    }
+
+    #[test]
+    fn view_open_prefix_plus_the_file_is_the_encoded_request() {
+        for password in [None, Some("pw"), Some("")] {
+            let req = ViewOpenRequest { password: password.map(str::to_string), docx: (0..=255).collect() };
+            let mut built = view_open_request_prefix(password, req.docx.len()).unwrap();
+            built.extend_from_slice(&req.docx);
+            assert_eq!(built, encode_view_open_request(&req).unwrap(), "{password:?}");
+            assert_eq!(decode_view_open_request(&built).unwrap(), req);
+        }
+        assert!(matches!(view_open_request_prefix(None, 0), Err(ProtoError::Decode(_))));
+        assert!(matches!(view_open_request_prefix(None, MAX_VIEW_DOC_BYTES + 1), Err(ProtoError::TooLarge { limit: MAX_VIEW_DOC_BYTES, .. })));
+        assert!(view_open_request_prefix(None, MAX_VIEW_DOC_BYTES).is_ok());
+        let long = "p".repeat(MAX_PASSWORD_BYTES + 1);
+        assert!(matches!(view_open_request_prefix(Some(&long), 1), Err(ProtoError::TooLarge { limit: MAX_PASSWORD_BYTES, .. })));
     }
 
     #[test]

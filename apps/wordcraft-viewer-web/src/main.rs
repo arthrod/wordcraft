@@ -21,7 +21,14 @@ mod mode;
 #[cfg(any(target_arch = "wasm32", test))]
 mod pages;
 
+#[cfg(target_arch = "wasm32")]
+mod page;
+#[cfg(target_arch = "wasm32")]
+mod worker;
+
 fn main() {
+    #[cfg(target_arch = "wasm32")]
+    page::start_default_if_present();
     #[cfg(not(target_arch = "wasm32"))]
     eprintln!("wordcraft-viewer-web only runs in the browser: it is built by Trunk from apps/wordcraft-web/index.html");
 }

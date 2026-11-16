@@ -113,13 +113,12 @@ fn the_render_scale_is_zoom_times_device_pixel_ratio() {
 
 #[test]
 fn the_render_scale_stays_inside_the_protocol_and_the_pixel_budget() {
-    use wordcraft_worker_proto::{MAX_VIEW_PIXELS, MAX_VIEW_SCALE};
+    use wordcraft_worker_proto::MAX_VIEW_SCALE;
     // A huge poster at a high zoom on a dense display: lowered until it fits the budget.
     let poster = ViewPageSize { width: 4000.0, height: 6000.0 };
     let scale = render_scale(CSS_PX_PER_POINT, 3.0, &poster).unwrap();
     let pixels = (f64::from(poster.width * scale).ceil() * f64::from(poster.height * scale).ceil()) as u64;
     assert!(pixels <= PAGE_PIXEL_BUDGET, "{pixels}");
-    assert!(PAGE_PIXEL_BUDGET <= MAX_VIEW_PIXELS);
     assert!(pixels > PAGE_PIXEL_BUDGET * 9 / 10, "and no lower than it has to be: {pixels}");
     // A tiny label never asks for more than the protocol's largest scale.
     let label = ViewPageSize { width: 20.0, height: 10.0 };

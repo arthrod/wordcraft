@@ -70,7 +70,7 @@ pub fn lay_out(sizes: &[ViewPageSize], container_width: f64) -> Sheet {
     let points: Vec<(f64, f64)> = sizes.iter().map(usable).collect();
     let widest = points.iter().map(|p| p.0).fold(0.0, f64::max);
     let fit = if widest > 0.0 { (container - 2.0 * SIDE_MARGIN) / widest } else { CSS_PX_PER_POINT };
-    let zoom = fit.min(CSS_PX_PER_POINT).max(MIN_ZOOM);
+    let zoom = fit.clamp(MIN_ZOOM, CSS_PX_PER_POINT);
     let width = container.max(widest * zoom + 2.0 * SIDE_MARGIN);
     let mut top = PAGE_GAP;
     let mut pages = Vec::with_capacity(points.len());
