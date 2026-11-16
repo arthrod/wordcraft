@@ -94,8 +94,8 @@ At 1.0, 11-point body text is 11 pixels high: readable, and the smallest file th
 or 4 bits instead of 2 saves only 9% or 20% more (44,937 B, 39,316 B); `Balanced` compression
 instead of `High` is 1.3% larger and no faster here (the palette search dominates).
 
-What a reader downloads to see page 1 of the sample: the viewer page, **746 B**, and the image,
-**49,112 B**: **49,858 B** in all, uncompressed, with no other request. The browser app's first
+What a reader downloads to see page 1 of the sample: the viewer page, **777 B**, and the image,
+**49,112 B**: **49,889 B** in all, uncompressed, with no other request. The browser app's first
 visit downloads its page module (~90 KB gzip), the view-only worker (~2.78 MB gzip) and the
 document.
 
