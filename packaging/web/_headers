@@ -79,8 +79,11 @@
 /wordcraft-*.ico
   Cache-Control: public, max-age=31536000, immutable
 
+# wasm-bindgen names a snippet `snippets/<crate>-<id>/inlineN.js`. The id comes from the crate's
+# identity, not from the file's bytes, so the name can stay the same while the content changes:
+# not a content hash, so never `immutable`. One revalidation per file (a 304 when unchanged).
 /snippets/*
-  Cache-Control: public, max-age=31536000, immutable
+  Cache-Control: no-cache
 
 /index.html
   Cache-Control: no-cache

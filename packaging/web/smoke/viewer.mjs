@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 // Headless-Chrome checks for the viewer-first page (plan 10.3) against a Trunk build.
 //
-//   node viewer.mjs --dist ../../../dist/web --core <dir> [--out results/viewer.json]
+//   node viewer.mjs --dist ../../../dist/web --core <dir> [--font <file.ttf>] [--out results/viewer.json]
 //
 // `--core` is a directory holding the view-only core built for Node
 // (`wasm-bindgen --target nodejs` output of `wordcraft-viewer`): the reference the
 // painted canvas is compared with, byte for byte. Without it that one check is skipped
-// and reported as such.
+// and reported as such. `--font` is a TrueType file for the installFont check; without it a
+// common system font is used, and with none found that check is skipped.
 //
 // Checks (the acceptance criteria of plan step 10.3):
 //   AC1  a first visit with no input fetches the page module and the viewer worker,
@@ -21,14 +22,18 @@
 //        shows, and nothing is thrown uncaught
 //   AC6  served with the deployed Content-Security-Policy (`_headers`, plus the inline
 //        bootstrap's hash as `package.sh` adds it), nothing is refused
-//   and the three modes a host can choose (view, viewer-first, edit), a protected document
-//   (the password asked in the page), and the editor's parent bridge (?host=parent).
+//   and the three modes a host can choose (view, viewer-first, edit), an edit action while
+//   the document still downloads, a document declared past the size limit, the viewer failing
+//   for good (no viewer worker, not a .docx, a failed download) with Edit still offered, a
+//   protected document (the password asked in the page), a
+//   font installed just before another document opens, and the editor's parent bridge
+//   (?host=parent).
 //
 // Tooling-script JavaScript, like drive.mjs (see README.md).
 
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { brotliCompressSync, constants, gzipSync } from "node:zlib";
 import puppeteer from "puppeteer-core";
@@ -170,6 +175,18 @@ console.log(`Content-Security-Policy served: ${csp.policy}`);
 
 const { server, port } = await startServer(dist, dist, { headers: { "Content-Security-Policy": csp.policy } });
 const base = `http://127.0.0.1:${port}`;
+// Fixture routes the static server does not have, by path; anything else is served as before.
+const fixtures = new Map();
+const unfinished = [];
+{
+  const [serveStatic] = server.listeners("request");
+  server.removeAllListeners("request");
+  server.on("request", (req, res) => {
+    const route = fixtures.get(new URL(req.url ?? "/", "http://localhost").pathname);
+    if (route) route(res);
+    else serveStatic(req, res);
+  });
+}
 const browser = await puppeteer.launch({ executablePath: findChrome(), headless: true, args: ["--hide-scrollbars", "--mute-audio", "--window-size=1400,900"] });
 try {
   // ---- AC1: first visit, no input ----
@@ -327,6 +344,75 @@ try {
     await stall.page.close();
   }
 
+  // ---- an edit action while the document is still downloading ----
+  {
+    const slow = await open(browser, base, "/?doc=samples/welcome.docx", { stalled: /\/samples\/welcome\.docx$/ });
+    await slow.page.waitForFunction(() => window.wordcraftViewer, { timeout: 30000 }).catch(() => {});
+    const before = slow.log.requests.length;
+    await slow.page.evaluate(() => window.wordcraftViewer?.edit());
+    await new Promise((r) => setTimeout(r, 1500));
+    const waiting = await slow.page.evaluate(() => ({
+      phase: document.documentElement.getAttribute("data-wordcraft-phase"),
+      edit: (document.querySelector("#wordcraft_viewer_edit")?.getClientRects().length ?? 0) > 0,
+    }));
+    check("slow document: no edit action before it is open", waiting.phase === "viewing" && !waiting.edit && !slow.log.requests.slice(before).some((p) => EDITOR.test(p)), JSON.stringify(waiting));
+    for (const r of slow.held.splice(0)) await r.continue();
+    await waitAttr(slow.page, "data-wordcraft-painted", "true", 30000).catch(() => {});
+    const edit = await slow.page.evaluate(() => (document.querySelector("#wordcraft_viewer_edit")?.getClientRects().length ?? 0) > 0);
+    check("slow document: Edit is offered once it is open", edit);
+    await slow.page.click("#wordcraft_viewer_edit").catch(() => {});
+    await waitAttr(slow.page, "data-wordcraft-phase", "editing", 120000).catch(() => {});
+    const handed = await slow.page.evaluate(() => Promise.resolve(window.wordcraft?.getMarkdown?.()).catch(() => null));
+    check("slow document: the editor shows that document", typeof handed === "string" && handed.includes(SAMPLE_TEXT), JSON.stringify(String(handed).slice(0, 60)));
+    check("slow document: no uncaught errors", slow.log.uncaught.length === 0, slow.log.uncaught.join(" | "));
+    await slow.page.close();
+  }
+
+  // ---- a document whose declared length is past the viewer's limit ----
+  {
+    // 100 MiB declared, 1 KiB sent, and the rest never: refused before the body is read, so
+    // the notice comes at once instead of after (or never after) a full download.
+    fixtures.set("/__fixture/oversized.docx", (res) => {
+      unfinished.push(res);
+      res.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Length": String(100 * 1024 * 1024) });
+      res.write(Buffer.alloc(1024));
+    });
+    const big = await open(browser, base, "/?doc=/__fixture/oversized.docx");
+    await waitAttr(big.page, "data-wordcraft-error", "document-failed", 15000).catch(() => {});
+    const state = await big.page.evaluate(() => ({
+      error: document.documentElement.getAttribute("data-wordcraft-error"),
+      notice: document.querySelector("#wordcraft_viewer_notice")?.hidden === false ? document.querySelector("#wordcraft_viewer_notice").innerText : null,
+    }));
+    check("oversized Content-Length: refused before the body with the too-large notice", state.error === "document-failed" && /too large/i.test(state.notice ?? ""), JSON.stringify(state));
+    check("oversized Content-Length: no uncaught errors", big.log.uncaught.length === 0, big.log.uncaught.join(" | "));
+    await big.page.close();
+  }
+
+  // ---- the viewer fails for good: the editor is still offered and fetches the document ----
+  {
+    const editVisible = (p) => p.evaluate(() => (document.querySelector("#wordcraft_viewer_edit")?.getClientRects().length ?? 0) > 0);
+    const noWorker = await open(browser, base, "/", { blocked: /\/wordcraft-worker-viewer_loader\.js$/ });
+    await waitAttr(noWorker.page, "data-wordcraft-error", "viewer-failed", 30000).catch(() => {});
+    await noWorker.page.waitForFunction(() => (document.querySelector("#wordcraft_viewer_edit")?.getClientRects().length ?? 0) > 0, { timeout: 10000 }).catch(() => {});
+    check("viewer worker missing: Edit is offered", await editVisible(noWorker.page));
+    await noWorker.page.click("#wordcraft_viewer_edit").catch(() => {});
+    await waitAttr(noWorker.page, "data-wordcraft-phase", "editing", 120000).catch(() => {});
+    const handed = await noWorker.page.evaluate(() => Promise.resolve(window.wordcraft?.getMarkdown?.()).catch(() => null));
+    check("viewer worker missing: the editor shows the document", typeof handed === "string" && handed.includes(SAMPLE_TEXT), JSON.stringify(String(handed).slice(0, 60)));
+    check("viewer worker missing: no uncaught errors", noWorker.log.uncaught.length === 0, noWorker.log.uncaught.join(" | "));
+    await noWorker.page.close();
+    for (const [what, doc] of [
+      ["not a .docx", "i18n/manifest.json"],
+      ["download failed", "missing-document.docx"],
+    ]) {
+      const bad = await open(browser, base, `/?doc=${doc}`);
+      await waitAttr(bad.page, "data-wordcraft-error", "document-failed", 30000).catch(() => {});
+      await new Promise((r) => setTimeout(r, 500));
+      check(`${what}: Edit is offered`, await editVisible(bad.page));
+      await bad.page.close();
+    }
+  }
+
   // ---- a protected document: the password is asked for in the page ----
   {
     // The fixture: the sample, encrypted by the editor itself (file.encrypt, then exportDocx).
@@ -342,6 +428,35 @@ try {
     }, PASSWORD);
     await maker.page.close();
     check("password fixture: the editor wrote an encrypted package", locked.length > 0 && locked[0] === 0xd0 && locked[1] === 0xcf, `${locked.length} bytes`);
+
+    // Edit pressed before the worker answers that the new document needs a password: refused,
+    // so the editor is never handed the protected bytes without it.
+    {
+      const race = await open(browser, base, "/");
+      await waitAttr(race.page, "data-wordcraft-painted", "true");
+      const before = race.log.requests.length;
+      await race.page.evaluate((bytes) => {
+        window.wordcraftViewer.open(new Uint8Array(bytes)).catch(() => {});
+        window.wordcraftViewer.edit();
+      }, locked);
+      await race.page.waitForFunction(() => (document.querySelector("#wordcraft_viewer_password")?.getClientRects().length ?? 0) > 0, { timeout: 20000 }).catch(() => {});
+      await new Promise((r) => setTimeout(r, 1000));
+      const state = await race.page.evaluate(() => ({
+        phase: document.documentElement.getAttribute("data-wordcraft-phase"),
+        form: (document.querySelector("#wordcraft_viewer_password")?.getClientRects().length ?? 0) > 0,
+      }));
+      check("password: Edit before the worker answers loads no editor", state.phase === "viewing" && state.form && !race.log.requests.slice(before).some((p) => EDITOR.test(p)), JSON.stringify(state));
+      await race.page.close();
+      // And once an edit action is taken, no other document is opened under it.
+      const busy = await open(browser, base, "/");
+      await waitAttr(busy.page, "data-wordcraft-painted", "true");
+      const during = await busy.page.evaluate(async (bytes) => {
+        window.wordcraftViewer.edit();
+        return window.wordcraftViewer.open(new Uint8Array(bytes)).then(() => "resolved", (e) => `rejected: ${e.message}`);
+      }, locked);
+      check("open() while the editor takes over is refused", during.startsWith("rejected:"), during);
+      await busy.page.close();
+    }
 
     const prot = await open(browser, base, "/");
     await waitAttr(prot.page, "data-wordcraft-painted", "true");
@@ -407,6 +522,45 @@ try {
     check("password: the editor opens the protected document", phase === "editing" && typeof handed === "string" && handed.includes(SAMPLE_TEXT), `${phase} ${JSON.stringify(String(handed).slice(0, 60))}`);
     check("password: no uncaught errors", prot.log.uncaught.length === 0, prot.log.uncaught.join(" | "));
     await prot.page.close();
+  }
+
+  // ---- a font installed, then another document opened at once: the newer document wins ----
+  {
+    // A TrueType file the view-only core can read: `--font`, else a common system one.
+    const fontPath = [args.font, "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf", "/System/Library/Fonts/Supplemental/Georgia.ttf"].find((p) => p && existsSync(p));
+    if (!fontPath) {
+      console.log("skip font-then-open: no font file found (pass --font <file.ttf>)");
+    } else {
+      fixtures.set("/__fixture/font.ttf", (res) => res.writeHead(200, { "Content-Type": "font/ttf" }).end(readFileSync(fontPath)));
+      // The other document: blank, with page breaks, so its page count is not the sample's.
+      const maker = await open(browser, base, "/?mode=edit");
+      await waitAttr(maker.page, "data-wordcraft-phase", "editing");
+      const other = await maker.page.evaluate(async () => {
+        await window.wordcraft.execute("file.new", {});
+        for (let i = 0; i < 5; i++) await window.wordcraft.execute("insert.pageBreak", {});
+        return Array.from(await window.wordcraft.exportDocx());
+      });
+      await maker.page.close();
+      const race = await open(browser, base, "/");
+      await waitAttr(race.page, "data-wordcraft-painted", "true");
+      // installFont's relayout of the shown document is answered first; the open after it must
+      // still land, and its promise must say the new document's page count.
+      const got = await race.page.evaluate(async (doc) => {
+        const viewer = window.wordcraftViewer;
+        const shown = viewer.pageCount();
+        const font = new Uint8Array(await (await fetch("/__fixture/font.ttf")).arrayBuffer());
+        const installed = viewer.installFont("Fixture Font", font).then(() => "ok", (e) => `rejected: ${e.message}`);
+        const opened = viewer.open(new Uint8Array(doc)).then((a) => a.pageCount, (e) => `rejected: ${e.message}`);
+        return { shown, installed: await installed, opened: await opened };
+      }, other);
+      await new Promise((r) => setTimeout(r, 1000));
+      const after = await race.page.evaluate(() => ({ count: window.wordcraftViewer.pageCount(), pages: Number(document.querySelector("#wordcraft_viewer").dataset.pages) }));
+      const detail = JSON.stringify({ font: fontPath, ...got, after });
+      check("font then open: the open resolves with the new document", got.installed === "ok" && typeof got.opened === "number" && got.opened !== got.shown, detail);
+      check("font then open: the page shows the new document", after.count === got.opened && after.pages === got.opened, detail);
+      check("font then open: no uncaught errors", race.log.uncaught.length === 0, race.log.uncaught.join(" | "));
+      await race.page.close();
+    }
   }
 
   // ---- the modes a host can choose ----
@@ -476,6 +630,7 @@ try {
     await parent.page.close();
   }
 } finally {
+  for (const res of unfinished) res.destroy();
   await browser.close();
   server.close();
 }

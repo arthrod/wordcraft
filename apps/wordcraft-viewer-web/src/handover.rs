@@ -82,6 +82,12 @@ pub enum Event {
     PasswordAsked,
     /// The viewer opened a document (the password, if one was asked, was right).
     DocumentOpened,
+    /// The viewer started opening another document (a host's `open()`, or the same one with a
+    /// password). Until it opens, no edit action is taken.
+    DocumentOpening,
+    /// The viewer could not open the document and will not: its worker did not start, the
+    /// download failed, or the file is not one it reads.
+    DocumentFailed,
 }
 
 /// What the page does next.
@@ -107,6 +113,23 @@ pub enum Action {
     HideNotice,
 }
 
+/// The viewer's document, as far as handing it to the editor goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Doc {
+    /// Being fetched or opened. No edit action: the editor would be handed nothing, or bytes the
+    /// viewer has not read.
+    Opening,
+    /// Its password is asked for, or was refused or cancelled. No edit action: the editor is
+    /// never handed a protected document without its password.
+    Password,
+    /// Open in the viewer: the editor is handed its bytes.
+    Open,
+    /// None, and none coming: the viewer failed for good (its worker did not start, the
+    /// download failed, the file is not one it reads) or was never started. The editor is
+    /// offered and fetches the document itself.
+    Absent,
+}
+
 /// The machine. [`Handover::start`] gives the first actions; [`Handover::on`] the rest.
 #[derive(Debug)]
 pub struct Handover {
@@ -119,14 +142,25 @@ pub struct Handover {
     accepted: bool,
     /// The editor runs for a host bridge ([`Handover::hosted`]): the viewer is never started.
     hosted: bool,
-    /// The viewer is asking for the document's password ([`Event::PasswordAsked`]).
-    locked: bool,
+    doc: Doc,
+    /// The editor arrived late ([`Reason::TimedOut`]) while the viewer had no open document: it
+    /// takes over once one opens.
+    editor_waiting: bool,
 }
 
 impl Handover {
     /// The machine for a page in `mode`, and what the page does first.
     pub fn start(mode: Mode, can_edit: bool) -> (Handover, Vec<Action>) {
-        let mut machine = Handover { mode, can_edit, phase: Phase::Viewing, viewer_started: false, accepted: false, hosted: false, locked: false };
+        let mut machine = Handover {
+            mode,
+            can_edit,
+            phase: Phase::Viewing,
+            viewer_started: false,
+            accepted: false,
+            hosted: false,
+            doc: Doc::Absent,
+            editor_waiting: false,
+        };
         let actions = match (mode, can_edit) {
             (Mode::EditorFirst, true) => {
                 machine.phase = Phase::LoadingEditor;
@@ -135,11 +169,13 @@ impl Handover {
             // Where the editor used to print that it failed to start, the viewer is mounted.
             (Mode::EditorFirst, false) => {
                 machine.viewer_started = true;
+                machine.doc = Doc::Opening;
                 machine.phase = Phase::ViewerOnly(Reason::NoWebGl);
                 vec![Action::StartViewer, Action::ShowNotice(Reason::NoWebGl)]
             }
             (Mode::ViewOnly | Mode::ViewerFirst, _) => {
                 machine.viewer_started = true;
+                machine.doc = Doc::Opening;
                 vec![Action::StartViewer]
             }
         };
@@ -159,7 +195,8 @@ impl Handover {
             viewer_started: false,
             accepted: false,
             hosted: true,
-            locked: false,
+            doc: Doc::Absent,
+            editor_waiting: false,
         };
         (machine, vec![Action::ShowLoading, Action::LoadEditor])
     }
@@ -168,24 +205,51 @@ impl Handover {
         self.phase
     }
 
+    /// Whether the viewer may open another document now: not once an edit action was taken
+    /// and the editor may be handed the open one.
+    pub fn opens_allowed(&self) -> bool {
+        !matches!(self.phase, Phase::LoadingEditor | Phase::HandingOver | Phase::Editing)
+    }
+
+    /// Whether the viewer has a document open (none is being fetched, opened or asked a
+    /// password for).
+    pub fn document_open(&self) -> bool {
+        self.doc == Doc::Open
+    }
+
+    /// The viewer is still getting its document: nothing is handed to the editor yet.
+    fn locked(&self) -> bool {
+        matches!(self.doc, Doc::Opening | Doc::Password)
+    }
+
     /// Whether the page offers an edit action now.
     pub fn edit_offered(&self) -> bool {
-        self.mode != Mode::ViewOnly && self.phase == Phase::Viewing && !self.locked
+        self.mode != Mode::ViewOnly && self.phase == Phase::Viewing && !self.locked()
     }
 
     /// Take `event`; the actions it calls for, in order. An event that makes no sense in the
     /// current phase (late, repeated, out of order) changes nothing.
     pub fn on(&mut self, event: Event) -> Vec<Action> {
         match (self.phase, event) {
+            (_, Event::DocumentOpening) => {
+                self.doc = Doc::Opening;
+                Vec::new()
+            }
             (_, Event::PasswordAsked) => {
-                self.locked = true;
+                self.doc = Doc::Password;
                 Vec::new()
             }
-            (_, Event::DocumentOpened) => {
-                self.locked = false;
-                Vec::new()
+            // A failure while the password is asked for leaves it asked for.
+            (_, Event::DocumentFailed) if self.doc == Doc::Password => Vec::new(),
+            (_, Event::DocumentOpened | Event::DocumentFailed) => {
+                self.doc = if event == Event::DocumentOpened { Doc::Open } else { Doc::Absent };
+                match (self.editor_waiting, self.phase) {
+                    (true, Phase::LoadingEditor) => self.hand_over(),
+                    (true, Phase::ViewerOnly(Reason::TimedOut)) => self.take_over_late(),
+                    _ => Vec::new(),
+                }
             }
-            (Phase::Viewing, Event::EditRequested) if self.mode == Mode::ViewOnly || self.locked => Vec::new(),
+            (Phase::Viewing, Event::EditRequested) if self.mode == Mode::ViewOnly || self.locked() => Vec::new(),
             (Phase::Viewing, Event::EditRequested) if !self.can_edit => {
                 self.phase = Phase::ViewerOnly(Reason::NoWebGl);
                 vec![Action::ShowNotice(Reason::NoWebGl)]
@@ -194,19 +258,18 @@ impl Handover {
                 self.phase = Phase::LoadingEditor;
                 vec![Action::ShowLoading, Action::LoadEditor]
             }
-            (Phase::LoadingEditor, Event::EditorReady) => {
-                self.phase = Phase::HandingOver;
-                self.accepted = false;
-                vec![Action::HandOver]
+            // The editor is up but the viewer has no open document to give it (the page opens
+            // none while the editor loads, so this is only a guard): it waits for one.
+            (Phase::LoadingEditor | Phase::ViewerOnly(Reason::TimedOut), Event::EditorReady) if self.locked() => {
+                self.editor_waiting = true;
+                Vec::new()
             }
+            (Phase::LoadingEditor, Event::EditorReady) => self.hand_over(),
             // The wait ran out but the download did not fail: the editor still starts when it
             // arrives, and once its files are fetched nothing can stop it. So it takes over, as
-            // it would have on time, instead of running unseen under the viewer.
-            (Phase::ViewerOnly(Reason::TimedOut), Event::EditorReady) => {
-                self.phase = Phase::HandingOver;
-                self.accepted = false;
-                vec![Action::HideNotice, Action::ShowLoading, Action::HandOver]
-            }
+            // it would have on time, instead of running unseen under the viewer: once the viewer
+            // has a document to give it (above).
+            (Phase::ViewerOnly(Reason::TimedOut), Event::EditorReady) => self.take_over_late(),
             (Phase::HandingOver, Event::DocumentAccepted) if !self.accepted => {
                 self.accepted = true;
                 vec![Action::AwaitPaint]
@@ -223,12 +286,26 @@ impl Handover {
         }
     }
 
+    fn hand_over(&mut self) -> Vec<Action> {
+        self.phase = Phase::HandingOver;
+        self.accepted = false;
+        self.editor_waiting = false;
+        vec![Action::HandOver]
+    }
+
+    fn take_over_late(&mut self) -> Vec<Action> {
+        let mut actions = vec![Action::HideNotice, Action::ShowLoading];
+        actions.extend(self.hand_over());
+        actions
+    }
+
     /// The editor did not take over: keep (or start) the viewer and say why.
     fn fail(&mut self, reason: Reason) -> Vec<Action> {
         self.phase = Phase::ViewerOnly(reason);
         let mut actions = vec![Action::HideLoading];
         if !self.viewer_started && !self.hosted {
             self.viewer_started = true;
+            self.doc = Doc::Opening;
             actions.push(Action::StartViewer);
         }
         actions.push(Action::ShowNotice(reason));

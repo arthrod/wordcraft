@@ -14,17 +14,32 @@
 
 use std::path::{Path, PathBuf};
 
+/// `html` with every `<!-- ... -->` comment removed (an unterminated comment runs to the end).
+pub(crate) fn without_comments(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(start) = rest.find("<!--") {
+        out.push_str(rest.get(..start).unwrap_or_default());
+        let after = rest.get(start..).unwrap_or_default();
+        rest = after.find("-->").and_then(|end| after.get(end.saturating_add(3)..)).unwrap_or_default();
+    }
+    out.push_str(rest);
+    out
+}
+
 /// The glue module the page's inline bootstrap imports (`import init, * as bindings from
-/// './NAME.js'`), as a path relative to the page.
-fn main_glue(html: &str) -> Option<&str> {
-    let at = html.find("import init")?;
-    let rest = html.get(at..)?;
+/// './NAME.js'`), as a path relative to the page. Comments are skipped: the page's own notes
+/// quote the editor's `import init from './wordcraft-web.js'`, which is not the bootstrap.
+fn main_glue(html: &str) -> Option<String> {
+    let live = without_comments(html);
+    let at = live.find("import init")?;
+    let rest = live.get(at..)?;
     let from = rest.find(" from ")?;
-    let quoted = rest.get(from + " from ".len()..)?.trim_start();
+    let quoted = rest.get(from.saturating_add(" from ".len())..)?.trim_start();
     let quote = quoted.chars().next().filter(|c| *c == '\'' || *c == '"')?;
     let inner = quoted.get(1..)?;
     let end = inner.find(quote)?;
-    inner.get(..end).map(|p| p.trim_start_matches("./"))
+    inner.get(..end).map(|p| p.trim_start_matches("./").to_string())
 }
 
 /// `html` without the `<link rel="modulepreload" href="./snippets/…">` tags whose file the main
@@ -75,7 +90,7 @@ fn fix_dir(dir: &Path) -> Result<(), String> {
     let index = dir.join("index.html");
     let html = std::fs::read_to_string(&index).map_err(|e| format!("{}: {e}", index.display()))?;
     let glue_name = main_glue(&html).ok_or_else(|| format!("{}: no `import init … from './….js'` bootstrap", index.display()))?;
-    let glue_path = dir.join(glue_name);
+    let glue_path = dir.join(&glue_name);
     let glue = std::fs::read_to_string(&glue_path).map_err(|e| format!("{}: {e}", glue_path.display()))?;
     let (fixed, dropped) = drop_foreign_snippet_preloads(&html, &glue);
     if dropped.is_empty() {
@@ -102,10 +117,22 @@ mod tests {
 
     #[test]
     fn the_bootstrap_names_the_main_glue() {
-        assert_eq!(main_glue(PAGE), Some("wordcraft-viewer-web-94897d8b7e46a69.js"));
-        assert_eq!(main_glue("<script>import init from \"./a.js\";</script>"), Some("a.js"));
+        assert_eq!(main_glue(PAGE).as_deref(), Some("wordcraft-viewer-web-94897d8b7e46a69.js"));
+        assert_eq!(main_glue("<script>import init from \"./a.js\";</script>").as_deref(), Some("a.js"));
         assert_eq!(main_glue("<html></html>"), None);
         assert_eq!(main_glue("import init from x"), None);
+    }
+
+    #[test]
+    fn an_import_quoted_in_a_comment_is_not_the_bootstrap() {
+        // The page's notes quote the editor's loader. Wherever that comment sits, the bootstrap
+        // is the one in the script.
+        let before = "<!-- the loader: `import init from './wordcraft-web.js'; await init();` -->\n<script type=\"module\">import init from './page-1.js';</script>";
+        assert_eq!(main_glue(before).as_deref(), Some("page-1.js"));
+        let only = "<!-- import init from './wordcraft-web.js' -->";
+        assert_eq!(main_glue(only), None);
+        let open = "<script type=\"module\">import init from './page-1.js';</script><!-- import init from './x.js'";
+        assert_eq!(main_glue(open).as_deref(), Some("page-1.js"));
     }
 
     #[test]

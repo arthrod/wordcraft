@@ -25,6 +25,7 @@ use wasm_bindgen::closure::Closure;
 use wordcraft_worker_proto as proto;
 
 use crate::cache::{Arrival, PageCache, PageKey};
+use crate::download;
 use crate::handover::{self, Action, Event, Handover, Phase, Reason};
 use crate::mode::Mode;
 use crate::pages::{self, Sheet};
@@ -48,9 +49,14 @@ const EDITOR_START_FAILURE: &str = "WordCraft failed to start";
 const SAMPLE_FILE: &str = "samples/welcome.docx";
 /// This module's own page API object.
 const VIEWER_GLOBAL: &str = "wordcraftViewer";
+/// What the reader is told about a document past the viewer's limit, from its declared length
+/// or its bytes.
+const TOO_LARGE: &str = "The document is too large for this viewer.";
 /// Pixels kept in painted pages outside the window, in bytes of RGBA.
 const CACHE_BUDGET_BYTES: u64 = 192 << 20;
-/// Where the document comes from.
+/// Where the document comes from. Kept after the viewer reads it: if the viewer fails, the
+/// editor fetches it again.
+#[derive(Clone)]
 enum Source {
     /// Nothing was given: the viewer shows the built-in sample, the editor what it shows by
     /// itself.
@@ -78,6 +84,9 @@ struct State {
     cache: PageCache,
     /// Counts documents and layouts: a reply made for an earlier one is dropped.
     generation: u32,
+    /// Counts documents sent to the worker: a font's new layout made for an earlier one is
+    /// dropped (a layout bumps `generation` too, so that cannot tell them apart).
+    opens: u32,
     canvases: HashMap<u32, PageCanvas>,
     missing_fonts: Vec<String>,
     refresh_queued: bool,
@@ -284,6 +293,7 @@ fn launch(options: &JsValue, auto: bool) -> Result<JsValue, JsValue> {
             sheet: pages::lay_out(&[], 1.0),
             cache: PageCache::new(CACHE_BUDGET_BYTES),
             generation: 0,
+            opens: 0,
             canvases: HashMap::new(),
             missing_fonts: Vec::new(),
             refresh_queued: false,
@@ -546,6 +556,23 @@ fn show_error(page: &Page, code: &str, text: &str) {
     }
 }
 
+/// The viewer failed for good (its worker, the download, or the file): say so, and offer the
+/// editor, which fetches the document itself. A password asked for is not this
+/// ([`ask_password`]).
+fn document_failed(page: &Rc<Page>, code: &str, text: &str) {
+    show_error(page, code, text);
+    dispatch(page, Event::DocumentFailed);
+}
+
+/// Bytes refused before they were sent to the worker: a document already open stays open.
+fn refused(page: &Rc<Page>, text: &str) {
+    if page.state.borrow().handover.document_open() {
+        show_error(page, "document-failed", text);
+    } else {
+        document_failed(page, "document-failed", text);
+    }
+}
+
 fn remove_skeleton(page: &Page) {
     if let Some(skeleton) = page.document.get_element_by_id(SKELETON_ID) {
         skeleton.remove();
@@ -558,13 +585,13 @@ fn start_viewer(page: &Rc<Page>) {
     let failed = page.clone();
     let started = ViewerWorker::start(&page.asset_base, move |why| {
         web_sys::console::warn_1(&format!("wordcraft viewer: {why}").into());
-        show_error(&failed, "viewer-failed", "The document viewer could not start in this browser.");
+        document_failed(&failed, "viewer-failed", "The document viewer could not start in this browser.");
     });
     match started {
         Ok(worker) => page.state.borrow_mut().worker = Some(worker),
         Err(why) => {
             web_sys::console::warn_1(&format!("wordcraft viewer: {why}").into());
-            show_error(page, "viewer-failed", "The document viewer could not start in this browser.");
+            document_failed(page, "viewer-failed", "The document viewer could not start in this browser.");
             return;
         }
     }
@@ -576,7 +603,7 @@ fn start_viewer(page: &Rc<Page>) {
                 open_document(&page, bytes, password);
             }
             Ok(None) => {}
-            Err(why) => show_error(&page, "document-failed", &why),
+            Err(why) => document_failed(&page, "document-failed", &why),
         }
     });
 }
@@ -585,11 +612,11 @@ fn start_viewer(page: &Rc<Page>) {
 /// nothing said, the viewer gets the built-in sample and the editor gets nothing.
 async fn document_bytes(page: &Rc<Page>, for_viewer: bool) -> Result<Option<js_sys::Uint8Array>, String> {
     let source = {
-        let mut state = page.state.borrow_mut();
+        let state = page.state.borrow();
         if let Some(docx) = &state.docx {
             return Ok(Some(docx.clone()));
         }
-        std::mem::replace(&mut state.source, Source::Unset)
+        state.source.clone()
     };
     let bytes = match source {
         Source::Bytes(bytes) => bytes,
@@ -615,6 +642,11 @@ async fn fetch_same_origin(page: &Rc<Page>, url: &str) -> Result<js_sys::Uint8Ar
     if !response.ok() {
         return Err(failed());
     }
+    // Refused before the body is read when its declared length is past the limit; without a
+    // `Content-Length` the body is read and `open_document` judges its size.
+    if download::declared_too_large(response.headers().get("content-length").ok().flatten().as_deref()) {
+        return Err(TOO_LARGE.to_string());
+    }
     let buffer = wasm_bindgen_futures::JsFuture::from(response.array_buffer().map_err(|_| failed())?).await.map_err(|_| failed())?;
     Ok(js_sys::Uint8Array::new(&buffer))
 }
@@ -625,8 +657,8 @@ fn open_document(page: &Rc<Page>, bytes: js_sys::Uint8Array, password: Option<St
     let length = bytes.length();
     let prefix = match proto::view_open_request_prefix(password.as_deref(), length as usize) {
         Ok(prefix) => prefix,
-        Err(proto::ProtoError::TooLarge { .. }) => return show_error(page, "document-failed", "The document is too large for this viewer."),
-        Err(_) => return show_error(page, "document-failed", "The document is empty."),
+        Err(proto::ProtoError::TooLarge { .. }) => return refused(page, TOO_LARGE),
+        Err(_) => return refused(page, "The document is empty."),
     };
     let Ok(prefix_len) = u32::try_from(prefix.len()) else { return };
     let Some(total) = prefix_len.checked_add(length) else { return };
@@ -639,9 +671,12 @@ fn open_document(page: &Rc<Page>, bytes: js_sys::Uint8Array, password: Option<St
         let mut state = page.state.borrow_mut();
         state.docx = Some(bytes);
         state.password = password;
+        state.opens = state.opens.wrapping_add(1);
         state.generation
     };
     drop(stale);
+    // Until it opens, no edit action: the editor would be handed bytes the viewer has not read.
+    dispatch(page, Event::DocumentOpening);
     let sink_page = page.clone();
     let sent = page
         .state
@@ -650,7 +685,7 @@ fn open_document(page: &Rc<Page>, bytes: js_sys::Uint8Array, password: Option<St
         .as_ref()
         .map(|w| w.request(proto::Kind::ViewOpen, frame, Box::new(move |env, payload| on_opened(&sink_page, generation, env, payload))));
     if !matches!(sent, Some(Ok(_))) {
-        show_error(page, "viewer-failed", "The document viewer could not start in this browser.");
+        document_failed(page, "viewer-failed", "The document viewer could not start in this browser.");
     }
 }
 
@@ -674,15 +709,15 @@ fn on_opened(page: &Rc<Page>, generation: u32, env: &proto::Envelope, payload: &
     if env.kind == proto::Kind::ViewOpened {
         return match worker::small_payload(payload).and_then(|b| proto::decode_payload::<proto::ViewOpenedReply>(&b).ok()) {
             Some(opened) if proto::view_opened_reply_error(&opened).is_none() => apply_opened(page, opened),
-            _ => show_error(page, "viewer-failed", "The document viewer answered with something unreadable."),
+            _ => document_failed(page, "viewer-failed", "The document viewer answered with something unreadable."),
         };
     }
     let reply = worker::error_reply(payload);
     match reply.code {
         proto::ErrorCode::PasswordRequired => ask_password(page, "password-required", "This document is protected with a password."),
         proto::ErrorCode::WrongPassword => ask_password(page, "wrong-password", "That password does not open this document."),
-        proto::ErrorCode::TooLarge => show_error(page, "document-failed", "The document is too large for this viewer."),
-        _ => show_error(page, "document-failed", "This file is not a Word document this viewer can read."),
+        proto::ErrorCode::TooLarge => document_failed(page, "document-failed", TOO_LARGE),
+        _ => document_failed(page, "document-failed", "This file is not a Word document this viewer can read."),
     }
 }
 
@@ -825,14 +860,13 @@ fn schedule_refresh(page: &Rc<Page>) {
 }
 
 /// The pages in the window, the ones the reader sees first, then the half window above and
-/// below.
-fn wanted_pages(page: &Page, sheet: &Sheet) -> Vec<u32> {
-    let top = f64::from(page.scroller.scroll_top());
-    let height = f64::from(page.scroller.client_height());
-    let seen = pages::visible(sheet, top, height, 0.0);
-    let near = pages::visible(sheet, top, height, height / 2.0);
-    let index = |i: usize| u32::try_from(i).ok();
-    seen.clone().chain(near.filter(|i| !seen.contains(i))).filter_map(index).collect()
+/// below; at most [`pages::MAX_MOUNTED_PAGES`].
+fn wanted_pages(page: &Page, sheet: &Sheet) -> pages::Wanted {
+    pages::wanted(sheet, f64::from(page.scroller.scroll_top()), f64::from(page.scroller.client_height()))
+}
+
+fn page_indices(wanted: &pages::Wanted) -> Vec<u32> {
+    wanted.order().filter_map(|i| u32::try_from(i).ok()).collect()
 }
 
 /// Ask the worker for the pages the window shows and does not have, and release the canvases
@@ -844,7 +878,8 @@ fn refresh(page: &Rc<Page>) {
         return;
     }
     let ratio = page.window.device_pixel_ratio();
-    let near = wanted_pages(page, &state.sheet);
+    let around = wanted_pages(page, &state.sheet);
+    let near = page_indices(&around);
     let mut wanted = Vec::with_capacity(near.len());
     for index in &near {
         let (Some(size), Some(at)) = (state.sizes.get(*index as usize), state.sheet.pages.get(*index as usize)) else { continue };
@@ -860,7 +895,7 @@ fn refresh(page: &Rc<Page>) {
     }
     let cache = &state.cache;
     state.canvases.retain(|index, canvas| {
-        let keep = near.contains(index) || cache.painted(*index).is_some();
+        let keep = around.contains(*index as usize) || cache.painted(*index).is_some();
         if !keep {
             canvas.el.remove();
         }
@@ -911,7 +946,7 @@ fn on_page(page: &Rc<Page>, generation: u32, key: PageKey, env: &proto::Envelope
                 false
             }
             Some(header) => {
-                let keep = wanted_pages(page, &state.sheet);
+                let keep = page_indices(&wanted_pages(page, &state.sheet));
                 let pixels = payload.length().saturating_sub(proto::VIEW_PAGE_TRAILER_BYTES as u32);
                 match state.cache.arrived(key, u64::from(pixels), &keep) {
                     Arrival::Stale => false,
@@ -1220,6 +1255,10 @@ fn build_api(page: &Rc<Page>) -> js_sys::Object {
         if p.state.borrow().worker.is_none() {
             return js_sys::Promise::reject(&js_error("the viewer is not running"));
         }
+        // An edit action was taken: the editor is handed the document open now, not this one.
+        if !p.state.borrow().handover.opens_allowed() {
+            return js_sys::Promise::reject(&js_error("the editor is taking over the page"));
+        }
         let page = p.clone();
         js_sys::Promise::new(&mut |resolve, reject| {
             page.state.borrow_mut().open_waiters.push((resolve, reject));
@@ -1251,6 +1290,7 @@ fn install_font(page: &Rc<Page>, name: &JsValue, bytes: &JsValue) -> js_sys::Pro
         Err(e) => return js_sys::Promise::reject(&js_error(&format!("installFont: {e}"))),
     };
     let page = page.clone();
+    let opens = page.state.borrow().opens;
     js_sys::Promise::new(&mut |resolve, reject| {
         let sink_page = page.clone();
         let failed = reject.clone();
@@ -1261,7 +1301,14 @@ fn install_font(page: &Rc<Page>, name: &JsValue, bytes: &JsValue) -> js_sys::Pro
                 Box::new(move |env, payload| match env.kind {
                     proto::Kind::ViewOpened => {
                         let opened = worker::small_payload(payload).and_then(|b| proto::decode_payload::<proto::ViewOpenedReply>(&b).ok());
-                        if let Some(opened) = opened.filter(|o| proto::view_opened_reply_error(o).is_none()) {
+                        // The layout is of the document the worker held when the font arrived:
+                        // shown only if that is still the open one (no later open, none pending
+                        // or refused), so a newer open is never dropped as stale.
+                        let current = {
+                            let state = sink_page.state.borrow();
+                            state.opens == opens && state.handover.document_open()
+                        };
+                        if let Some(opened) = opened.filter(|o| current && proto::view_opened_reply_error(o).is_none()) {
                             // Every painted page was laid out with the old fonts.
                             drop(forget_pages(&sink_page));
                             apply_opened(&sink_page, opened);
