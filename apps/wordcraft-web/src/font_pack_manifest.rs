@@ -76,6 +76,18 @@ pub(crate) fn entries_for_families<'a>(manifest: &'a [ManifestEntry], families: 
     if families.is_empty() { manifest.iter().collect() } else { families.iter().flat_map(|f| entries_for_family(manifest, f)).collect() }
 }
 
+/// Whether an `installFonts` waiter records `file`'s outcome as the file settles. The
+/// settle-all waiter (`installFonts()`, no families — the wait layout needs) waits out every
+/// download, so it records each completed file, automatic ones included; a family waiter
+/// records only its families' files, and nothing before the manifest has said which files
+/// those are.
+pub(crate) fn waiter_records_file(families: Option<&[String]>, manifest: Option<&[ManifestEntry]>, file: &str) -> bool {
+    match families {
+        None => true,
+        Some(families) => manifest.is_some_and(|m| entries_for_families(m, families).iter().any(|e| e.file == file)),
+    }
+}
+
 /// The (weight, italic) bucket an installed face's style name means, used to tell whether the
 /// face a manifest entry names is already loaded. Style names come from the font's `name` table
 /// ("Regular", "Italic", "Semibold", "Bold Italic", …).
@@ -159,6 +171,27 @@ mod tests {
         assert_eq!(entries_for_families(&m, &[]).len(), 3);
         assert_eq!(entries_for_families(&m, &["inter".to_string()]).len(), 2);
         assert_eq!(entries_for_families(&m, &["lora".to_string(), "missing".to_string()]).len(), 1);
+    }
+
+    #[test]
+    fn settle_all_waiters_record_every_file_family_waiters_only_their_own() {
+        let m = parse_manifest(
+            r#"{"faces":[
+              {"family":"Inter","weight":400,"italic":false,"file":"inter-regular.ttf.br","bytes":10},
+              {"family":"Lora","weight":400,"italic":true,"file":"lora-italic.ttf.br","bytes":10}
+            ]}"#,
+        )
+        .unwrap();
+        let inter = vec!["Inter".to_string()];
+        // A family waiter records its families' files only.
+        assert!(waiter_records_file(Some(&inter), Some(&m), "inter-regular.ttf.br"));
+        assert!(!waiter_records_file(Some(&inter), Some(&m), "lora-italic.ttf.br"));
+        // And nothing before the manifest said which files those are.
+        assert!(!waiter_records_file(Some(&inter), None, "inter-regular.ttf.br"));
+        // The settle-all waiter (`installFonts()`) waited out every download — an automatic
+        // one included — so it records each completed file, manifest or not.
+        assert!(waiter_records_file(None, Some(&m), "lora-italic.ttf.br"));
+        assert!(waiter_records_file(None, None, "any-face.ttf.br"));
     }
 
     #[test]

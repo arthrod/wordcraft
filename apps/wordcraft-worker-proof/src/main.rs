@@ -107,6 +107,8 @@ fn configure(payload: &[u8]) -> Result<(Kind, Vec<u8>), (ErrorCode, String)> {
         return error(ErrorCode::TooLarge, format!("{words} dictionary words in one configure message"));
     }
     // `None` keeps the current options; `Some(ProofOptions::default())` resets to Word's.
+    // Applied only once every word validated: a rejected configure must not change the options
+    // later checks run under either.
     if let Some(opts) = cfg.options {
         CONFIGURED_OPTIONS.with(|o| o.set(Some(opts)));
     }

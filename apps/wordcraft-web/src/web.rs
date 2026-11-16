@@ -269,12 +269,7 @@ pub fn start(options: wasm_bindgen::JsValue) -> js_sys::Promise {
 }
 
 fn launch_with_config(config: StartConfig) -> js_sys::Promise {
-    if let Some(existing) = STARTED_CANVASES.with(|list| {
-        list.borrow()
-            .iter()
-            .find(|(existing_canvas, _)| js_sys::Object::is(existing_canvas.as_ref(), config.canvas.as_ref()))
-            .map(|(_, prom)| prom.clone())
-    }) {
+    if let Some(existing) = STARTED_CANVASES.with(|book| book.borrow().find(&config.canvas, same_canvas)) {
         return existing;
     }
 
@@ -434,8 +429,8 @@ fn launch_with_config(config: StartConfig) -> js_sys::Promise {
         }
     });
 
-    STARTED_CANVASES.with(|list| {
-        list.borrow_mut().push((canvas_key, promise.clone()));
+    STARTED_CANVASES.with(|book| {
+        book.borrow_mut().register(canvas_key, promise.clone());
     });
     promise
 }
@@ -466,9 +461,7 @@ fn label_ime_input(canvas: &web_sys::HtmlCanvasElement) {
 }
 
 fn remove_started_canvas(canvas: &web_sys::HtmlCanvasElement) {
-    STARTED_CANVASES.with(|list| {
-        list.borrow_mut().retain(|(existing, _)| !js_sys::Object::is(existing.as_ref(), canvas.as_ref()));
-    });
+    STARTED_CANVASES.with(|book| book.borrow_mut().remove(canvas, same_canvas));
 }
 
 fn query() -> String {

@@ -86,6 +86,32 @@ thread_local! {
     });
 }
 
+/// A hash of every effective input of a worker check of `p`: the text (with the raw
+/// tracked-deletion marks that `wordcraft_layout::para::proof_text` turns into U+0001
+/// placeholders), each run's language and unchecked flag as the styles resolve them at call
+/// time (so style edits count too), and the list-item flag — everything
+/// `wordcraft_layout::para::check_parts` feeds the worker. The text alone is not a freshness
+/// key: `review.language`, "Do not check spelling" or list membership change the check without
+/// changing the text, and the scan must send those again rather than keep the old check's
+/// spans forever. Hashing the resolved runs instead of rebuilding the parts keeps the
+/// per-frame cost near the text compare it replaces.
+fn check_key(doc: &wordcraft_doc::Document, p: &wordcraft_doc::Paragraph) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    p.text.hash(&mut h);
+    for r in wordcraft_layout::para::proof_runs(doc, p, None) {
+        (r.range.start, r.range.end).hash(&mut h);
+        r.lang.tag().hash(&mut h);
+        r.skip.hash(&mut h);
+    }
+    for r in &p.runs {
+        (r.len, r.props.del.is_some()).hash(&mut h);
+    }
+    p.mark.del.is_some().hash(&mut h);
+    wordcraft_layout::para::is_list_item(doc, p).hash(&mut h);
+    h.finish()
+}
+
 /// One frame: apply what arrived, then send what changed. `session.doc` is only read.
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn tick(session: &wordcraft_engine::Session, asset_base: &str, ctx: &Context) {
@@ -94,12 +120,12 @@ pub(crate) fn tick(session: &wordcraft_engine::Session, asset_base: &str, ctx: &
     }
     let (applied, sends) = pump(session);
     // Send outside the borrow: the reply closures push into the same scheduler.
-    for (id, req, story, path, text) in sends {
+    for (id, req, story, path, checked_key) in sends {
         let key = (story, path.clone());
         let sent = crate::web::proof_worker::with(|w| {
             w.check(&req, move |reply| {
                 SCHED.with(|s| {
-                    s.borrow_mut().replies.push(Apply { id, story, path, checked_text: text, reply });
+                    s.borrow_mut().replies.push(Apply { id, story, path, checked_key, reply });
                 });
             })
         });
@@ -123,10 +149,10 @@ pub(crate) fn tick(session: &wordcraft_engine::Session, asset_base: &str, ctx: &
 /// The scheduler half of a frame, split from the worker send so tests can drive it without a
 /// browser: apply arrived replies, refresh the paragraph list on its interval, and collect the
 /// checks worth sending. Returns whether a reply applied (the caller repaints) and the
-/// `(id, request, story, path, checked text)` sends to post.
-fn pump(session: &wordcraft_engine::Session) -> (bool, Vec<(u32, proto::CheckRequest, StoryRef, Path, String)>) {
+/// `(id, request, story, path, checked-input hash)` sends to post.
+fn pump(session: &wordcraft_engine::Session) -> (bool, Vec<(u32, proto::CheckRequest, StoryRef, Path, u64)>) {
     let mut applied = false;
-    let mut sends: Vec<(u32, proto::CheckRequest, StoryRef, Path, String)> = Vec::new();
+    let mut sends: Vec<(u32, proto::CheckRequest, StoryRef, Path, u64)> = Vec::new();
     SCHED.with(|s| {
         let mut s = s.borrow_mut();
         s.ticks = s.ticks.wrapping_add(1);
@@ -143,14 +169,14 @@ fn pump(session: &wordcraft_engine::Session) -> (bool, Vec<(u32, proto::CheckReq
                 }
                 Err(_) => Vec::new(),
             };
-            if session.doc.para(apply.story, &apply.path).is_some_and(|p| p.text == apply.checked_text) {
+            if session.doc.para(apply.story, &apply.path).is_some_and(|p| check_key(&session.doc, p) == apply.checked_key) {
                 wordcraft_layout::proof_overlay::set_overlay(apply.story, apply.path, spans);
                 applied = true;
             } else {
-                // Changed since it was checked: the reply's offsets are for another text.
-                // The next scan re-checks it; remove any stale overlay AND the remembered
-                // check, so text an undo restores is sent again instead of matching the
-                // stale entry and never being checked.
+                // Changed since it was checked (text, language, skips): the reply's spans
+                // are for another check. The next scan re-checks it; remove any stale
+                // overlay AND the remembered check, so text an undo restores is sent again
+                // instead of matching the stale entry and never being checked.
                 wordcraft_layout::proof_overlay::set_overlay(apply.story, apply.path, std::iter::empty::<wordcraft_layout::proof_overlay::Span>());
                 s.tracked.remove(&key);
             }
@@ -177,9 +203,10 @@ fn pump(session: &wordcraft_engine::Session) -> (bool, Vec<(u32, proto::CheckReq
             let path = s.paths[s.scan].clone();
             s.scan = (s.scan + 1) % s.paths.len();
             let Some(p) = session.doc.para(StoryRef::Body, &path) else { continue };
+            let input = check_key(&session.doc, p);
             let fresh = match s.tracked.get(&(StoryRef::Body, path.clone())) {
-                // A reply is still due for this text; don't send it twice.
-                Some(t) => !t.pending && t.text != p.text,
+                // A reply is still due for these inputs; don't send it twice.
+                Some(t) => !t.pending && t.key != input,
                 None => true,
             };
             if !fresh || window == 0 {
@@ -187,12 +214,24 @@ fn pump(session: &wordcraft_engine::Session) -> (bool, Vec<(u32, proto::CheckReq
             }
             window -= 1;
             if s.tracked.len() >= MAX_TRACKED && !s.tracked.contains_key(&(StoryRef::Body, path.clone())) {
-                continue;
+                // The window is full. Admit this paragraph by evicting one completed entry:
+                // refusing new ones would leave paragraphs past the cap never checked, the
+                // scan stopping at the cap forever. Pending entries are kept (their replies
+                // are due); if every entry is pending there is nothing to evict and a later
+                // tick retries. An evicted paragraph is simply re-checked when the scan
+                // reaches it again; its overlay, if any, lives in `proof_overlay`, untouched.
+                let evicted = s.tracked.iter().find(|(_, t)| !t.pending).map(|(k, _)| k.clone());
+                match evicted {
+                    Some(evicted) => {
+                        s.tracked.remove(&evicted);
+                    }
+                    None => continue,
+                }
             }
             let Some((text, spans, skip, list_item)) = wordcraft_layout::para::check_parts(&session.doc, p) else {
                 // Nothing to check (empty or past the protocol's bound): remember it so the
                 // scan doesn't rebuild the parts every frame.
-                s.tracked.insert((StoryRef::Body, path), Tracked { text: p.text.clone(), pending: false });
+                s.tracked.insert((StoryRef::Body, path), Tracked { key: input, pending: false });
                 continue;
             };
             static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
@@ -209,8 +248,8 @@ fn pump(session: &wordcraft_engine::Session) -> (bool, Vec<(u32, proto::CheckReq
                 list_item,
             };
             s.ids.insert(id, (StoryRef::Body, path.clone()));
-            s.tracked.insert((StoryRef::Body, path.clone()), Tracked { text: p.text.clone(), pending: true });
-            sends.push((id, req, StoryRef::Body, path, p.text.clone()));
+            s.tracked.insert((StoryRef::Body, path.clone()), Tracked { key: input, pending: true });
+            sends.push((id, req, StoryRef::Body, path, input));
         }
     });
     (applied, sends)
@@ -324,7 +363,11 @@ mod tests {
         }
         assert_eq!(sent.len(), 1);
         let (id, _, _, path, checked) = sent.remove(0);
-        assert_eq!(checked, "aaa");
+        assert_eq!(
+            checked,
+            check_key(&session.doc, session.doc.para(StoryRef::Body, &path).unwrap()),
+            "the send carries the paragraph's check-input hash"
+        );
         // Edit to "bbb" through the command layer so Undo can restore "aaa".
         session.run("select.all", &serde_json::json!({})).unwrap();
         session.run("text.insert", &serde_json::json!({"text": "bbb"})).unwrap();
@@ -337,7 +380,7 @@ mod tests {
                 id,
                 story: StoryRef::Body,
                 path: path.clone(),
-                checked_text: "aaa".to_string(),
+                checked_key: checked,
                 reply: Ok(proto::CheckReply { para_id: id as u64, issues: Vec::new() }),
             });
         });
@@ -347,7 +390,90 @@ mod tests {
         session.run("edit.undo", &serde_json::json!({})).unwrap();
         assert_eq!(session.doc.para(StoryRef::Body, &path).unwrap().text, "aaa");
         SCHED.with(|s| s.borrow_mut().ticks = PATHS_REFRESH - 1);
-        let (_, sends) = pump(&session);
-        assert!(sends.iter().any(|(_, _, _, _, text)| text == "aaa"), "the restored text was not re-checked");
+    /// Pumps until the single-paragraph document's check is sent, queues a clean reply for it
+    /// and pumps once more to apply it, leaving the tracked entry complete (not pending).
+    /// Returns the paragraph's path and the request that went out.
+    fn check_and_answer(session: &wordcraft_engine::Session) -> (Path, proto::CheckRequest) {
+        let mut sent = None;
+        for _ in 0..(PATHS_REFRESH as usize + 8) {
+            let (_, sends) = pump(session);
+            if let Some((id, req, story, path, checked_key)) = sends.into_iter().next() {
+                SCHED.with(|s| {
+                    s.borrow_mut().replies.push(Apply {
+                        id,
+                        story,
+                        path: path.clone(),
+                        checked_key,
+                        reply: Ok(proto::CheckReply { para_id: id as u64, issues: Vec::new() }),
+                    });
+                });
+                sent = Some((path, req));
+                break;
+            }
+        }
+        let (path, req) = sent.expect("a check was sent");
+        pump(session); // Apply the reply: the entry completes before the caller proceeds.
+        (path, req)
+    }
+
+    /// A same-text proofing change must re-check the paragraph: the remembered entry is keyed
+    /// on every effective check input, not just the text, so setting the run's language
+    /// (`review.language`) or "Do not check spelling" sends the worker the new language spans
+    /// and unchecked ranges instead of keeping the first reply's forever.
+    #[test]
+    fn same_text_proofing_changes_recheck() {
+        let mut session = wordcraft_engine::Session::new(Document::from_text("hello world"));
+        let (path, first) = check_and_answer(&session);
+        assert!(first.spans.iter().all(|s| s.tag != "fr-FR"));
+        // Same text, new language on the whole paragraph.
+        session.run("select.all", &serde_json::json!({})).unwrap();
+        session.run("review.language", &serde_json::json!({"lang": "fr-FR"})).unwrap();
+        assert_eq!(session.doc.para(StoryRef::Body, &path).unwrap().text, "hello world", "the fixture must not change the text");
+        let (_, second) = check_and_answer(&session);
+        assert!(second.spans.iter().any(|s| s.tag == "fr-FR"), "the re-check carried the new language");
+        // Same text again, now also left unchecked: the re-check carries the range.
+        session.run("select.all", &serde_json::json!({})).unwrap();
+        session.run("review.language", &serde_json::json!({"lang": "fr-FR", "noProof": true})).unwrap();
+        assert_eq!(session.doc.para(StoryRef::Body, &path).unwrap().text, "hello world");
+        let (_, third) = check_and_answer(&session);
+        assert!(
+            third.skip.len() == 1 && third.skip[0].start == 0 && third.skip[0].end == 11,
+            "the re-check carried the unchecked range, got {:?}",
+            third.skip
+        );
+    }
+
+    /// Paragraphs past [`MAX_TRACKED`] still get checked: when the window is full, completed
+    /// entries are evicted to admit new ones, so the round-robin scan reaches the end of a
+    /// longer document instead of stopping at the cap forever.
+    #[test]
+    fn paragraphs_past_the_cap_still_get_checked() {
+        let n = MAX_TRACKED + 8;
+        let text = (0..n).map(|i| format!("word{i}")).collect::<Vec<_>>().join("\n");
+        let session = wordcraft_engine::Session::new(Document::from_text(&text));
+        let last = format!("word{}", n - 1);
+        let mut saw_last = false;
+        for _ in 0..(PATHS_REFRESH as usize * 2 + n / SCAN_PER_TICK + 16) {
+            let (_, sends) = pump(&session);
+            SCHED.with(|s| assert!(s.borrow().tracked.len() <= MAX_TRACKED));
+            if sends.iter().any(|(_, req, _, _, _)| req.text == last) {
+                saw_last = true;
+                break;
+            }
+            // Answer every check (an empty reply): ids free up and the entries complete, so
+            // later paragraphs can evict them and enter the window.
+            SCHED.with(|s| {
+                for (id, _, story, path, checked_key) in sends {
+                    s.borrow_mut().replies.push(Apply {
+                        id,
+                        story,
+                        path,
+                        checked_key,
+                        reply: Ok(proto::CheckReply { para_id: id as u64, issues: Vec::new() }),
+                    });
+                }
+            });
+        }
+        assert!(saw_last, "the paragraph past the cap was never checked");
     }
 }

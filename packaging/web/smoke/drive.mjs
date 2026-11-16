@@ -123,14 +123,26 @@ function parseArgs(argv) {
   return args;
 }
 
+// The exact main wasm URL the deliberate zero-config attempt tried, as the page
+// recorded it in `autoError` ("… fetching 'http://…/wordcraft-web_bg.wasm'"),
+// or null when the attempt's error names no URL. The main wasm's name is
+// distinct from the worker modules' (`wordcraft-worker-*_bg.wasm`), which a
+// substring match on "_bg.wasm" would wrongly swallow.
+export function autoWasmUrl(smoke) {
+  const m = /https?:\/\/[^\s'"]*wordcraft-web_bg\.wasm/.exec(smoke?.autoError ?? "");
+  return m ? m[0] : null;
+}
+
 // Errors caused by the deliberate zero-config wasm attempt are expected
 // exactly when wasmAuto is false; everything else counts. Suppression requires
-// the error to identify the failed wasm URL (`*_bg.wasm`) — a generic "404"
-// text match would hide unrelated resource failures. There is deliberately no
-// time bound: console delivery to Node can lag the page-side attempt, and a
-// bound would turn a delayed expected miss into a false error.
+// the error to identify that attempt's exact wasm URL (its `url`, or error
+// text naming it) — worker-module wasm misses and unrelated resource failures
+// stay real errors. There is deliberately no time bound: console delivery to
+// Node can lag the page-side attempt, and a bound would turn a delayed
+// expected miss into a false error.
 export function isExpectedWasmMiss(smoke, e) {
-  return smoke?.wasmAuto === false && (e.url?.includes("_bg.wasm") || e.text?.includes("_bg.wasm"));
+  const url = autoWasmUrl(smoke);
+  return smoke?.wasmAuto === false && url !== null && (e.url === url || (e.text ?? "").includes(url));
 }
 
 async function waitForConsole(logs, match, timeoutMs) {

@@ -16,7 +16,7 @@ use std::rc::Rc;
 use wasm_bindgen::JsCast as _;
 use wasm_bindgen_futures::JsFuture;
 
-use crate::font_pack_manifest::{ManifestEntry, entries_for_families, parse_manifest, style_matches};
+use crate::font_pack_manifest::{ManifestEntry, entries_for_families, parse_manifest, style_matches, waiter_records_file};
 
 /// The manifest entry implements the crate's face-like trait, so the matching rule is
 /// [`wordcraft_fonts::packs::pick_pack_face`]'s alone (family, italic, weight closest to the
@@ -206,13 +206,14 @@ fn fetch_and_install(entries: Vec<ManifestEntry>, ctx: egui::Context) {
     });
 }
 
+/// Record a settled file's outcome with every waiter it belongs to: the settle-all waiters
+/// (`installFonts()`) take each completed file, family waiters only their families' files.
 fn record_result(file: &str, ok: bool) {
+    let manifest = manifest();
+    let manifest = manifest.as_deref().map(|m| m.as_slice());
     WAITERS.with(|w| {
         for waiter in w.borrow().iter() {
-            let Some(families) = &waiter.families else {
-                continue;
-            };
-            if manifest().is_some_and(|m| entries_for_families(&m, families).iter().any(|e| e.file == file)) {
+            if waiter_records_file(waiter.families.as_deref(), manifest, file) {
                 waiter.results.borrow_mut().push((file.to_string(), ok));
             }
         }
