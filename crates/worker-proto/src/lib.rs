@@ -70,6 +70,10 @@ pub const MAX_FORMAT_BYTES: usize = 32;
 pub const MAX_PASSWORD_BYTES: usize = 256;
 /// Most parts one binary-framed payload declares (framing sanity bound, see [`pack_binary`]).
 pub const MAX_BINARY_PARTS: usize = 1024;
+/// Largest total size of a [`pack_binary`] frame — the widest payload any request kind accepts
+/// (`request_payload_limit`'s `renderPdf` arm): a frame at every cap at once, with document,
+/// font batch, JSON metadata part and framing headroom.
+pub const MAX_FRAME_BYTES: usize = MAX_PDF_DOC_BYTES + MAX_FONT_TOTAL_BYTES + MAX_PAYLOAD_BYTES + 8 + 4 * (MAX_FONT_COPIES + 2);
 
 /// The `kind` field of an [`Envelope`]. Request kinds are `check`, `cancel`, `configure`,
 /// `convert`, `renderPdf` and `ping`; everything else only ever travels worker → client. A
@@ -371,14 +375,22 @@ const BINARY_MAGIC: [u8; 4] = *b"WCB\x01";
 /// The binary kinds (`convert`, `renderPdf`) use this so multi-part payloads — a JSON metadata
 /// part beside raw document and font bytes — travel without JSON or base64 overhead. The
 /// `converted` and `pdf` replies carry a single output unframed: the envelope's `kind` already
-/// says what the bytes are. At most [`MAX_BINARY_PARTS`] parts; each part below 4 GiB.
+/// says what the bytes are. At most [`MAX_BINARY_PARTS`] parts; each part below 4 GiB; the
+/// whole frame at most [`MAX_FRAME_BYTES`]. The total capacity is validated and then reserved
+/// fallibly, so a hostile parts list (many views of one slice) is a [`ProtoError::TooLarge`],
+/// never a `with_capacity` panic on capacity overflow or an allocation abort.
 pub fn pack_binary(parts: &[&[u8]]) -> Result<Vec<u8>, ProtoError> {
     if parts.len() > MAX_BINARY_PARTS {
         return Err(ProtoError::TooLarge { limit: MAX_BINARY_PARTS, got: parts.len() });
     }
     let head = BINARY_MAGIC.len() + 4 + parts.len().saturating_mul(4);
     let body = parts.iter().fold(0usize, |a, p| a.saturating_add(p.len()));
-    let mut out = Vec::with_capacity(head.saturating_add(body));
+    let total = head.saturating_add(body);
+    if total > MAX_FRAME_BYTES {
+        return Err(ProtoError::TooLarge { limit: MAX_FRAME_BYTES, got: total });
+    }
+    let mut out = Vec::new();
+    out.try_reserve_exact(total).map_err(|_| ProtoError::TooLarge { limit: MAX_FRAME_BYTES, got: total })?;
     out.extend_from_slice(&BINARY_MAGIC);
     out.extend_from_slice(&(parts.len() as u32).to_le_bytes());
     for part in parts {
@@ -527,8 +539,9 @@ pub fn request_payload_limit(kind: Kind) -> usize {
         // (a JSON payload, `MAX_PAYLOAD_BYTES`) and the input (`MAX_CONVERT_BYTES`).
         Kind::Convert => MAX_CONVERT_BYTES + MAX_PAYLOAD_BYTES + 16,
         // `meta + docx + fonts`: at most `MAX_FONT_COPIES` font parts, so the frame overhead
-        // is 8 + 4·(MAX_FONT_COPIES + 2) bytes; the meta part is a JSON payload.
-        Kind::RenderPdf => MAX_PDF_DOC_BYTES + MAX_FONT_TOTAL_BYTES + MAX_PAYLOAD_BYTES + 8 + 4 * (MAX_FONT_COPIES + 2),
+        // is 8 + 4·(MAX_FONT_COPIES + 2) bytes; the meta part is a JSON payload. This is the
+        // widest limit, and [`MAX_FRAME_BYTES`] is the same bound `pack_binary` enforces.
+        Kind::RenderPdf => MAX_FRAME_BYTES,
         _ => 0,
     }
 }
@@ -848,6 +861,21 @@ mod tests {
         over.extend_from_slice(&(MAX_BINARY_PARTS as u32 + 1).to_le_bytes());
         over.extend_from_slice(&vec![0u8; (MAX_BINARY_PARTS + 1) * 4]);
         assert!(matches!(unpack_binary(&over), Err(ProtoError::TooLarge { .. })));
+    }
+
+    #[test]
+    fn pack_binary_rejects_oversized_total_before_reserving() {
+        // `MAX_BINARY_PARTS` views of one backing slice pass the part-count bound, but their
+        // summed capacity (1 GiB here) is far past `MAX_FRAME_BYTES`: the frame is refused as
+        // `TooLarge` before any reservation, where `Vec::with_capacity` would have tried to
+        // allocate the sum — panicking on capacity overflow once it saturates.
+        let slice = [0u8; 1024 * 1024];
+        let parts: Vec<&[u8]> = vec![slice.as_slice(); MAX_BINARY_PARTS];
+        let err = pack_binary(&parts).unwrap_err();
+        assert!(
+            matches!(err, ProtoError::TooLarge { limit: MAX_FRAME_BYTES, got, .. } if got > MAX_FRAME_BYTES),
+            "oversized frame capacity must map to TooLarge, got {err:?}"
+        );
     }
 
     #[test]

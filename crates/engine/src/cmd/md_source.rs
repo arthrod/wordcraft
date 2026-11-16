@@ -87,7 +87,8 @@ impl MdSource {
 #[derive(Clone, Default)]
 pub struct FileText {
     saved: Option<String>,
-    pub(crate) latest: Option<String>,
+    /// Shared: undo steps keep the same text, not a copy of it.
+    pub(crate) latest: Option<Arc<str>>,
     pub(crate) cached_exact: RefCell<Option<(u64, Option<String>)>>,
 }
 
@@ -271,7 +272,7 @@ fn set_markdown(s: &mut Session, v: &Value) -> CmdResult {
     s.math = None;
     s.touch();
     s.clamp_selection();
-    s.md_file.latest = Some(md.to_string());
+    s.md_file.latest = Some(Arc::from(md));
     *s.md_file.cached_exact.borrow_mut() = Some((s.rev(), Some(md.to_string())));
     s.dirty = true;
     Ok(json!({"ok": true, "words": s.doc.word_count(), "paragraphs": s.doc.paragraph_count()}))
@@ -368,7 +369,7 @@ pub fn apply(s: &mut Session) {
     s.math = None;
     s.touch();
     s.clamp_selection();
-    s.md_file.latest = Some(text.clone());
+    s.md_file.latest = Some(Arc::from(text.as_str()));
     *s.md_file.cached_exact.borrow_mut() = Some((s.rev(), Some(text.clone())));
     if let Some(src) = s.md_source.as_mut() {
         src.applied = Arc::from(text.as_str());
@@ -1092,6 +1093,23 @@ mod tests {
         s.run("edit.redo", &json!({})).unwrap();
         assert_eq!(s.run(GET_MARKDOWN, &json!({})).unwrap()["markdown"], md_b);
         assert!(body_text(&s).contains("Beta."));
+    }
+
+    #[test]
+    fn a_docx_save_keeps_the_markdown_history_for_undo() {
+        let dir = unique_temp_dir("docx-md-history");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut s = Session::new(Document::new());
+        s.path = Some(dir.join("a.docx"));
+        let md_a = "<!-- comment A -->\n# Heading\n\nAlpha.\n";
+        let md_b = "<!-- comment B -->\n# Heading\n\nBeta.\n";
+        s.run(SET_MARKDOWN, &json!({"markdown": md_a})).unwrap();
+        s.run(SET_MARKDOWN, &json!({"markdown": md_b})).unwrap();
+        s.run("file.save", &json!({})).unwrap();
+        s.run("edit.undo", &json!({})).unwrap();
+        assert_eq!(s.run(GET_MARKDOWN, &json!({})).unwrap()["markdown"], md_a, "a .docx save takes no Markdown history away");
+        assert!(body_text(&s).contains("Alpha."));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

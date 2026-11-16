@@ -246,7 +246,9 @@ if [[ "$RUN_CHECK" -eq 1 ]]; then
       TS_DIR="$WORK/ts-$mode"
       mkdir -p "$TS_DIR/node_modules"
       ln -s "$NPM_STAGE" "$TS_DIR/node_modules/wordcraft-web"
-      cat > "$TS_DIR/consumer.ts" <<'EOF'
+      # .mts pins the consumer to ESM: this temp dir has no package.json, and nodenext
+      # would compile a bare .ts as CommonJS importing an ESM-only package.
+      cat > "$TS_DIR/consumer.mts" <<'EOF'
 import { init, initSync, start, createProofWorker, type StartOptions, type WordCraftApi } from "wordcraft-web";
 import rawInit, { start as rawStart } from "wordcraft-web/glue";
 
@@ -274,7 +276,7 @@ EOF
       else
         MODULE_FLAG="esnext"
       fi
-      tsc --noEmit --strict --target es2022 --module "$MODULE_FLAG" --moduleResolution "$mode" "$TS_DIR/consumer.ts"
+      tsc --noEmit --strict --target es2022 --module "$MODULE_FLAG" --moduleResolution "$mode" "$TS_DIR/consumer.mts"
     done
   else
     echo "warning: tsc not found, skipping TypeScript consumer check" >&2

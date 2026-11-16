@@ -102,7 +102,13 @@ const LOADING_ID: &str = "wordcraft_loading";
 
 thread_local! {
     static RUNTIME_INIT: Cell<bool> = const { Cell::new(false) };
-    static STARTED_CANVASES: RefCell<Vec<(web_sys::HtmlCanvasElement, js_sys::Promise)>> = const { RefCell::new(Vec::new()) };
+    static STARTED_CANVASES: RefCell<crate::launch::LaunchBook<web_sys::HtmlCanvasElement, js_sys::Promise>> =
+        const { RefCell::new(crate::launch::LaunchBook::new()) };
+}
+
+/// Canvas identity for [`STARTED_CANVASES`]: the same DOM element, even across wrappers.
+fn same_canvas(a: &web_sys::HtmlCanvasElement, b: &web_sys::HtmlCanvasElement) -> bool {
+    js_sys::Object::is(a.as_ref(), b.as_ref())
 }
 
 struct StartConfig {
@@ -210,15 +216,42 @@ fn parse_start_config(options: &wasm_bindgen::JsValue) -> Result<StartConfig, wa
 
 /// Start WordCraft automatically when the standalone `#wordcraft_canvas` element is present.
 /// Importing the WASM module into a host page without `#wordcraft_canvas` is a harmless no-op;
-/// programmatic callers use [`start`].
+/// programmatic callers use [`start`]. The launch itself is deferred to [`default_launch`]: a
+/// page that calls `start(options)` — the npm wrapper awaits module init before forwarding
+/// them — registers the canvas with its explicit options first, and the default launch then
+/// stands down for it (the first launch of a canvas owns it).
 pub fn start_default_if_present() {
     init_runtime_once();
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
+    if document.get_element_by_id(CANVAS_ID).is_none() {
+        return;
+    }
+    let deferred = wasm_bindgen::closure::Closure::<dyn FnMut()>::new(default_launch);
+    let scheduled = window.set_timeout_with_callback(deferred.as_ref().unchecked_ref()).is_ok();
+    // The closure lives as long as the page (and never fires if it could not be scheduled).
+    deferred.forget();
+    if !scheduled {
+        default_launch();
+    }
+}
+
+/// The deferred automatic launch ([`start_default_if_present`]): the default-id canvas, when no
+/// explicit `start` claimed it while the launch was deferred.
+fn default_launch() {
     let Some(document) = web_sys::window().and_then(|w| w.document()) else {
         return;
     };
     let Some(canvas) = document.get_element_by_id(CANVAS_ID).and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok()) else {
         return;
     };
+    if !STARTED_CANVASES.with(|book| book.borrow().default_launch_due(&canvas, same_canvas)) {
+        return;
+    }
     let asset_base = default_asset_base(&document);
     let config = StartConfig { canvas, asset_base, host_mode: None, author: query_param("author"), install_global: true, force_sample: None };
     let _ = launch_with_config(config);

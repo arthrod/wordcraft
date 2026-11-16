@@ -7,7 +7,7 @@
 //! may not ship) keeps the pipeline on the `brotli` crate that `crates/fonts/build.rs` already
 //! uses for the minimal font set.
 
-use std::fs::{self, File, Metadata};
+use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -95,7 +95,10 @@ pub fn run(args: &[&str]) -> Result<(), String> {
     let mut tmp_os = output_path.as_os_str().to_os_string();
     tmp_os.push(format!(".tmp-{}", std::process::id()));
     let tmp_path = PathBuf::from(tmp_os);
-    let out_file = File::create(&tmp_path).map_err(|e| format!("{}: {e}", tmp_path.display()))?;
+    // Exclusive creation: an entry already sitting at the temp path (a leftover from a crashed
+    // run, or a symlink aimed at the input file) fails the run instead of being truncated or
+    // written through.
+    let out_file = OpenOptions::new().write(true).create_new(true).open(&tmp_path).map_err(|e| format!("{}: {e}", tmp_path.display()))?;
     if let Err(e) = compress(&mut BufReader::new(in_file), &mut BufWriter::new(out_file)) {
         let _ = fs::remove_file(&tmp_path);
         return Err(e);
@@ -171,6 +174,37 @@ mod tests {
             assert!(run(&[input_s.as_str(), link.to_str().unwrap()]).is_err());
         }
         assert_eq!(std::fs::read(&input).unwrap(), b"payload", "the input must survive a rejected run");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn run_rejects_an_existing_entry_at_the_temp_path() {
+        let dir = std::env::temp_dir().join(format!("wordcraft-xtask-brotli-tmpalias-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("in.bin");
+        std::fs::write(&input, b"payload").unwrap();
+        let input_s = input.to_str().unwrap().to_string();
+        let output = dir.join("out.bin.br");
+        let output_s = output.to_str().unwrap().to_string();
+        let tmp = dir.join(format!("out.bin.br.tmp-{}", std::process::id()));
+
+        // A pre-existing regular file at the temp path: exclusive creation must reject the run
+        // and leave the entry untouched instead of truncating it.
+        std::fs::write(&tmp, b"sentinel").unwrap();
+        assert!(run(&[input_s.as_str(), output_s.as_str()]).is_err());
+        assert_eq!(std::fs::read(&tmp).unwrap(), b"sentinel", "an existing temp-path entry must not be modified");
+        assert_eq!(std::fs::read(&input).unwrap(), b"payload", "the input must survive a rejected run");
+
+        // A symlink at the temp path aliasing the input: the run must fail with the input
+        // intact instead of writing the compressed output through the link.
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&tmp).unwrap();
+            std::os::unix::fs::symlink(&input, &tmp).unwrap();
+            assert!(run(&[input_s.as_str(), output_s.as_str()]).is_err());
+            assert_eq!(std::fs::read(&input).unwrap(), b"payload", "the input must survive a symlinked temp path");
+            assert!(!output.exists(), "no sidecar may appear on a rejected run");
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

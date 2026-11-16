@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 use wordcraft_doc::props::CharProps;
 use wordcraft_doc::{Document, Path, Pos, StoryRef, Table};
@@ -132,7 +134,8 @@ pub(super) struct Undo {
     /// Pending Markdown Source text preserved by a command that explicitly replaces it.
     pub(super) md_source: Option<crate::cmd::md_source::MdSource>,
     /// The latest exact Markdown source text associated with the document before this step.
-    pub(super) md_latest: Option<String>,
+    /// Shared: steps keep the session's text, not a copy of it.
+    pub(super) md_latest: Option<Arc<str>>,
 }
 
 /// The number of edit locations Go Back cycles through (Word: four).

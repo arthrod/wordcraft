@@ -154,7 +154,10 @@ fn supply_parent_query() {
     let Ok(history) = window.history() else {
         return;
     };
-    if let Err(e) = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&url)) {
+    // The current entry's state passes through unchanged: the embedding page's router may keep
+    // route or restoration data there, and a null state would wipe it.
+    let state = history.state().unwrap_or(wasm_bindgen::JsValue::NULL);
+    if let Err(e) = history.replace_state_with_url(&state, "", Some(&url)) {
         log::warn!("host=parent: could not update the page URL ({e:?}); not hosted");
     }
 }
@@ -184,7 +187,9 @@ fn withdraw_parent_query() {
     let Ok(history) = window.history() else {
         return;
     };
-    if let Err(e) = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&url)) {
+    // The state passes through unchanged, as in `supply_parent_query`.
+    let state = history.state().unwrap_or(wasm_bindgen::JsValue::NULL);
+    if let Err(e) = history.replace_state_with_url(&state, "", Some(&url)) {
         log::warn!("host=page: could not update the page URL ({e:?}); the parent query still wins");
     }
 }

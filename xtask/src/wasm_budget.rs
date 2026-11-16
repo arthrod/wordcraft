@@ -101,6 +101,11 @@ pub(crate) fn read_leb_u64(bytes: &[u8], pos: &mut usize) -> Result<u64, String>
         if shift >= 64 {
             return Err("LEB128 overflow".into());
         }
+        // At shift 63 only one payload bit still fits in a u64; a larger payload needs bit 64
+        // and the shift below would silently discard it, so reject it before shifting.
+        if shift == 63 && b & 0x7f > 1 {
+            return Err("LEB128 overflow".into());
+        }
         result |= u64::from(b & 0x7f) << shift;
         if b & 0x80 == 0 {
             return Ok(result);
@@ -632,6 +637,21 @@ mod tests {
         assert_eq!(rep.data_bytes, 512);
         assert!(rep.found_forbidden.is_empty());
         assert!(check_budget(&rep).is_empty());
+    }
+
+    #[test]
+    fn leb128_rejects_a_payload_past_bit_64() {
+        // Nine 0x80 bytes leave the decoder at shift 63; a tenth byte with payload 2 needs
+        // bit 64, which must be an overflow error, not a silently truncated value.
+        let mut bytes = [0x80u8; 10];
+        bytes[9] = 0x02;
+        let mut pos = 0usize;
+        let err = read_leb_u64(&bytes, &mut pos).unwrap_err();
+        assert!(err.contains("overflow"), "{err}");
+        // The largest payload that does fit (payload 1 at shift 63) still decodes.
+        bytes[9] = 0x01;
+        let mut pos = 0usize;
+        assert_eq!(read_leb_u64(&bytes, &mut pos).unwrap(), 1 << 63);
     }
 
     #[test]

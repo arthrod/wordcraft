@@ -1,7 +1,7 @@
 use super::doc_state::{ColumnBlock, Selection};
 use super::ime_state::ImeCaretState;
 use super::snapshot_types::RunSnapshot;
-use super::{CharProps, CmdError, Document, Fragment, ImeEditOutcome, Pos, Session, StoryRef, Value, document_id_mark};
+use super::{Arc, CharProps, CmdError, Document, Fragment, ImeEditOutcome, Pos, Session, StoryRef, Value, document_id_mark};
 use crate::CommandSpec;
 
 struct SuccessContext<'a> {
@@ -9,7 +9,7 @@ struct SuccessContext<'a> {
     spec: &'a CommandSpec,
     before_doc: &'a Option<RunSnapshot>,
     pending_before: &'a Option<Option<CharProps>>,
-    md_latest_before: &'a Option<Option<String>>,
+    md_latest_before: &'a Option<Option<Arc<str>>>,
     md_source_pending_before: bool,
     document_id_before: u64,
     replaces_document: bool,
@@ -32,7 +32,7 @@ struct ErrorContext<'a> {
     versions_before: Option<Vec<(String, String, Document)>>,
     identity_before: Option<IdentitySnapshot>,
     dirty_before: Option<bool>,
-    md_latest_before: Option<Option<String>>,
+    md_latest_before: Option<Option<Arc<str>>>,
     md_source_before: Option<Option<crate::cmd::md_source::MdSource>>,
     rev_restore: Option<u64>,
     blocks_before: Option<std::collections::BTreeMap<String, Fragment>>,
@@ -48,7 +48,7 @@ struct ElsewhereContext {
     blocks_before: Option<std::collections::BTreeMap<String, Fragment>>,
     default_language_before: Option<String>,
     pending_application_change_before: bool,
-    md_latest_before: Option<Option<String>>,
+    md_latest_before: Option<Option<Arc<str>>>,
     md_source_before: Option<Option<crate::cmd::md_source::MdSource>>,
 }
 
@@ -74,7 +74,7 @@ impl Session {
         sel: &Selection,
         column: &Option<ColumnBlock>,
         pending: &Option<CharProps>,
-        md_latest: &Option<String>,
+        md_latest: &Option<Arc<str>>,
         md_source_pending_before: bool,
     ) -> bool {
         doc.same_content(&self.doc)

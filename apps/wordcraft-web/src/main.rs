@@ -38,6 +38,13 @@ mod proof_squiggles;
 #[cfg(any(target_arch = "wasm32", test))]
 mod font_pack_manifest;
 
+// The canvas launch book (`start(options)` vs the automatic standalone start) lives beside the
+// other web modules but has no wasm-only dependencies of its own, so host tests compile and
+// drive it too.
+#[cfg(any(target_arch = "wasm32", test))]
+#[path = "web/launch.rs"]
+mod launch;
+
 #[cfg(test)]
 const DECLARED_API_METHODS: &[&str] = &[
     "request",

@@ -376,6 +376,9 @@ pub fn offered_code_from_tag(tag: &str) -> Option<&'static str> {
         return None;
     }
     let lowered = tag.trim().to_ascii_lowercase();
+    // The POSIX @latin modifier (sr_RS.UTF-8@latin) asks for the Latin script; the split below
+    // drops it with the codeset and every other modifier, so read it first.
+    let latin = lowered.split_once('@').is_some_and(|(_, modifier)| modifier == "latin");
     let clean = lowered.split(['.', '@']).next().unwrap_or("");
     if clean.is_empty() {
         return None;
@@ -397,7 +400,7 @@ pub fn offered_code_from_tag(tag: &str) -> Option<&'static str> {
         return Some("zh-hans");
     }
     if primary == "sr" {
-        return Some(if parts.contains(&"latn") { "sr-latn" } else { "sr" });
+        return Some(if latin || parts.contains(&"latn") { "sr-latn" } else { "sr" });
     }
     if primary == "pt" {
         return parts.contains(&"br").then_some("pt-br");

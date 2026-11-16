@@ -1369,8 +1369,12 @@ fn offered_code_from_tag_matches_locale_variants_before_catalog_load() {
     assert_eq!(super::offered_code_from_tag("zh_CN.UTF-8"), Some("zh-hans"));
     assert_eq!(super::offered_code_from_tag("sr-Latn-RS"), Some("sr-latn"));
     assert_eq!(super::offered_code_from_tag("sr-RS"), Some("sr"));
+    assert_eq!(super::offered_code_from_tag("sr_RS.UTF-8@latin"), Some("sr-latn"), "the POSIX @latin modifier asks for the Latin script");
+    assert_eq!(super::offered_code_from_tag("sr_RS@latin"), Some("sr-latn"));
+    assert_eq!(super::offered_code_from_tag("sr_RS.UTF-8"), Some("sr"));
     assert_eq!(super::offered_code_from_tag("pt-PT"), None);
     assert_eq!(super::offered_code_from_tag("pt-BR"), Some("pt-br"));
     assert_eq!(super::target_locale_code("FR"), "fr");
+    assert_eq!(super::target_locale_code("sr_RS.UTF-8@latin"), "sr-latn");
     assert_eq!(super::target_locale_code("auto"), "en");
 }

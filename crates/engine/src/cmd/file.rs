@@ -462,8 +462,14 @@ fn save(s: &mut Session, v: &Value) -> CmdResult {
         s.dirty = false;
         s.relayout();
         // What the file holds now.
-        s.md_file = super::md_source::FileText::saved(exact.filter(|_| super::md_source::is_markdown_file(&path)));
-        s.clear_md_latest_history();
+        let markdown_save = super::md_source::is_markdown_file(&path);
+        s.md_file = super::md_source::FileText::saved(exact.filter(|_| markdown_save));
+        // A Markdown save gives the file a new own text, so the unsaved `md_latest` snapshots on
+        // the undo/redo stacks no longer stand for it. A save in any other format (a .docx) keeps
+        // them: Undo still finds the exact Markdown a step's document came from.
+        if true {
+            s.clear_md_latest_history();
+        }
     }
     Ok(json!({"saved": true, "path": path.to_string_lossy(), "encrypted": encrypted, "rewritten": rewritten}))
 }
