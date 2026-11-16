@@ -462,6 +462,49 @@ mod tests {
         assert!(render(sample_docx(), Vec::new(), true, None).unwrap().starts_with(b"%PDF"), "nothing lost, nothing to refuse");
     }
 
+    /// Review finding (gate 3, F4): a chart's labels are laid out apart from the paragraphs, so
+    /// a face used only by a chart label was invisible to the old name check (it read the
+    /// paragraphs' requested fonts only) and a strict job whose copy of it was lost answered a
+    /// PDF. The page's list of faces its PDF draws text in walks the charts too, so a lost copy
+    /// of that face fails the job; the same document without the chart draws nothing in it.
+    #[test]
+    fn a_lost_copy_only_a_chart_label_is_drawn_in_fails_a_strict_job() {
+        use wordcraft_doc::graphic::{Graphic, GraphicItem, GraphicKind, TextAlign};
+        const LABEL_FONT: &str = "Source Serif 4";
+        let label = GraphicItem::Text {
+            rect: [0.0, 100.0, 216.0, 20.0],
+            text: "Quarterly sales".into(),
+            size: 10.0,
+            color: wordcraft_doc::props::Rgb::BLACK,
+            bold: false,
+            align: TextAlign::Center,
+            font: Some(LABEL_FONT.into()),
+        };
+        let graphic = Graphic { kind: GraphicKind::Chart, items: vec![label], ..Default::default() };
+        let chart = wordcraft_doc::InlineObject::Graphic {
+            w: 216.0,
+            h: 144.0,
+            alt: String::new(),
+            float: Default::default(),
+            graphic: std::sync::Arc::new(graphic),
+        };
+        let mut doc = wordcraft_doc::Document::from_text("The quarterly figures look strong.");
+        let plain = doc.clone();
+        doc.insert_object(&wordcraft_doc::Pos::body(0, 0), chart, &Default::default()).unwrap();
+        // What the page lists for each: its own `pdf_faces` of the document it exports.
+        let faces = |d: &wordcraft_doc::Document| wordcraft_engine::strict::pdf_faces(d, &Default::default());
+        let drawn = faces(&doc);
+        let style = drawn.iter().find(|(family, _)| family == LABEL_FONT).map(|(_, style)| style.clone()).expect("the chart label's face is listed");
+        assert!(!faces(&plain).iter().any(|(family, _)| family == LABEL_FONT), "only the chart draws in {LABEL_FONT}");
+        let copy = || vec![proto::FontCopy { family: LABEL_FONT.into(), style: style.clone(), bytes: b"not a font file".to_vec() }];
+        let list: Vec<(&str, &str)> = drawn.iter().map(|(f, s)| (f.as_str(), s.as_str())).collect();
+        let err = render(wordcraft_docx::write(&doc).unwrap(), copy(), true, Some(&list)).unwrap_err();
+        assert!(err.message.starts_with("strict: ") && err.message.contains(LABEL_FONT), "{}", err.message);
+        let plain_list: Vec<(String, String)> = faces(&plain);
+        let plain_list: Vec<(&str, &str)> = plain_list.iter().map(|(f, s)| (f.as_str(), s.as_str())).collect();
+        assert!(render(wordcraft_docx::write(&plain).unwrap(), copy(), true, Some(&plain_list)).unwrap().starts_with(b"%PDF"));
+    }
+
     /// A document with a comment and a tracked deletion, dated so its PDFs compare byte for byte.
     fn marked_up_document() -> wordcraft_doc::Document {
         use serde_json::json;
