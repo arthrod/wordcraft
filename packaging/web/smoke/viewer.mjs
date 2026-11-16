@@ -447,6 +447,61 @@ try {
     await big.page.close();
   }
 
+  // ---- a body with no Content-Length: read a chunk at a time, and stopped past the limit ----
+  {
+    const LIMIT = 64 * 1024 * 1024;
+    // Chunked, no Content-Length, 256 MiB if the page keeps reading. Each chunk waits for the
+    // socket to take the last one, so `sent` is what the page let the server send.
+    let sent = 0;
+    let endlessDone;
+    const endlessOver = new Promise((r) => (endlessDone = r));
+    fixtures.set("/__fixture/endless.docx", async (res) => {
+      let closed = false;
+      res.on("close", () => (closed = true));
+      res.writeHead(200, { "Content-Type": "application/octet-stream" });
+      const chunk = Buffer.alloc(1024 * 1024, 0x50);
+      while (!closed && sent < 256 * 1024 * 1024) {
+        sent += chunk.length;
+        if (!res.write(chunk)) await new Promise((r) => (res.once("drain", r), res.once("close", r)));
+      }
+      if (!closed) res.end();
+      endlessDone();
+    });
+    const endless = await open(browser, base, "/?doc=/__fixture/endless.docx");
+    await waitAttr(endless.page, "data-wordcraft-error", "document-failed", 120000).catch(() => {});
+    await Promise.race([endlessOver, new Promise((r) => setTimeout(r, 10000))]);
+    const over = await endless.page.evaluate(() => ({
+      error: document.documentElement.getAttribute("data-wordcraft-error"),
+      notice: document.querySelector("#wordcraft_viewer_notice")?.hidden === false ? document.querySelector("#wordcraft_viewer_notice").innerText : null,
+    }));
+    const sentMiB = Math.round(sent / 1024 / 1024);
+    check("a chunked body past the limit with no Content-Length: refused as too large", over.error === "document-failed" && /too large/i.test(over.notice ?? ""), JSON.stringify(over));
+    check("a chunked body past the limit with no Content-Length: the read stopped early", sent < LIMIT + 32 * 1024 * 1024, `the server sent ${sentMiB} MiB of 256`);
+    check("a chunked body past the limit: no uncaught errors", endless.log.uncaught.length === 0, endless.log.uncaught.join(" | "));
+    await endless.page.close();
+
+    // Under the limit, chunked the same way with no Content-Length: read whole and shown.
+    const sample = readFileSync(join(dist, "samples/welcome.docx"));
+    fixtures.set("/__fixture/chunked.docx", async (res) => {
+      res.writeHead(200, { "Content-Type": "application/octet-stream" });
+      for (let at = 0; at < sample.length; at += 4096) {
+        res.write(sample.subarray(at, at + 4096));
+        await new Promise((r) => setTimeout(r, 2));
+      }
+      res.end();
+    });
+    const chunked = await open(browser, base, "/?doc=/__fixture/chunked.docx");
+    await chunked.page.waitForFunction(() => document.querySelector("#wordcraft_viewer canvas[data-scale]") || document.documentElement.hasAttribute("data-wordcraft-error"), { timeout: 30000 }).catch(() => {});
+    const under = await chunked.page.evaluate(() => ({
+      error: document.documentElement.getAttribute("data-wordcraft-error"),
+      painted: document.querySelectorAll("#wordcraft_viewer canvas[data-scale]").length,
+      pages: window.wordcraftViewer?.pageCount?.() ?? 0,
+    }));
+    check("a chunked body under the limit with no Content-Length: opened and shown", under.error === null && under.painted > 0 && under.pages > 0, JSON.stringify(under));
+    check("a chunked body under the limit: no uncaught errors", chunked.log.uncaught.length === 0, chunked.log.uncaught.join(" | "));
+    await chunked.page.close();
+  }
+
   // ---- the viewer fails for good: the editor is still offered and fetches the document ----
   {
     const editVisible = (p) => p.evaluate(() => (document.querySelector("#wordcraft_viewer_edit")?.getClientRects().length ?? 0) > 0);

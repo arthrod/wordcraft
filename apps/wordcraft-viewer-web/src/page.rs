@@ -738,13 +738,42 @@ async fn fetch_same_origin(page: &Rc<Page>, url: &str) -> Result<js_sys::Uint8Ar
     if !response.ok() {
         return Err(failed());
     }
-    // Refused before the body is read when its declared length is past the limit; without a
-    // `Content-Length` the body is read and `open_document` judges its size.
+    // Refused before the body is read when its declared length is past the limit. A body
+    // without a `Content-Length`, or longer than it said, is read a chunk at a time and the
+    // read stops (the download is cancelled) as soon as it passes the limit: never more than
+    // [`proto::MAX_VIEW_DOC_BYTES`] and one chunk is held.
     if download::declared_too_large(response.headers().get("content-length").ok().flatten().as_deref()) {
         return Err(TOO_LARGE.to_string());
     }
-    let buffer = wasm_bindgen_futures::JsFuture::from(response.array_buffer().map_err(|_| failed())?).await.map_err(|_| failed())?;
-    Ok(js_sys::Uint8Array::new(&buffer))
+    let Some(body) = response.body() else { return Ok(js_sys::Uint8Array::new_with_length(0)) };
+    let reader = web_sys::ReadableStreamDefaultReader::new(&body).map_err(|_| failed())?;
+    let mut chunks = Vec::new();
+    let mut total = 0usize;
+    loop {
+        let read = wasm_bindgen_futures::JsFuture::from(reader.read()).await.map_err(|_| failed())?;
+        if js_sys::Reflect::get(&read, &JsValue::from_str("done")).ok().and_then(|d| d.as_bool()).unwrap_or(true) {
+            break;
+        }
+        let Ok(chunk) = js_sys::Reflect::get(&read, &JsValue::from_str("value")).and_then(|v| v.dyn_into::<js_sys::Uint8Array>()) else {
+            let _ = wasm_bindgen_futures::JsFuture::from(reader.cancel()).await;
+            return Err(failed());
+        };
+        total = total.saturating_add(chunk.length() as usize);
+        if total > proto::MAX_VIEW_DOC_BYTES {
+            let _ = wasm_bindgen_futures::JsFuture::from(reader.cancel()).await;
+            return Err(TOO_LARGE.to_string());
+        }
+        chunks.push(chunk);
+    }
+    // At most the limit, so it fits a `u32`.
+    let Ok(length) = u32::try_from(total) else { return Err(TOO_LARGE.to_string()) };
+    let bytes = js_sys::Uint8Array::new_with_length(length);
+    let mut at = 0u32;
+    for chunk in chunks {
+        bytes.set(&chunk, at);
+        at = at.saturating_add(chunk.length());
+    }
+    Ok(bytes)
 }
 
 /// Send `bytes` to the worker as the document to show. The bytes stay in JavaScript's memory:
