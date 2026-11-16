@@ -1006,6 +1006,11 @@ fn on_page(page: &Rc<Page>, generation: u32, key: PageKey, env: &proto::Envelope
                             }
                         }
                         let painted = state.canvases.get_mut(&key.page).is_some_and(|canvas| paint(canvas, payload, pixels, &header));
+                        // Not painted after all: the book must not count it (a blank canvas kept
+                        // as if painted), nor ask for it again at once (a loop); another scale is.
+                        if !painted {
+                            state.cache.failed(key);
+                        }
                         if let Some(canvas) = state.canvases.get(&key.page) {
                             place(canvas, state.sheet.pages.get(key.page as usize), state.sheet.zoom);
                         }
@@ -1035,15 +1040,23 @@ fn view_page_header(payload: &js_sys::Uint8Array) -> Option<proto::ViewPageHeade
 /// Put the page's pixels on its canvas: an `ImageData` over the transferred buffer, no copy
 /// through this module, then one `putImageData`. The canvas's bitmap is the page's raster,
 /// pixel for pixel.
+///
+/// `false` when the pixels do not make an image of the size the trailer says, the canvas gives
+/// no 2D context, or the browser refuses the bitmap: the canvas then shows what it showed
+/// before, or nothing (never a bitmap it does not hold), and the caller stops counting the page
+/// as painted.
 fn paint(canvas: &mut PageCanvas, payload: &js_sys::Uint8Array, pixels: u32, header: &proto::ViewPageHeader) -> bool {
     let rgba = js_sys::Uint8ClampedArray::new_with_byte_offset_and_length(&payload.buffer(), payload.byte_offset(), pixels);
     let Ok(image) = web_sys::ImageData::new_with_js_u8_clamped_array_and_sh(&rgba, header.width, header.height) else { return false };
-    canvas.el.set_width(header.width);
-    canvas.el.set_height(header.height);
     let Some(context) = canvas.el.get_context("2d").ok().flatten().and_then(|c| c.dyn_into::<web_sys::CanvasRenderingContext2d>().ok()) else {
         return false;
     };
+    // Resizing clears the bitmap: from here a failure leaves the canvas blank.
+    canvas.el.set_width(header.width);
+    canvas.el.set_height(header.height);
     if context.put_image_data(&image, 0.0, 0.0).is_err() {
+        canvas.bitmap = None;
+        let _ = canvas.el.remove_attribute("data-scale");
         return false;
     }
     canvas.bitmap = Some((header.width, header.height, header.scale));

@@ -116,16 +116,24 @@ impl PageCache {
         Arrival::Paint { evict }
     }
 
-    /// The worker refused `key` (too many pixels, say). It is not asked for again; another
-    /// scale of the page still is.
+    /// The worker refused `key` (too many pixels, say), or it arrived and its pixels could not
+    /// be put on the canvas: it is neither awaited nor painted, and it is not asked for again
+    /// (the same request would fail the same way); another scale of the page still is. A key
+    /// that is neither awaited nor painted changes nothing.
     pub fn failed(&mut self, key: PageKey) {
         if self.pending.get(&key.page) == Some(&key) {
             self.pending.remove(&key.page);
-            if self.failed.len() >= MAX_FAILED {
-                self.failed.clear();
+        } else if self.painted(key.page) == Some(key) {
+            if let Some(gone) = self.painted.remove(&key.page) {
+                self.used = self.used.saturating_sub(gone.bytes);
             }
-            self.failed.insert(key);
+        } else {
+            return;
         }
+        if self.failed.len() >= MAX_FAILED {
+            self.failed.clear();
+        }
+        self.failed.insert(key);
     }
 
     /// Page `page` has nowhere to be painted (its canvas went before its answer came): it is
