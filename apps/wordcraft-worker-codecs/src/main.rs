@@ -175,7 +175,7 @@ fn export_document(ext: &str, doc: &Document, password: Option<&str>) -> Result<
     if matches!(ext, "odt" | "ott") {
         let plain = if ext == "odt" { wordcraft_formats::odt::export(doc) } else { wordcraft_formats::odt::export_template(doc) }?;
         return match password {
-            Some(pw) => wordcraft_formats::odt::encrypt(&plain, pw),
+            Some(pw) => wordcraft_formats::odt::encrypt(&plain, pw).map_err(|e| e.to_string()),
             None => Ok(plain),
         };
     }

@@ -280,8 +280,25 @@ fn read_bytes(name: &str, bytes: &[u8], password: Option<&str>, page: &wordcraft
 
 /// Read a Word package (decrypted with `password` if it is encrypted), bringing in its
 /// alternative format chunks (`w:altChunk`) as Word does when it opens one: see [`import_chunk`].
-pub(crate) fn read_docx(bytes: &[u8], password: Option<&str>) -> Result<Document, wordcraft_docx::DocxError> {
-    wordcraft_docx::read_with(bytes, &wordcraft_docx::ReadOptions { password, chunks: Some(&import_chunk) })
+///
+/// The reader leaves out a chunk its importer declines. A chunk this build can't bring in fails
+/// the open instead (the first refusal is the error), so its content is never dropped silently.
+pub(crate) fn read_docx(bytes: &[u8], password: Option<&str>) -> Result<Document, String> {
+    let refused = std::cell::RefCell::new(None::<String>);
+    let import = |c: &wordcraft_docx::AltChunk| match import_chunk(c) {
+        Ok(doc) => Some(doc),
+        Err(e) => {
+            if let Ok(mut first) = refused.try_borrow_mut() {
+                first.get_or_insert(e);
+            }
+            None
+        }
+    };
+    let doc = wordcraft_docx::read_with(bytes, &wordcraft_docx::ReadOptions { password, chunks: Some(&import) }).map_err(|e| e.to_string())?;
+    match refused.into_inner() {
+        Some(e) => Err(e),
+        None => Ok(doc),
+    }
 }
 
 /// An alternative format chunk in a format the docx reader leaves to the format importers, as a
