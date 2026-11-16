@@ -322,16 +322,24 @@ pub fn find_core_wasm(dist_web: &Path) -> Result<PathBuf, String> {
 /// Every `data-type="worker"` artifact in `dist_web` (`wordcraft-worker-*_bg.wasm`; Trunk
 /// keeps worker names un-hashed). The main module's `wordcraft-web*_bg.wasm` is matched by
 /// [`find_core_wasm`] and never returned here.
-pub fn find_worker_wasms(dist_web: &Path) -> Vec<PathBuf> {
-    let mut matches: Vec<PathBuf> = std::fs::read_dir(dist_web)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("wordcraft-worker-") && n.ends_with("_bg.wasm")))
-        .collect();
+/// A folder or an entry that cannot be read is an error, never fewer workers: one behind it
+/// would be left out of the totals, which would then pass with less counted than is shipped.
+pub fn find_worker_wasms(dist_web: &Path) -> Result<Vec<PathBuf>, String> {
+    let entries = std::fs::read_dir(dist_web).map_err(|e| format!("{}: {e}", dist_web.display()))?.map(|e| e.map(|e| e.path()));
+    worker_wasms_in(dist_web, entries)
+}
+
+/// [`find_worker_wasms`] over the listing `entries` of `dist_web`.
+fn worker_wasms_in(dist_web: &Path, entries: impl Iterator<Item = std::io::Result<PathBuf>>) -> Result<Vec<PathBuf>, String> {
+    let mut matches = Vec::new();
+    for entry in entries {
+        let path = entry.map_err(|e| format!("{}: {e}", dist_web.display()))?;
+        if path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("wordcraft-worker-") && n.ends_with("_bg.wasm")) {
+            matches.push(path);
+        }
+    }
     matches.sort();
-    matches
+    Ok(matches)
 }
 
 /// The page module's `wordcraft-viewer-web-<hash>_bg.wasm` in `dist_web`: exactly one, or an
@@ -674,7 +682,7 @@ pub fn run(root: &Path, report_only: bool) -> Result<(), String> {
 
     // Per-artifact rows for the dedicated workers (plan §3.5). A dist built without the
     // worker link simply reports none.
-    let worker_wasms = find_worker_wasms(&dist_web);
+    let worker_wasms = find_worker_wasms(&dist_web)?;
     let mut worker_reports = Vec::new();
     for path in &worker_wasms {
         let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -950,7 +958,7 @@ mod tests {
         std::fs::write(dir.join("wordcraft-worker-proof_bg.wasm"), b"b").unwrap();
         std::fs::write(dir.join("wordcraft-worker-codecs_bg.wasm"), b"c").unwrap();
         std::fs::write(dir.join("wordcraft-worker-proof.js"), b"d").unwrap();
-        let found = find_worker_wasms(&dir);
+        let found = find_worker_wasms(&dir).unwrap();
         let names: Vec<String> = found.iter().filter_map(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).collect();
         assert_eq!(names, vec!["wordcraft-worker-codecs_bg.wasm", "wordcraft-worker-proof_bg.wasm"]);
         let _ = std::fs::remove_dir_all(&dir);
@@ -970,7 +978,7 @@ mod tests {
         }
         assert_eq!(find_page_wasm(&dir).unwrap(), page);
         assert_eq!(find_core_wasm(&dir).unwrap(), editor, "the page module is not the editor");
-        let workers: Vec<String> = find_worker_wasms(&dir).iter().map(|p| worker_stem(p)).collect();
+        let workers: Vec<String> = find_worker_wasms(&dir).unwrap().iter().map(|p| worker_stem(p)).collect();
         assert_eq!(workers, vec![VIEWER_WORKER_STEM]);
         std::fs::write(dir.join("wordcraft-viewer-web-0000000000000000_bg.wasm"), b"y").unwrap();
         assert!(find_page_wasm(&dir).unwrap_err().contains("ambiguous"));
@@ -989,6 +997,22 @@ mod tests {
         let err = unique_page_wasm(dir, [Err(failed()), Ok(page.clone())].into_iter()).unwrap_err();
         assert!(err.contains("the listing failed"), "{err}");
         assert_eq!(unique_page_wasm(dir, [Ok(page.clone()), Ok(dir.join("wordcraft-web_bg.wasm"))].into_iter()).unwrap(), page);
+    }
+
+    #[test]
+    fn a_worker_listing_that_fails_part_way_is_an_error_not_fewer_workers() {
+        // A worker behind the failure would be left out of the budget, which would then pass
+        // with less counted than is shipped.
+        let dir = Path::new("dist/web");
+        let viewer = dir.join("wordcraft-worker-viewer_bg.wasm");
+        let failed = || std::io::Error::other("the listing failed");
+        let err = worker_wasms_in(dir, [Ok(viewer.clone()), Err(failed())].into_iter()).unwrap_err();
+        assert!(err.contains("the listing failed") && err.contains("dist/web"), "{err}");
+        assert!(worker_wasms_in(dir, [Err(failed())].into_iter()).is_err());
+        let found = worker_wasms_in(dir, [Ok(dir.join("wordcraft-worker-pdf_bg.wasm")), Ok(viewer.clone()), Ok(dir.join("wordcraft-web_bg.wasm"))].into_iter()).unwrap();
+        assert_eq!(found, vec![dir.join("wordcraft-worker-pdf_bg.wasm"), viewer]);
+        // A folder that cannot be listed at all is an error too, not "no workers".
+        assert!(find_worker_wasms(Path::new("/nonexistent/wordcraft/dist/web")).is_err());
     }
 
     #[test]
