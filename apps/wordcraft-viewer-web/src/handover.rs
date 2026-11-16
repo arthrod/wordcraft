@@ -194,6 +194,12 @@ impl Handover {
         !matches!(self.phase, Phase::LoadingEditor | Phase::HandingOver | Phase::Editing)
     }
 
+    /// Whether the viewer has a document open (none is being fetched, opened or asked a
+    /// password for).
+    pub fn document_open(&self) -> bool {
+        !self.locked
+    }
+
     /// Whether the page offers an edit action now.
     pub fn edit_offered(&self) -> bool {
         self.mode != Mode::ViewOnly && self.phase == Phase::Viewing && !self.locked

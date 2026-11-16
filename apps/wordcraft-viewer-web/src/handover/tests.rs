@@ -431,3 +431,18 @@ fn an_editor_ready_while_a_document_opens_waits_for_it() {
     assert_eq!(h.on(Event::DocumentOpened), vec![Action::HandOver]);
     assert_eq!(h.phase(), Phase::HandingOver);
 }
+
+#[test]
+fn a_document_is_open_from_its_opening_until_another_starts() {
+    // A font's new layout is shown only while this holds (`installFont` in the page).
+    let (mut h, _) = started(Mode::ViewerFirst, true);
+    assert!(!h.document_open(), "still fetching");
+    h.on(Event::DocumentOpened);
+    assert!(h.document_open());
+    h.on(Event::DocumentOpening);
+    assert!(!h.document_open());
+    h.on(Event::PasswordAsked);
+    assert!(!h.document_open(), "refused for want of a password: the worker still holds the previous one");
+    h.on(Event::DocumentOpened);
+    assert!(h.document_open());
+}

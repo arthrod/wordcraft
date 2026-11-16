@@ -78,6 +78,9 @@ struct State {
     cache: PageCache,
     /// Counts documents and layouts: a reply made for an earlier one is dropped.
     generation: u32,
+    /// Counts documents sent to the worker: a font's new layout made for an earlier one is
+    /// dropped (a layout bumps `generation` too, so that cannot tell them apart).
+    opens: u32,
     canvases: HashMap<u32, PageCanvas>,
     missing_fonts: Vec<String>,
     refresh_queued: bool,
@@ -284,6 +287,7 @@ fn launch(options: &JsValue, auto: bool) -> Result<JsValue, JsValue> {
             sheet: pages::lay_out(&[], 1.0),
             cache: PageCache::new(CACHE_BUDGET_BYTES),
             generation: 0,
+            opens: 0,
             canvases: HashMap::new(),
             missing_fonts: Vec::new(),
             refresh_queued: false,
@@ -639,6 +643,7 @@ fn open_document(page: &Rc<Page>, bytes: js_sys::Uint8Array, password: Option<St
         let mut state = page.state.borrow_mut();
         state.docx = Some(bytes);
         state.password = password;
+        state.opens = state.opens.wrapping_add(1);
         state.generation
     };
     drop(stale);
@@ -1257,6 +1262,7 @@ fn install_font(page: &Rc<Page>, name: &JsValue, bytes: &JsValue) -> js_sys::Pro
         Err(e) => return js_sys::Promise::reject(&js_error(&format!("installFont: {e}"))),
     };
     let page = page.clone();
+    let opens = page.state.borrow().opens;
     js_sys::Promise::new(&mut |resolve, reject| {
         let sink_page = page.clone();
         let failed = reject.clone();
@@ -1267,7 +1273,14 @@ fn install_font(page: &Rc<Page>, name: &JsValue, bytes: &JsValue) -> js_sys::Pro
                 Box::new(move |env, payload| match env.kind {
                     proto::Kind::ViewOpened => {
                         let opened = worker::small_payload(payload).and_then(|b| proto::decode_payload::<proto::ViewOpenedReply>(&b).ok());
-                        if let Some(opened) = opened.filter(|o| proto::view_opened_reply_error(o).is_none()) {
+                        // The layout is of the document the worker held when the font arrived:
+                        // shown only if that is still the open one (no later open, none pending
+                        // or refused), so a newer open is never dropped as stale.
+                        let current = {
+                            let state = sink_page.state.borrow();
+                            state.opens == opens && state.handover.document_open()
+                        };
+                        if let Some(opened) = opened.filter(|o| current && proto::view_opened_reply_error(o).is_none()) {
                             // Every painted page was laid out with the old fonts.
                             drop(forget_pages(&sink_page));
                             apply_opened(&sink_page, opened);
