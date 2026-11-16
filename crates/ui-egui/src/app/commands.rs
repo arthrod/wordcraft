@@ -116,12 +116,18 @@ impl WordApp {
     /// (`exporting`), never that it was downloaded: the host reports how it ended itself.
     fn lazy_export(&self, name: &str, password: Option<&str>, opts: &wordcraft_engine::io::ExportOptions) -> Option<Result<Value, String>> {
         let lazy = self.services.lazy_export.as_ref()?;
-        let docx = || wordcraft_engine::io::save_bytes_opts("document.docx", &self.session.doc, opts);
+        // A PDF shows the fields as Word prints them, as the engine's own PDF writer does
+        // (`output_fields`); other formats keep the stored results. The document keeps its own.
+        let pdf = name.rsplit(['/', '\\']).next().and_then(|f| f.rsplit_once('.')).is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("pdf"));
+        let docx = || {
+            let printed = if pdf { wordcraft_engine::cmd::references::output_fields(&self.session.doc) } else { None };
+            wordcraft_engine::io::save_bytes_opts("document.docx", printed.as_ref().unwrap_or(&self.session.doc), opts)
+        };
         Some(lazy(name, password, &docx)?.map(|()| json!({"exporting": name, "pending": true})))
     }
 
     /// Tell the host the command `id` is about to run ([`Services::on_command`]).
-    fn announce_command(&self, id: &str) {
+    pub(crate) fn announce_command(&self, id: &str) {
         if let Some(seen) = &self.services.on_command {
             seen(id);
         }
