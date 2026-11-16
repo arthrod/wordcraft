@@ -64,6 +64,9 @@ pub const MAX_FONT_COPIES: usize = 256;
 /// Total font bytes one `renderPdf` request carries (user fonts cap at
 /// `wordcraft_fonts::MAX_FONT_FILE_BYTES` each; this bounds the batch).
 pub const MAX_FONT_TOTAL_BYTES: usize = 128 << 20;
+/// Most faces one `renderPdf` request lists as drawn ([`PdfRenderRequest::drawn`]): the
+/// engine's own bound on that list (`wordcraft_engine::strict::MAX_PDF_FACES`).
+pub const MAX_DRAWN_FACES: usize = 4096;
 /// Longest format name (`rtf`, `odt`, `docx`…) a `convert` request accepts, in bytes.
 pub const MAX_FORMAT_BYTES: usize = 32;
 /// Longest password a `convert` request carries, in bytes.
@@ -383,6 +386,13 @@ pub struct PdfRenderRequest {
     pub fonts: Vec<FontCopy>,
     /// How the PDF shows the document. Not part of the document, so not in the package.
     pub options: PdfJobOptions,
+    /// For a strict job, every face the client's own PDF of this document draws text in, as
+    /// `(typographic family, style)` (`wordcraft_engine::strict::pdf_faces`), at most
+    /// [`MAX_DRAWN_FACES`]: the worker fails the job when a copy it could not install is one of
+    /// them. `None` when the client does not know the whole list (an older client, or a list it
+    /// had to cut): a strict job then fails when any copy could not be installed. Rides in the
+    /// JSON part as `drawn`.
+    pub drawn: Option<Vec<(String, String)>>,
 }
 
 /// How a `renderPdf` job shows the document: the engine's export options for a PDF (Print
@@ -404,8 +414,9 @@ pub struct PdfJobOptions {
     pub numeral: Numeral,
     /// A strict export: the page already checked that nothing would be left out with its own
     /// faces, so the worker fails the job when a font copy it could not install is one the text
-    /// asks for, or a character then has no face to draw it, rather than let that text fall
-    /// back. Off, such a copy is skipped and the export runs. An older worker ignores it.
+    /// is drawn in ([`PdfRenderRequest::drawn`]; any, without that list), or a character then has
+    /// no face to draw it, rather than let that text fall back. Off, such a copy is skipped and
+    /// the export runs. An older worker ignores it.
     pub strict: bool,
 }
 
@@ -441,6 +452,9 @@ struct PdfMeta {
     fonts: Vec<FontMeta>,
     #[serde(default)]
     options: PdfJobOptions,
+    /// [`PdfRenderRequest::drawn`]; absent from an older client's request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    drawn: Option<Vec<FontMeta>>,
 }
 
 /// One font's names inside [`PdfMeta`]; its bytes ride as a binary part.
@@ -556,6 +570,7 @@ pub fn encode_pdf_request(req: &PdfRenderRequest) -> Result<Vec<u8>, ProtoError>
     let meta = encode_payload(&PdfMeta {
         fonts: req.fonts.iter().map(|f| FontMeta { family: f.family.clone(), style: f.style.clone() }).collect(),
         options: req.options,
+        drawn: req.drawn.as_ref().map(|d| d.iter().map(|(family, style)| FontMeta { family: family.clone(), style: style.clone() }).collect()),
     })?;
     let mut parts: Vec<&[u8]> = Vec::with_capacity(req.fonts.len().saturating_add(2));
     parts.push(&meta);
@@ -583,6 +598,11 @@ pub fn decode_pdf_request(bytes: &[u8]) -> Result<PdfRenderRequest, ProtoError> 
     if meta.fonts.len() > MAX_FONT_COPIES {
         return Err(ProtoError::TooLarge { limit: MAX_FONT_COPIES, got: meta.fonts.len() });
     }
+    if let Some(drawn) = &meta.drawn
+        && drawn.len() > MAX_DRAWN_FACES
+    {
+        return Err(ProtoError::TooLarge { limit: MAX_DRAWN_FACES, got: drawn.len() });
+    }
     let font_total = parts[2..].iter().fold(0usize, |a, p| a.saturating_add(p.len()));
     if font_total > MAX_FONT_TOTAL_BYTES {
         return Err(ProtoError::TooLarge { limit: MAX_FONT_TOTAL_BYTES, got: font_total });
@@ -599,6 +619,7 @@ pub fn decode_pdf_request(bytes: &[u8]) -> Result<PdfRenderRequest, ProtoError> 
             .map(|(f, bytes)| FontCopy { family: f.family, style: f.style, bytes: bytes.to_vec() })
             .collect(),
         options: meta.options,
+        drawn: meta.drawn.map(|d| d.into_iter().map(|f| (f.family, f.style)).collect()),
     })
 }
 
@@ -656,11 +677,12 @@ pub fn reply_payload_limit(kind: Kind) -> usize {
 }
 
 /// Validate a [`PdfRenderRequest`] against the protocol bounds before a worker runs it, like
-/// [`check_request_error`]: `TooLarge` past [`MAX_PDF_DOC_BYTES`], [`MAX_FONT_COPIES`] or
-/// [`MAX_FONT_TOTAL_BYTES`], `BadRequest` for an empty package.
+/// [`check_request_error`]: `TooLarge` past [`MAX_PDF_DOC_BYTES`], [`MAX_FONT_COPIES`],
+/// [`MAX_FONT_TOTAL_BYTES`] or [`MAX_DRAWN_FACES`], `BadRequest` for an empty package.
 pub fn pdf_request_error(req: &PdfRenderRequest) -> Option<ErrorCode> {
     let font_total = req.fonts.iter().fold(0usize, |a, f| a.saturating_add(f.bytes.len()));
-    if req.docx.len() > MAX_PDF_DOC_BYTES || req.fonts.len() > MAX_FONT_COPIES || font_total > MAX_FONT_TOTAL_BYTES {
+    let drawn = req.drawn.as_ref().map_or(0, Vec::len);
+    if req.docx.len() > MAX_PDF_DOC_BYTES || req.fonts.len() > MAX_FONT_COPIES || font_total > MAX_FONT_TOTAL_BYTES || drawn > MAX_DRAWN_FACES {
         return Some(ErrorCode::TooLarge);
     }
     if req.docx.is_empty() {
@@ -1094,6 +1116,7 @@ mod tests {
                 FontCopy { family: "Liter".into(), style: "Italic".into(), bytes: vec![0, 1, 0, 0, 8, 8, 8] },
             ],
             options: PdfJobOptions { markup: true, comments: true, numeral: Numeral::Context, strict: false },
+            drawn: Some(vec![("Inter".into(), "Regular".into()), ("Source Serif 4".into(), "Bold Italic".into())]),
         };
         let bytes = encode_pdf_request(&req).unwrap();
         let parts = unpack_binary(&bytes).unwrap();
@@ -1106,7 +1129,8 @@ mod tests {
         assert_eq!(parts[3], req.fonts[1].bytes.as_slice());
         assert_eq!(decode_pdf_request(&bytes).unwrap(), req);
         // A request without fonts is meta + docx and nothing else.
-        let bare = PdfRenderRequest { fonts: Vec::new(), ..req };
+        assert_eq!(meta["drawn"][1]["style"], "Bold Italic");
+        let bare = PdfRenderRequest { fonts: Vec::new(), drawn: None, ..req };
         assert_eq!(decode_pdf_request(&encode_pdf_request(&bare).unwrap()).unwrap(), bare);
     }
 
@@ -1119,7 +1143,7 @@ mod tests {
             PdfJobOptions { markup: true, comments: true, numeral: Numeral::Hindi, strict: true },
             PdfJobOptions { markup: false, comments: true, numeral: Numeral::Context, strict: false },
         ] {
-            let req = PdfRenderRequest { docx: b"PK".to_vec(), fonts: Vec::new(), options };
+            let req = PdfRenderRequest { docx: b"PK".to_vec(), fonts: Vec::new(), options, drawn: None };
             let bytes = encode_pdf_request(&req).unwrap();
             let meta: serde_json::Value = serde_json::from_slice(unpack_binary(&bytes).unwrap()[0]).unwrap();
             assert_eq!(meta["options"]["markup"], options.markup);
@@ -1132,6 +1156,7 @@ mod tests {
                     docx: b"PK".to_vec(),
                     fonts: Vec::new(),
                     options: PdfJobOptions { numeral: Numeral::Hindi, ..Default::default() },
+                    drawn: None,
                 })
                 .unwrap(),
             )
@@ -1165,6 +1190,7 @@ mod tests {
                 docx: b"PK".to_vec(),
                 fonts: Vec::new(),
                 options: PdfJobOptions { markup: true, comments: true, numeral: Numeral::Hindi, strict: true },
+                drawn: Some(vec![("Inter".into(), "Regular".into())]),
             })
             .unwrap(),
         )
@@ -1172,6 +1198,33 @@ mod tests {
             .to_vec();
         let old: OldPdfMeta = decode_payload(&new_meta).unwrap();
         assert!(old.fonts.is_empty());
+    }
+
+    /// Review finding (gate 3, the strict font check): a strict job carries the faces the
+    /// client's PDF draws text in, so the worker decides from what the layout resolved rather
+    /// than from the font names the document asks for. The list is additive both ways (an older
+    /// client sends none: `None`, "not known"), bounded, and a junk list is a decode error.
+    #[test]
+    fn pdf_request_carries_the_faces_its_text_is_drawn_in() {
+        let frame = |meta: serde_json::Value| pack_binary(&[&encode_payload(&meta).unwrap(), b"PK"]).unwrap();
+        assert_eq!(decode_pdf_request(&frame(serde_json::json!({"fonts": []}))).unwrap().drawn, None);
+        assert_eq!(decode_pdf_request(&frame(serde_json::json!({"fonts": [], "drawn": []}))).unwrap().drawn, Some(Vec::new()));
+        let drawn = decode_pdf_request(&frame(serde_json::json!({"fonts": [], "drawn": [{"family": "Corrupt Copy Sans", "style": "SemiBold"}]})))
+            .unwrap()
+            .drawn;
+        assert_eq!(drawn, Some(vec![("Corrupt Copy Sans".to_string(), "SemiBold".to_string())]));
+        // No list on the wire when there is none.
+        let none = PdfRenderRequest { docx: b"PK".to_vec(), fonts: Vec::new(), options: PdfJobOptions::default(), drawn: None };
+        let meta: serde_json::Value = serde_json::from_slice(unpack_binary(&encode_pdf_request(&none).unwrap()).unwrap()[0]).unwrap();
+        assert!(meta.get("drawn").is_none());
+        for junk in [serde_json::json!(5), serde_json::json!(["Inter"]), serde_json::json!([{"family": "Inter"}])] {
+            assert!(matches!(decode_pdf_request(&frame(serde_json::json!({"fonts": [], "drawn": junk}))), Err(ProtoError::Decode(_))), "{junk}");
+        }
+        let many: Vec<serde_json::Value> = (0..=MAX_DRAWN_FACES).map(|_| serde_json::json!({"family": "a", "style": "b"})).collect();
+        assert!(matches!(
+            decode_pdf_request(&frame(serde_json::json!({"fonts": [], "drawn": many}))),
+            Err(ProtoError::TooLarge { limit: MAX_DRAWN_FACES, .. })
+        ));
     }
 
     /// Hostile options are a typed decode error, never a panic or a silent default.
@@ -1238,6 +1291,7 @@ mod tests {
             docx: b"PK".to_vec(),
             fonts: vec![FontCopy { family: "a".into(), style: "b".into(), bytes: vec![1; 8] }],
             options: PdfJobOptions::default(),
+            drawn: Some(vec![("a".into(), "b".into()); MAX_DRAWN_FACES]),
         };
         assert_eq!(pdf_request_error(&ok), None);
         assert_eq!(
@@ -1267,6 +1321,10 @@ mod tests {
             Some(ErrorCode::TooLarge)
         );
         assert_eq!(pdf_request_error(&PdfRenderRequest { docx: Vec::new(), fonts: Vec::new(), ..ok.clone() }), Some(ErrorCode::BadRequest));
+        assert_eq!(
+            pdf_request_error(&PdfRenderRequest { drawn: Some(vec![(String::new(), String::new()); MAX_DRAWN_FACES + 1]), ..ok.clone() }),
+            Some(ErrorCode::TooLarge)
+        );
     }
 
     #[test]

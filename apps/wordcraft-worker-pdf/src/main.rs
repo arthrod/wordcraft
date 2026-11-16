@@ -102,7 +102,7 @@ fn render_pdf(payload: &[u8]) -> Result<(Kind, Vec<u8>), (ErrorCode, String)> {
     let pdf = pdf_options(req.options);
     let lay = wordcraft_layout::layout(&doc, &mut wordcraft_layout::LayoutCache::new(), &pdf.layout_options());
     if req.options.strict
-        && let Some(refusal) = strict_font_refusal(&doc, &lay, &pdf, &lost)
+        && let Some(refusal) = strict_font_refusal(&doc, &lay, &pdf, &lost, req.drawn.as_deref())
     {
         return error(ErrorCode::Internal, refusal);
     }
@@ -128,27 +128,31 @@ fn pdf_options(o: proto::PdfJobOptions) -> wordcraft_pdf::PdfOptions {
 
 /// Install the client's font copies the way a `.docx` file's embedded fonts are installed: the
 /// file decoded (TTF/OTF/TTC/WOFF/WOFF2), then registered under the family the document
-/// resolves it under. Faces already available stay as they are. Returns the families of the
-/// copies that could not be installed (a file that does not decode, or holds no face this
-/// database takes), each once — at most [`proto::MAX_FONT_COPIES`], as the copies are.
-fn install_font_copies(fonts: &[proto::FontCopy]) -> Vec<String> {
-    let mut lost: Vec<String> = Vec::new();
+/// resolves it under. Faces already available stay as they are. Returns the copies that could
+/// not be installed (a file that does not decode, or holds no face this database takes) as
+/// `(family, style)`, each once — at most [`proto::MAX_FONT_COPIES`], as the copies are.
+fn install_font_copies(fonts: &[proto::FontCopy]) -> Vec<(String, String)> {
+    let mut lost: Vec<(String, String)> = Vec::new();
+    let mut kept: Vec<(String, String)> = Vec::new();
     let mut files: Vec<(Vec<u8>, String)> = Vec::new();
     for f in fonts {
+        let face = (f.family.clone(), f.style.clone());
         match wordcraft_fonts::decode_font_file(&f.bytes) {
-            Ok(data) => files.push((data, f.family.clone())),
-            Err(_) if !lost.contains(&f.family) => lost.push(f.family.clone()),
+            Ok(data) => {
+                files.push((data, f.family.clone()));
+                kept.push(face);
+            }
+            Err(_) if !lost.contains(&face) => lost.push(face),
             Err(_) => {}
         }
     }
     let db = wordcraft_fonts::FontDb::global();
-    let families: Vec<String> = files.iter().map(|(_, family)| family.clone()).collect();
     if !files.is_empty() {
         db.add_document_fonts(files);
     }
-    for family in families {
-        if !db.has_family(&family) && !lost.contains(&family) {
-            lost.push(family);
+    for face in kept {
+        if !db.has_family(&face.0) && !lost.contains(&face) {
+            lost.push(face);
         }
     }
     lost
@@ -157,36 +161,51 @@ fn install_font_copies(fonts: &[proto::FontCopy]) -> Vec<String> {
 /// Families a refusal names before it says "…".
 const NAMED_FAMILIES: usize = 4;
 
-/// A strict job's refusal when copies were `lost` ([`install_font_copies`]): the page checked
-/// the document with every face it has, so here only what those copies would have drawn can be
-/// missing — text that asks for a lost family (and falls back to another face), or characters
-/// no installed face draws. `None` when the lost copies change nothing in this PDF.
+/// A strict job's refusal when copies were `lost` ([`install_font_copies`]). The page checked
+/// the document with every face it has, so here only what those copies would have drawn can
+/// change, and the page says which faces its PDF draws text in (`drawn`, from the layout, so
+/// whatever name the document gives a face): a lost copy among them is text that would fall
+/// back. With no list (an older page, or one that had to cut it) nothing shows a lost copy is
+/// unused, so any refuses. Characters no installed face draws refuse too. `None` when the lost
+/// copies change nothing in this PDF.
 fn strict_font_refusal(
     doc: &wordcraft_doc::Document,
     lay: &wordcraft_layout::DocLayout,
     pdf: &wordcraft_pdf::PdfOptions,
-    lost: &[String],
+    lost: &[(String, String)],
+    drawn: Option<&[(String, String)]>,
 ) -> Option<String> {
     if lost.is_empty() {
         return None;
     }
-    let asked: Vec<String> = lay.substituted_fonts().into_iter().map(|(font, _)| font.trim().to_lowercase()).collect();
-    let named: Vec<&str> = lost.iter().filter(|f| asked.contains(&f.trim().to_lowercase())).map(String::as_str).collect();
-    if !named.is_empty() {
-        let shown: Vec<&str> = named.iter().copied().take(NAMED_FAMILIES).collect();
-        let more = if named.len() > shown.len() { ", …" } else { "" };
+    let face = |f: &(String, String)| format!("{} {}", f.0, f.1);
+    let named = |faces: &[&(String, String)]| {
+        let shown: Vec<String> = faces.iter().take(NAMED_FAMILIES).map(|f| face(f)).collect();
+        let more = if faces.len() > shown.len() { ", …" } else { "" };
+        format!("{}{more}", shown.join(", "))
+    };
+    let all: Vec<&(String, String)> = lost.iter().collect();
+    let Some(drawn) = drawn else {
         return Some(format!(
-            "strict: the PDF export could not install {} font(s) the text is set in, and that text would fall back: {}{more}",
-            named.len(),
-            shown.join(", ")
+            "strict: the PDF export could not install {} font(s), and the page did not say which faces its text is drawn in: {}",
+            all.len(),
+            named(&all)
+        ));
+    };
+    let used: Vec<&(String, String)> = lost.iter().filter(|f| drawn.contains(f)).collect();
+    if !used.is_empty() {
+        return Some(format!(
+            "strict: the PDF export could not install {} font(s) the text is drawn in, and that text would fall back: {}",
+            used.len(),
+            named(&used)
         ));
     }
     let missing = lay.missing_glyphs(doc, &pdf.display_options(), None);
     (missing.total > 0).then(|| {
         format!(
             "strict: the PDF export could not install {} font(s) ({}), and {} character(s) would then have no face to draw them",
-            lost.len(),
-            lost.iter().take(NAMED_FAMILIES).cloned().collect::<Vec<_>>().join(", "),
+            all.len(),
+            named(&all),
             missing.total
         )
     })
@@ -293,7 +312,7 @@ mod tests {
 
     #[test]
     fn render_pdf_answers_a_pdf_for_a_document_package() {
-        let req = wordcraft_worker_proto::PdfRenderRequest { docx: sample_docx(), fonts: Vec::new(), options: Default::default() };
+        let req = wordcraft_worker_proto::PdfRenderRequest { docx: sample_docx(), fonts: Vec::new(), options: Default::default(), drawn: None };
         let (h, p) = request(&req, 1);
         let (rh, rp) = handle_message(&h, &p);
         let env = proto::decode_envelope(&rh).unwrap();
@@ -315,13 +334,14 @@ mod tests {
 
         // An empty package is a bad request; a blob that is not a package is an internal
         // error — both typed, never a panic.
-        let req = wordcraft_worker_proto::PdfRenderRequest { docx: Vec::new(), fonts: Vec::new(), options: Default::default() };
+        let req = wordcraft_worker_proto::PdfRenderRequest { docx: Vec::new(), fonts: Vec::new(), options: Default::default(), drawn: None };
         let (h, p) = request(&req, 2);
         let (_rh, rp) = handle_message(&h, &p);
         let body: proto::ErrorReply = serde_json::from_slice(&rp).unwrap();
         assert_eq!(body.code, ErrorCode::BadRequest);
 
-        let req = wordcraft_worker_proto::PdfRenderRequest { docx: b"not a package".to_vec(), fonts: Vec::new(), options: Default::default() };
+        let req =
+            wordcraft_worker_proto::PdfRenderRequest { docx: b"not a package".to_vec(), fonts: Vec::new(), options: Default::default(), drawn: None };
         let (h, p) = request(&req, 3);
         let (rh, rp) = handle_message(&h, &p);
         assert_eq!(proto::decode_envelope(&rh).unwrap().kind, Kind::Error);
@@ -365,7 +385,7 @@ mod tests {
             eprintln!("skipped: /tmp/sample.docx not present (wordcraft-cli run --template sample --save /tmp/sample.docx)");
             return;
         };
-        let req = wordcraft_worker_proto::PdfRenderRequest { docx, fonts: Vec::new(), options: Default::default() };
+        let req = wordcraft_worker_proto::PdfRenderRequest { docx, fonts: Vec::new(), options: Default::default(), drawn: None };
         let (h, p) = request(&req, 21);
         let t0 = std::time::Instant::now();
         let (rh, rp) = handle_message(&h, &p);
@@ -384,9 +404,11 @@ mod tests {
         wordcraft_engine::io::save_bytes_opts("x.docx", &s.doc, &Default::default()).unwrap()
     }
 
-    /// The reply to a `renderPdf` of `docx` with `fonts`, strict or not: the PDF, or the error.
-    fn render(docx: Vec<u8>, fonts: Vec<proto::FontCopy>, strict: bool) -> Result<Vec<u8>, proto::ErrorReply> {
-        let req = wordcraft_worker_proto::PdfRenderRequest { docx, fonts, options: proto::PdfJobOptions { strict, ..Default::default() } };
+    /// The reply to a `renderPdf` of `docx` with `fonts`, strict or not, listing `drawn` as the
+    /// faces the page's PDF draws text in: the PDF, or the error.
+    fn render(docx: Vec<u8>, fonts: Vec<proto::FontCopy>, strict: bool, drawn: Option<&[(&str, &str)]>) -> Result<Vec<u8>, proto::ErrorReply> {
+        let drawn = drawn.map(|d| d.iter().map(|(f, s)| (f.to_string(), s.to_string())).collect());
+        let req = wordcraft_worker_proto::PdfRenderRequest { docx, fonts, options: proto::PdfJobOptions { strict, ..Default::default() }, drawn };
         let (h, p) = request(&req, 41);
         let (rh, rp) = handle_message(&h, &p);
         match proto::decode_envelope(&rh).unwrap().kind {
@@ -396,23 +418,48 @@ mod tests {
     }
 
     /// Review finding (font copies the worker cannot install): a copy that does not decode is
-    /// reported, not dropped in silence. A strict job whose text is set in that family fails with
+    /// reported, not dropped in silence. A strict job whose text is drawn in that face fails with
     /// a typed error naming it; the same job not strict still exports (that text falls back, as
-    /// before); and a strict job whose text never asks for it is not refused for it.
+    /// before); and a strict job whose text is never drawn in it is not refused for it.
     #[test]
     fn a_font_copy_the_worker_cannot_install_fails_a_strict_job_that_uses_it() {
         let corrupt = || vec![proto::FontCopy { family: "Corrupt Copy Sans".into(), style: "Regular".into(), bytes: b"not a font file".to_vec() }];
-        let err = render(docx_in("Corrupt Copy Sans"), corrupt(), true).unwrap_err();
+        let drawn: &[(&str, &str)] = &[("Corrupt Copy Sans", "Regular")];
+        let err = render(docx_in("Corrupt Copy Sans"), corrupt(), true, Some(drawn)).unwrap_err();
         assert_eq!(err.code, ErrorCode::Internal);
         assert!(err.message.starts_with("strict: ") && err.message.contains("Corrupt Copy Sans"), "{}", err.message);
-        assert!(render(docx_in("Corrupt Copy Sans"), corrupt(), false).unwrap().starts_with(b"%PDF"), "not strict: the export runs");
-        assert!(render(sample_docx(), corrupt(), true).unwrap().starts_with(b"%PDF"), "the text never asks for it");
+        assert!(render(docx_in("Corrupt Copy Sans"), corrupt(), false, None).unwrap().starts_with(b"%PDF"), "not strict: the export runs");
+        assert!(render(sample_docx(), corrupt(), true, Some(&[])).unwrap().starts_with(b"%PDF"), "no text is drawn in it");
         // A copy that installs is not reported.
         let good = wordcraft_fonts::bundled_by_stem("SourceSerif4-Regular").unwrap().to_vec();
         let fine = vec![proto::FontCopy { family: "Installed Copy Serif".into(), style: "Regular".into(), bytes: good }];
         assert!(install_font_copies(&fine).is_empty());
-        assert!(render(docx_in("Installed Copy Serif"), fine, true).unwrap().starts_with(b"%PDF"));
-        assert_eq!(install_font_copies(&corrupt()), ["Corrupt Copy Sans"]);
+        assert!(render(docx_in("Installed Copy Serif"), fine, true, Some(&[("Installed Copy Serif", "Regular")])).unwrap().starts_with(b"%PDF"));
+        assert_eq!(install_font_copies(&corrupt()), [("Corrupt Copy Sans".to_string(), "Regular".to_string())]);
+    }
+
+    /// Review finding (gate 3, F3): the strict check compared a lost copy's typographic family
+    /// with the font name the document asks for, so a document naming the face another way
+    /// Word does (its legacy family "Corrupt Copy Sans SemiBold", a charset-suffixed name, an
+    /// embedded font's own name) missed it: the text fell back to a face that covers it and a
+    /// strict job answered a PDF. The worker now decides from the faces the page's PDF draws
+    /// text in (`drawn`), whatever the document calls them; and with no list (an older page)
+    /// any lost copy fails a strict job, since nothing shows it is unused.
+    #[test]
+    fn a_lost_copy_the_text_is_drawn_in_fails_a_strict_job_whatever_the_document_calls_it() {
+        let copy = || vec![proto::FontCopy { family: "Corrupt Copy Sans".into(), style: "SemiBold".into(), bytes: b"not a font file".to_vec() }];
+        let drawn: &[(&str, &str)] = &[("Corrupt Copy Sans", "SemiBold")];
+        for name in ["Corrupt Copy Sans SemiBold", "Corrupt Copy Sans;panose-020B0604020202020204", "___WRD_EMBED_SUB_46"] {
+            let err = render(docx_in(name), copy(), true, Some(drawn)).unwrap_err();
+            assert_eq!(err.code, ErrorCode::Internal, "{name}");
+            assert!(err.message.starts_with("strict: ") && err.message.contains("Corrupt Copy Sans SemiBold"), "{name}: {}", err.message);
+            assert!(render(docx_in(name), copy(), false, None).unwrap().starts_with(b"%PDF"), "{name}: not strict, the export runs");
+        }
+        // Another style of the same family is another face: losing it refuses nothing here.
+        assert!(render(docx_in("Corrupt Copy Sans"), copy(), true, Some(&[("Corrupt Copy Sans", "Regular")])).unwrap().starts_with(b"%PDF"));
+        let err = render(sample_docx(), copy(), true, None).unwrap_err();
+        assert!(err.message.starts_with("strict: ") && err.message.contains("Corrupt Copy Sans SemiBold"), "{}", err.message);
+        assert!(render(sample_docx(), Vec::new(), true, None).unwrap().starts_with(b"%PDF"), "nothing lost, nothing to refuse");
     }
 
     /// A document with a comment and a tracked deletion, dated so its PDFs compare byte for byte.
@@ -432,7 +479,7 @@ mod tests {
 
     /// The `renderPdf` reply's bytes for `docx` rendered with `options`.
     fn worker_pdf(docx: &[u8], options: proto::PdfJobOptions) -> Vec<u8> {
-        let req = wordcraft_worker_proto::PdfRenderRequest { docx: docx.to_vec(), fonts: Vec::new(), options };
+        let req = wordcraft_worker_proto::PdfRenderRequest { docx: docx.to_vec(), fonts: Vec::new(), options, drawn: None };
         let (h, p) = request(&req, 31);
         let (rh, rp) = handle_message(&h, &p);
         assert_eq!(proto::decode_envelope(&rh).unwrap().kind, Kind::Pdf, "{}", String::from_utf8_lossy(&rp));
@@ -476,7 +523,7 @@ mod tests {
     fn font_copies_install_without_panicking() {
         // Junk bytes are refused by the decoder and reported, never a panic.
         let fonts = vec![proto::FontCopy { family: "NotAFont".into(), style: "Regular".into(), bytes: vec![0, 1, 2, 3, 4] }];
-        assert_eq!(install_font_copies(&fonts), ["NotAFont"]);
+        assert_eq!(install_font_copies(&fonts), [("NotAFont".to_string(), "Regular".to_string())]);
         assert!(install_font_copies(&[]).is_empty());
     }
 }

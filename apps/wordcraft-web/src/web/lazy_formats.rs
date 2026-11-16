@@ -247,6 +247,37 @@ pub(crate) fn font_batch(
     batch
 }
 
+/// What one PDF job carries for its fonts ([`pdf_fonts`]).
+#[derive(Debug)]
+pub(crate) struct PdfFonts {
+    pub(crate) batch: FontBatch,
+    /// [`wordcraft_worker_proto::PdfRenderRequest::drawn`]: for a strict job, the faces its PDF
+    /// draws text in; `None` otherwise.
+    pub(crate) drawn: Option<Vec<(String, String)>>,
+}
+
+/// The font copies of `faces` one PDF job carries within `budget` ([`font_batch`]) and, for a
+/// `strict` job, the faces its PDF draws text in (`used`, which lays the document out), so the
+/// worker refuses when a copy it cannot install is one of them. A strict job with no copies to
+/// lose is not laid out (its list is empty: the worker never reads it). `Err` is a strict
+/// job's refusal: a face the text is drawn in does not fit the budget.
+pub(crate) fn pdf_fonts(
+    faces: Vec<(String, String, std::sync::Arc<Vec<u8>>)>,
+    used: impl FnOnce() -> Vec<(String, String)>,
+    budget: FontBudget,
+    strict: bool,
+) -> Result<PdfFonts, String> {
+    if !strict {
+        return Ok(PdfFonts { batch: font_batch(faces, used, budget), drawn: None });
+    }
+    let drawn = if faces.is_empty() { Vec::new() } else { used() };
+    let batch = font_batch(faces, || drawn.clone(), budget);
+    match batch.strict_refusal() {
+        Some(refusal) => Err(refusal),
+        None => Ok(PdfFonts { batch, drawn: Some(drawn) }),
+    }
+}
+
 /// The length of the base64 a package of `raw` bytes becomes (padded, as
 /// `wordcraft_engine::cmd::insert::base64_encode` writes it); saturates.
 pub(crate) fn base64_len(raw: usize) -> usize {
@@ -1018,6 +1049,28 @@ mod tests {
         let batch = font_batch(big, || vec![("Huge".into(), "Regular".into())], FontBudget { count: 10, bytes: 5 });
         assert_eq!(batch.copies.len(), 3);
         assert_eq!((batch.left_used, batch.left_used_named.as_slice()), (1, ["Huge".to_string()].as_slice()));
+    }
+
+    /// Review finding (gate 3, the strict font check): a strict job tells the worker which faces
+    /// its PDF draws text in, so the worker can tell a lost copy the text needs from one it does
+    /// not, whatever the document names the face. A job that is not strict sends no list and
+    /// lays nothing out while the copies fit; with no copies at all nothing can be lost, so
+    /// nothing is laid out either.
+    #[test]
+    fn a_strict_pdf_job_sends_the_faces_its_text_is_drawn_in() {
+        let drawn = || vec![("Family 1".to_string(), "Regular".to_string())];
+        let job = pdf_fonts(faces(3), drawn, FONT_BUDGET, true).unwrap();
+        assert_eq!(job.drawn, Some(drawn()));
+        assert_eq!(job.batch.copies.len(), 3);
+        let job = pdf_fonts(faces(3), || panic!("laid out for a job that is not strict"), FONT_BUDGET, false).unwrap();
+        assert_eq!((job.drawn, job.batch.copies.len()), (None, 3));
+        let job = pdf_fonts(Vec::new(), || panic!("laid out with no copies to lose"), FONT_BUDGET, true).unwrap();
+        assert_eq!((job.drawn, job.batch.copies.len()), (Some(Vec::new()), 0));
+        // The budget's own refusal still comes first.
+        let budget = FontBudget { count: 1, bytes: FONT_BUDGET.bytes };
+        let err =
+            pdf_fonts(faces(3), || vec![("Family 1".into(), "Regular".into()), ("Family 2".into(), "Regular".into())], budget, true).unwrap_err();
+        assert!(err.starts_with("strict: 1 font face(s)"), "{err}");
     }
 
     /// Review finding (the clients' inbound guards): a worker's message is judged by its shape
