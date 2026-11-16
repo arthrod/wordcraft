@@ -59,8 +59,10 @@ function check(name, ok, detail = "") {
 // A page with its network log, console errors and uncaught errors recorded. `blocked`
 // answers matching URLs with 404; `stalled` never answers them (a download that hangs);
 // `noWebGl` makes every canvas refuse a WebGL context; `rootAttrs` are set on
-// #wordcraft_viewer as the parser inserts it, before the page module starts.
-async function open(browser, base, path, { blocked = null, stalled = null, noWebGl = false, rootAttrs = null, width = 1280, height = 800 } = {}) {
+// #wordcraft_viewer as the parser inserts it, before the page module starts. `hooks` lets a case
+// hold the workers' replies (`window.__hold`, delivered in order by `window.__release()`) and make
+// `postMessage` throw (`window.__failPost`); `holdFromStart` holds from the first one, `ready`.
+async function open(browser, base, path, { blocked = null, stalled = null, noWebGl = false, rootAttrs = null, hooks = false, holdFromStart = false, width = 1280, height = 800 } = {}) {
   const page = await browser.newPage();
   await page.setViewport({ width, height, deviceScaleFactor: 1 });
   const log = { requests: [], consoleErrors: [], uncaught: [] };
@@ -95,6 +97,33 @@ async function open(browser, base, path, { blocked = null, stalled = null, noWeb
       else held.push(r); // unanswered until the case releases it
 
     });
+  }
+  if (hooks) {
+    await page.evaluateOnNewDocument((hold) => {
+      window.__hold = hold;
+      window.__held = [];
+      window.__failPost = false;
+      window.__release = () => {
+        window.__hold = false;
+        for (const deliver of window.__held.splice(0)) deliver();
+      };
+      const handler = Object.getOwnPropertyDescriptor(Worker.prototype, "onmessage");
+      Object.defineProperty(Worker.prototype, "onmessage", {
+        configurable: true,
+        get() {
+          return handler.get.call(this);
+        },
+        set(fn) {
+          const worker = this;
+          handler.set.call(this, fn && ((e) => (window.__hold ? window.__held.push(() => fn.call(worker, e)) : fn.call(worker, e))));
+        },
+      });
+      const post = Worker.prototype.postMessage;
+      Worker.prototype.postMessage = function (...a) {
+        if (window.__failPost) throw new DOMException("refused by the test", "DataCloneError");
+        return post.apply(this, a);
+      };
+    }, holdFromStart);
   }
   if (noWebGl) {
     await page.evaluateOnNewDocument(() => {
@@ -561,6 +590,51 @@ try {
       check("font then open: no uncaught errors", race.log.uncaught.length === 0, race.log.uncaught.join(" | "));
       await race.page.close();
     }
+  }
+
+  // ---- open() against the startup download, another open(), and the worker's replies ----
+  {
+    // Two blank documents with page breaks: 6 pages, and 41 (long enough to scroll away).
+    const maker = await open(browser, base, "/?mode=edit");
+    await waitAttr(maker.page, "data-wordcraft-phase", "editing");
+    const [six, long] = await maker.page.evaluate(async () => {
+      const make = async (breaks) => {
+        await window.wordcraft.execute("file.new", {});
+        for (let i = 0; i < breaks; i++) await window.wordcraft.execute("insert.pageBreak", {});
+        return Array.from(await window.wordcraft.exportDocx());
+      };
+      return [await make(5), await make(40)];
+    });
+    await maker.page.close();
+    const shown = (p) => p.evaluate(() => ({ count: window.wordcraftViewer.pageCount(), pages: Number(document.querySelector("#wordcraft_viewer").dataset.pages) }));
+
+    // Pages answered after the reader scrolled away (their canvases gone) are painted again when
+    // scrolled back to, not left blank.
+    const away = await open(browser, base, "/", { hooks: true });
+    await waitAttr(away.page, "data-wordcraft-painted", "true");
+    await away.page.evaluate((doc) => window.wordcraftViewer.open(new Uint8Array(doc)), long);
+    await new Promise((r) => setTimeout(r, 1500));
+    const back = await away.page.evaluate(async () => {
+      const frames = (n) => new Promise((done) => (function step(k) { k ? requestAnimationFrame(() => step(k - 1)) : done(); })(n));
+      const scroller = document.querySelector("#wordcraft_viewer [role=document]");
+      const at = Math.round((scroller.scrollHeight * 20) / 41);
+      window.__hold = true;
+      scroller.scrollTop = at;
+      await frames(3);
+      const asked = [...document.querySelectorAll("#wordcraft_viewer canvas:not([data-scale])")].map((c) => Number(c.dataset.page));
+      scroller.scrollTop = scroller.scrollHeight;
+      await frames(3);
+      const gone = asked.every((i) => !document.querySelector(`#wordcraft_viewer canvas[data-page="${i}"]`));
+      window.__release();
+      await new Promise((r) => setTimeout(r, 1500));
+      scroller.scrollTop = at;
+      await new Promise((r) => setTimeout(r, 3000));
+      const painted = asked.map((i) => document.querySelector(`#wordcraft_viewer canvas[data-page="${i}"]`)?.hasAttribute("data-scale") ?? false);
+      return { asked, gone, painted };
+    });
+    check("a page answered after its canvas went is painted when shown again", back.asked.length > 0 && back.gone && back.painted.every(Boolean), JSON.stringify(back));
+    check("scrolled away and back: no uncaught errors", away.log.uncaught.length === 0, away.log.uncaught.join(" | "));
+    await away.page.close();
   }
 
   // ---- the modes a host can choose ----

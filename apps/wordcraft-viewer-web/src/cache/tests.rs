@@ -140,3 +140,16 @@ fn a_resize_storm_never_asks_more_than_the_in_flight_limit() {
     assert_eq!(cache.arrived(key(0, 1.0), MB, &[0, 1]), Arrival::Paint { evict: vec![] });
     assert_eq!(cache.plan(&[key(0, 1.99), key(1, 1.99)]), vec![key(0, 1.99)]);
 }
+
+#[test]
+fn a_page_whose_canvas_went_is_asked_for_again() {
+    let mut cache = PageCache::new(64 * MB);
+    assert_eq!(cache.plan(&[key(0, 1.0)]), vec![key(0, 1.0)]);
+    // Scrolled away before the answer: its canvas went, so nothing would hold the pixels.
+    cache.forget(0);
+    assert_eq!(cache.arrived(key(0, 1.0), 4 * MB, &[]), Arrival::Stale);
+    assert_eq!(cache.painted(0), None);
+    assert_eq!(cache.used_bytes(), 0);
+    // Scrolled back: asked for again, not taken for painted.
+    assert_eq!(cache.plan(&[key(0, 1.0)]), vec![key(0, 1.0)]);
+}

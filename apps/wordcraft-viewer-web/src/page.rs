@@ -945,6 +945,12 @@ fn on_page(page: &Rc<Page>, generation: u32, key: PageKey, env: &proto::Envelope
                 state.cache.failed(key);
                 false
             }
+            // Its canvas went (scrolled away before the answer): the pixels would be held by
+            // nothing, so the page is asked for again when it is wanted.
+            Some(_) if !state.canvases.contains_key(&key.page) => {
+                state.cache.forget(key.page);
+                false
+            }
             Some(header) => {
                 let keep = page_indices(&wanted_pages(page, &state.sheet));
                 let pixels = payload.length().saturating_sub(proto::VIEW_PAGE_TRAILER_BYTES as u32);

@@ -128,6 +128,15 @@ impl PageCache {
         }
     }
 
+    /// Page `page` has nowhere to be painted (its canvas went before its answer came): it is
+    /// neither awaited nor painted, so it is asked for again when it is wanted.
+    pub fn forget(&mut self, page: u32) {
+        self.pending.remove(&page);
+        if let Some(gone) = self.painted.remove(&page) {
+            self.used = self.used.saturating_sub(gone.bytes);
+        }
+    }
+
     /// The key page `page` is painted at, if it is.
     pub fn painted(&self, page: u32) -> Option<PageKey> {
         self.painted.get(&page).map(|p| p.key)
