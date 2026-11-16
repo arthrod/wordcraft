@@ -54,6 +54,7 @@ const VIEWER_GLOBAL: &str = "wordcraftViewer";
 const TOO_LARGE: &str = "The document is too large for this viewer.";
 /// What the reader is told about a password longer than the viewer takes.
 const PASSWORD_TOO_LONG: &str = "That password is too long.";
+const EMPTY: &str = "The document is empty.";
 /// Pixels kept in painted pages outside the window, in bytes of RGBA.
 const CACHE_BUDGET_BYTES: u64 = 192 << 20;
 /// Where the document comes from. Kept after the viewer reads it: if the viewer fails, the
@@ -99,6 +100,9 @@ struct State {
     editor_seen: bool,
     /// `resolve`/`reject` of `open()` calls waiting for the worker's answer.
     open_waiters: Vec<(js_sys::Function, js_sys::Function)>,
+    /// The bytes and password of the document the worker last opened. The worker keeps it when
+    /// it refuses the next one, so the page shows it again and the editor is handed it.
+    shown: Option<(js_sys::Uint8Array, Option<String>)>,
 }
 
 struct Page {
@@ -313,6 +317,7 @@ fn launch(options: &JsValue, auto: bool) -> Result<JsValue, JsValue> {
             removed: false,
             editor_seen: false,
             open_waiters: Vec::new(),
+            shown: None,
         }),
     });
     let api = build_api(&page);
@@ -563,11 +568,16 @@ fn show_error(page: &Page, code: &str, text: &str) {
     notify(page, text);
 }
 
+/// Say `text` in the notice line.
+fn say(page: &Page, text: &str) {
+    page.notice.set_inner_text(text);
+    page.notice.set_hidden(false);
+}
+
 /// Say `text` in the notice line and reject the waiting `open()` calls with it. Alone, for a
 /// request refused beside an open document, which stays as it is (no error flag, its status).
 fn notify(page: &Page, text: &str) {
-    page.notice.set_inner_text(text);
-    page.notice.set_hidden(false);
+    say(page, text);
     let waiters = std::mem::take(&mut page.state.borrow_mut().open_waiters);
     for (_, reject) in waiters {
         let _ = reject.call1(&JsValue::NULL, &js_error(text));
@@ -589,6 +599,38 @@ fn refused(page: &Rc<Page>, text: &str) {
         notify(page, text);
     } else {
         document_failed(page, "document-failed", text);
+    }
+}
+
+/// The worker refused a replacement and still holds the document shown before it: show that
+/// one again, as it was (its bytes for the editor, its pages, no error flag), and say why.
+/// `false` when there was none.
+fn restore_shown(page: &Rc<Page>, text: &str) -> bool {
+    let Some((bytes, password)) = page.state.borrow().shown.clone() else { return false };
+    {
+        let mut state = page.state.borrow_mut();
+        state.docx = Some(bytes);
+        state.password = password;
+    }
+    if let Some(html) = html(page) {
+        let _ = html.remove_attribute("data-wordcraft-error");
+    }
+    show_page_count(page);
+    notify(page, text);
+    dispatch(page, Event::DocumentOpened);
+    relayout(page);
+    true
+}
+
+/// Why `length` bytes with `password` would never be sent to the worker, if they would not.
+fn refusal(length: u32, password: Option<&str>) -> Option<&'static str> {
+    if password.is_some_and(|p| p.len() > proto::MAX_PASSWORD_BYTES) {
+        return Some(PASSWORD_TOO_LONG);
+    }
+    match proto::view_open_request_prefix(password, length as usize) {
+        Ok(_) => None,
+        Err(proto::ProtoError::TooLarge { .. }) => Some(TOO_LARGE),
+        Err(_) => Some(EMPTY),
     }
 }
 
@@ -705,7 +747,7 @@ fn open_document(page: &Rc<Page>, bytes: js_sys::Uint8Array, password: Option<St
     let prefix = match proto::view_open_request_prefix(password.as_deref(), length as usize) {
         Ok(prefix) => prefix,
         Err(proto::ProtoError::TooLarge { .. }) => return refused(page, TOO_LARGE),
-        Err(_) => return refused(page, "The document is empty."),
+        Err(_) => return refused(page, EMPTY),
     };
     let Ok(prefix_len) = u32::try_from(prefix.len()) else { return };
     let Some(total) = prefix_len.checked_add(length) else { return };
@@ -756,7 +798,12 @@ fn on_opened(page: &Rc<Page>, generation: u32, env: &proto::Envelope, payload: &
     }
     if env.kind == proto::Kind::ViewOpened {
         return match worker::small_payload(payload).and_then(|b| proto::decode_payload::<proto::ViewOpenedReply>(&b).ok()) {
-            Some(opened) if proto::view_opened_reply_error(&opened).is_none() => apply_opened(page, opened),
+            Some(opened) if proto::view_opened_reply_error(&opened).is_none() => {
+                let mut state = page.state.borrow_mut();
+                state.shown = state.docx.clone().map(|bytes| (bytes, state.password.clone()));
+                drop(state);
+                apply_opened(page, opened)
+            }
             _ => document_failed(page, "viewer-failed", "The document viewer answered with something unreadable."),
         };
     }
@@ -764,10 +811,15 @@ fn on_opened(page: &Rc<Page>, generation: u32, env: &proto::Envelope, payload: &
     match reply.code {
         proto::ErrorCode::PasswordRequired => ask_password(page, "password-required", "This document is protected with a password."),
         proto::ErrorCode::WrongPassword => ask_password(page, "wrong-password", "That password does not open this document."),
-        proto::ErrorCode::TooLarge => document_failed(page, "document-failed", TOO_LARGE),
         // The worker's own failure (or a request it was never sent), not the file's.
         proto::ErrorCode::Internal => document_failed(page, "viewer-failed", "The document viewer could not start in this browser."),
-        _ => document_failed(page, "document-failed", "This file is not a Word document this viewer can read."),
+        // The file's: the worker still holds the document before it, which comes back.
+        code => {
+            let text = if code == proto::ErrorCode::TooLarge { TOO_LARGE } else { "This file is not a Word document this viewer can read." };
+            if !restore_shown(page, text) {
+                document_failed(page, "document-failed", text);
+            }
+        }
     }
 }
 
@@ -924,7 +976,9 @@ fn page_indices(wanted: &pages::Wanted) -> Vec<u32> {
 fn refresh(page: &Rc<Page>) {
     let mut guard = page.state.borrow_mut();
     let state = &mut *guard;
-    if state.removed || state.worker.is_none() || state.sheet.pages.is_empty() {
+    // Only the open document's pages: while a replacement opens or waits for its password,
+    // the sheet is still the old one's, and painting it would show it under the new one's name.
+    if state.removed || state.worker.is_none() || state.sheet.pages.is_empty() || !state.handover.document_open() {
         return;
     }
     let ratio = page.window.device_pixel_ratio();
@@ -1338,6 +1392,16 @@ fn build_api(page: &Rc<Page>) -> js_sys::Object {
         if !p.state.borrow().handover.opens_allowed() {
             return js_sys::Promise::reject(&js_error("the editor is taking over the page"));
         }
+        // Refused before the worker beside a document in play (open, opening, or waiting for
+        // its password): only this call fails. That document, its waiting `open()` and the
+        // lock on editing stay as they are.
+        let password = password.as_string();
+        if let Some(why) = refusal(bytes.length(), password.as_deref())
+            && p.state.borrow().handover.holds_document()
+        {
+            say(&p, why);
+            return js_sys::Promise::reject(&js_error(why));
+        }
         let page = p.clone();
         js_sys::Promise::new(&mut |resolve, reject| {
             // An earlier open() still waiting is superseded: its document is never shown, so its
@@ -1346,7 +1410,7 @@ fn build_api(page: &Rc<Page>) -> js_sys::Object {
             for (_, reject) in superseded {
                 let _ = reject.call1(&JsValue::NULL, &js_error("open(): a later open() replaced this document"));
             }
-            open_document(&page, bytes.clone(), password.as_string());
+            open_document(&page, bytes.clone(), password.clone());
         })
     });
     set_fn(&api, "open", open.as_ref());

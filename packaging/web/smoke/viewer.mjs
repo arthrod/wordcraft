@@ -489,6 +489,33 @@ try {
       }, locked);
       check("open() while the editor takes over is refused", during.startsWith("rejected:"), during);
       await busy.page.close();
+      // An empty open() right behind a protected one: only the empty one is refused. The
+      // protected one still asks for its password, and editing stays locked meanwhile.
+      const behind = await open(browser, base, "/");
+      await waitAttr(behind.page, "data-wordcraft-painted", "true");
+      const start = behind.log.requests.length;
+      const answers = await behind.page.evaluate(async (bytes) => {
+        const viewer = window.wordcraftViewer;
+        const first = viewer.open(new Uint8Array(bytes)).then(() => "resolved", (e) => `rejected: ${e.message}`);
+        const empty = await viewer.open(new Uint8Array(0)).then(() => "resolved", (e) => `rejected: ${e.message}`);
+        viewer.edit();
+        return { empty, first: await first };
+      }, locked);
+      await behind.page.waitForFunction(() => (document.querySelector("#wordcraft_viewer_password")?.getClientRects().length ?? 0) > 0, { timeout: 20000 }).catch(() => {});
+      await new Promise((r) => setTimeout(r, 1000));
+      const after = {
+        ...answers,
+        phase: await attr(behind.page, "data-wordcraft-phase"),
+        error: await attr(behind.page, "data-wordcraft-error"),
+        form: await behind.page.evaluate(() => (document.querySelector("#wordcraft_viewer_password")?.getClientRects().length ?? 0) > 0),
+        editor: behind.log.requests.slice(start).some((p) => EDITOR.test(p)),
+      };
+      check(
+        "password: an empty open() behind a protected one is refused alone, and no editor is handed the protected bytes",
+        /empty/i.test(after.empty) && /password|protected/i.test(after.first) && after.phase === "viewing" && after.error === "password-required" && after.form && !after.editor,
+        JSON.stringify(after),
+      );
+      await behind.page.close();
     }
 
     const prot = await open(browser, base, "/");
@@ -619,6 +646,31 @@ try {
       check("installFont() pending at the hand-over: no uncaught errors", handed.log.uncaught.length === 0, handed.log.uncaught.join(" | "));
       await handed.page.close();
     }
+  }
+
+  // ---- a replacement the worker cannot read: the document shown stays, and Edit hands it over ----
+  {
+    const kept = await open(browser, base, "/");
+    await waitAttr(kept.page, "data-wordcraft-painted", "true");
+    const shown = await kept.page.evaluate(() => window.wordcraftViewer.pageCount());
+    const refusedOpen = await kept.page.evaluate(() =>
+      window.wordcraftViewer.open(new TextEncoder().encode("this is not a Word document")).then(() => "resolved", (e) => `rejected: ${e.message}`),
+    );
+    await kept.page.waitForFunction(() => document.querySelectorAll("#wordcraft_viewer canvas[data-scale]").length > 0, { timeout: 20000 }).catch(() => {});
+    const state = {
+      refusedOpen,
+      error: await attr(kept.page, "data-wordcraft-error"),
+      painted: await kept.page.evaluate(() => document.querySelectorAll("#wordcraft_viewer canvas[data-scale]").length),
+      pages: await kept.page.evaluate(() => window.wordcraftViewer.pageCount()),
+      edit: await kept.page.evaluate(() => (document.querySelector("#wordcraft_viewer_edit")?.getClientRects().length ?? 0) > 0),
+    };
+    check("unreadable replacement: open() rejects, the shown document stays painted, unflagged, with Edit", refusedOpen.startsWith("rejected:") && state.error === null && state.painted > 0 && state.pages === shown && state.edit, JSON.stringify(state));
+    await kept.page.click("#wordcraft_viewer_edit");
+    await waitAttr(kept.page, "data-wordcraft-phase", "editing", 120000).catch(() => {});
+    const handed = await kept.page.evaluate(() => Promise.resolve(window.wordcraft?.getMarkdown?.()).catch(() => null));
+    check("unreadable replacement: Edit hands the editor the document shown", typeof handed === "string" && handed.includes(SAMPLE_TEXT), `${await attr(kept.page, "data-wordcraft-phase")} ${JSON.stringify(String(handed).slice(0, 60))}`);
+    check("unreadable replacement: no uncaught errors", kept.log.uncaught.length === 0, kept.log.uncaught.join(" | "));
+    await kept.page.close();
   }
 
   // ---- the host's buffer after open(): changed or transferred, the editor still gets the
