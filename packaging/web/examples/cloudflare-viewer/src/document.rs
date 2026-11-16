@@ -63,8 +63,22 @@ impl std::fmt::Display for OpenError {
     }
 }
 
-/// Open `bytes` as a `.docx`, decrypting it with `password` when it is protected.
+/// Open an uploaded `.docx` as [`open_document`] does, without its embedded fonts: the font
+/// database is the isolate's, shared by every request and never pruned, so a font an upload
+/// brought would stay, drawing later visitors' documents with it, and repeated uploads would grow
+/// the isolate without end. An upload is laid out with the bundled faces and the site's packs.
+pub fn open_upload(bytes: &[u8], password: Option<&str>) -> Result<Session, OpenError> {
+    open_package(bytes, password, wordcraft_viewer::open_without_embedded_fonts)
+}
+
+/// Open `bytes` as a `.docx`, decrypting it with `password` when it is protected. A deployed
+/// document's embedded fonts are installed for the life of the isolate, as the app does when it
+/// opens a file: they are the deployment's, like the documents.
 pub fn open_document(bytes: &[u8], password: Option<&str>) -> Result<Session, OpenError> {
+    open_package(bytes, password, wordcraft_viewer::open)
+}
+
+fn open_package(bytes: &[u8], password: Option<&str>, open: fn(&[u8], Option<&str>) -> Result<Session, ViewerError>) -> Result<Session, OpenError> {
     if bytes.len() > MAX_BODY_BYTES {
         return Err(OpenError::TooLarge { bytes: bytes.len() });
     }
@@ -82,7 +96,7 @@ pub fn open_document(bytes: &[u8], password: Option<&str>) -> Result<Session, Op
         return Err(OpenError::NotDocx);
     };
     check_inflated_size(package)?;
-    wordcraft_viewer::open(package, None).map_err(from_viewer)
+    open(package, None).map_err(from_viewer)
 }
 
 /// Refuse a package whose entries declare more than [`MAX_INFLATED_BYTES`] in all, or that has
@@ -179,6 +193,69 @@ pub(crate) mod tests {
             w.add(name, data.as_bytes(), craft_zip::Compression::Deflated).unwrap();
         }
         w.finish().unwrap()
+    }
+
+    /// A package whose text is set in `family`, with `font` (a TrueType file) embedded for it
+    /// through the font table as a plain `.ttf` (the all-zero key, ECMA-376 Part 1, 17.8.1).
+    /// The font table's name is the one its faces then answer to, whatever they are called inside.
+    pub(crate) fn docx_embedding(family: &str, font: Option<&[u8]>) -> Vec<u8> {
+        const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+        const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        const PR: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
+        let rels = |items: &[(&str, &str)]| {
+            let list: String = items.iter().map(|(t, g)| format!(r#"<Relationship Id="rId{t}" Type="{R}/{t}" Target="{g}"/>"#)).collect();
+            format!(r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="{PR}">{list}</Relationships>"#).into_bytes()
+        };
+        let mut table = format!(r#"<w:fonts xmlns:w="{W}" xmlns:r="{R}"><w:font w:name="{family}">"#);
+        let mut files: Vec<(String, Vec<u8>)> = vec![
+            (
+                "[Content_Types].xml".into(),
+                br#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="ttf" ContentType="application/x-font-ttf"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/fontTable.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"/></Types>"#.to_vec(),
+            ),
+            ("_rels/.rels".into(), rels(&[("officeDocument", "word/document.xml")])),
+            ("word/_rels/document.xml.rels".into(), rels(&[("fontTable", "fontTable.xml")])),
+            (
+                "word/document.xml".into(),
+                format!(r#"<w:document xmlns:w="{W}"><w:body><w:p><w:r><w:rPr><w:rFonts w:ascii="{family}" w:hAnsi="{family}"/></w:rPr><w:t>illicit little lilies fill tiny jill</w:t></w:r></w:p></w:body></w:document>"#).into_bytes(),
+            ),
+        ];
+        if let Some(data) = font {
+            table.push_str(r#"<w:embedRegular r:id="rIdfont" w:fontKey="{00000000-0000-0000-0000-000000000000}" w:subsetted="0"/>"#);
+            files.push(("word/_rels/fontTable.xml.rels".into(), rels(&[("font", "fonts/font1.ttf")])));
+            files.push(("word/fonts/font1.ttf".into(), data.to_vec()));
+        }
+        table.push_str("</w:font></w:fonts>");
+        files.push(("word/fontTable.xml".into(), table.into_bytes()));
+        let mut w = craft_zip::Writer::new();
+        for (name, data) in files {
+            w.add(&name, &data, craft_zip::Compression::Deflated).unwrap();
+        }
+        w.finish().unwrap()
+    }
+
+    /// An upload's embedded fonts are not installed in the process-wide font database: on a
+    /// server they would stay for every later request, drawing other visitors' documents with
+    /// them, and repeated uploads would grow the isolate without end.
+    #[test]
+    fn an_uploads_embedded_fonts_do_not_outlive_it() {
+        fonts();
+        const UPLOADED: &str = "Upload Fresh Face Qx";
+        let face = *wordcraft_fonts::bundled().first().unwrap();
+        let s = open_upload(&docx_embedding(UPLOADED, Some(face)), None).unwrap();
+        // Drawn with what the Worker already has, as if nothing were embedded.
+        assert_eq!(s.missing_fonts(), [UPLOADED]);
+        drop(s);
+        assert!(!wordcraft_fonts::FontDb::global().has_family(UPLOADED), "the upload's font is still installed");
+        // A later document asking for that family is not drawn with the upload's font.
+        let later = open_document(&docx_embedding(UPLOADED, None), None).unwrap();
+        assert_eq!(later.missing_fonts(), [UPLOADED]);
+
+        // The control: the same package through the path that does load embedded fonts (a
+        // deployed document) is laid out in its font, so the fixture really embeds one.
+        const DEPLOYED: &str = "Deployed Face Control Qx";
+        let s = open_document(&docx_embedding(DEPLOYED, Some(face)), None).unwrap();
+        assert!(s.missing_fonts().is_empty(), "{:?}", s.missing_fonts());
+        assert!(wordcraft_fonts::FontDb::global().has_family(DEPLOYED));
     }
 
     /// Enough paragraphs to run over several pages.

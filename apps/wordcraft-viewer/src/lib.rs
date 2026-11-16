@@ -172,6 +172,18 @@ pub struct Session {
 /// Open the `.docx` package in `bytes` (decrypted with `password` when it is encrypted) and lay
 /// it out. The document's embedded fonts are loaded first, as when the app opens it.
 pub fn open(bytes: &[u8], password: Option<&str>) -> Result<Session, ViewerError> {
+    open_with(bytes, password, true)
+}
+
+/// [`open`], without loading the document's embedded fonts: its text is laid out with the fonts
+/// already available, as if nothing were embedded. For a host that opens documents from
+/// strangers in a long-lived process (a server): the font database is process-wide and nothing
+/// removes a font from it, so the fonts [`open`] loads would stay for every later document.
+pub fn open_without_embedded_fonts(bytes: &[u8], password: Option<&str>) -> Result<Session, ViewerError> {
+    open_with(bytes, password, false)
+}
+
+fn open_with(bytes: &[u8], password: Option<&str>, embedded_fonts: bool) -> Result<Session, ViewerError> {
     if bytes.is_empty() {
         return Err(ViewerError::EmptyDocument);
     }
@@ -180,7 +192,9 @@ pub fn open(bytes: &[u8], password: Option<&str>) -> Result<Session, ViewerError
     }
     let mut doc = wordcraft_docx::read_with_password(bytes, password)?;
     doc.ensure_nonempty();
-    load_embedded_fonts(&doc);
+    if embedded_fonts {
+        load_embedded_fonts(&doc);
+    }
     let layout = lay_out(&doc);
     Ok(Session { doc, layout })
 }

@@ -67,6 +67,12 @@ Every bound is in [`src/limits.rs`](src/limits.rs) with its reason.
   thirteen faces draws. Other fonts (Calibri, Aptos, Times New Roman…) are drawn with
   WordCraft's metric-compatible substitutes, as in the browser app; a document set in a font with
   no substitute shows in a fallback face, so treat those pages as approximate.
+- **Fonts a document embeds.** A deployed document's embedded fonts are loaded, as the app does
+  when it opens a file, and stay for the life of the isolate: they are the deployment's, like the
+  documents. An **upload's are ignored**: the font database is the isolate's, shared by every
+  request and never pruned, so a font one visitor uploaded would draw later visitors' documents
+  and repeated uploads would grow the isolate without end. An upload is drawn with the bundled
+  faces and the site's packs, as if nothing were embedded.
 - **Images.** A page with only grey ink is a greyscale PNG and a page with up to 256 colours a
   palette PNG, both exact. A page with coloured text has more colours (anti-aliased edges blend
   each ink into the paper), so the lowest bits of its red, green and blue are dropped until 256

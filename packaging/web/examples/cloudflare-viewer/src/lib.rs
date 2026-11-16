@@ -246,7 +246,7 @@ async fn upload(req: &mut Request, env: &Env, url: &Url) -> worker::Result<Respo
         Ok(f) => f,
         Err(e) => return form_error(400, &e.to_string(), false),
     };
-    let mut session = match document::open_document(form.file, form.password.as_deref()) {
+    let mut session = match document::open_upload(form.file, form.password.as_deref()) {
         Ok(s) => s,
         Err(e @ (OpenError::PasswordRequired | OpenError::WrongPassword)) => {
             return form_error(e.status(), &format!("{e} Choose the file again and enter its password."), true);

@@ -35,3 +35,5 @@ wasm-bindgen = "0.2"
 wordcraft-engine = { workspace = true }
 serde_json = { workspace = true }
 image = { workspace = true }
+# A package with an embedded font, built by hand.
+craft-zip = { workspace = true }
