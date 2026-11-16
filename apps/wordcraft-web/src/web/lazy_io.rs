@@ -211,8 +211,15 @@ fn say_failed(messages: &Messages, ctx: &egui::Context, action: &str, name: &str
 /// it, never in its place (`file.open`). Everything else is left where it was, so what the
 /// engine reads itself never waits on a worker.
 ///
-/// `region` is the user's: a file that gives no page size opens on its paper ([`open_request`]).
-pub(crate) fn take_foreign_opens(inbox: &Inbox, asset_base: &str, messages: &Messages, ctx: &egui::Context, region: &wordcraft_engine::Region) {
+/// `region` gives the user's: a file that gives no page size opens on its paper
+/// ([`open_request`]). Asked only when a file is taken, never on an ordinary frame.
+pub(crate) fn take_foreign_opens(
+    inbox: &Inbox,
+    asset_base: &str,
+    messages: &Messages,
+    ctx: &egui::Context,
+    region: impl FnOnce() -> wordcraft_engine::Region,
+) {
     let taken = {
         let mut pending = inbox.lock().unwrap_or_else(|e| e.into_inner());
         if pending.is_empty() {
@@ -229,9 +236,13 @@ pub(crate) fn take_foreign_opens(inbox: &Inbox, asset_base: &str, messages: &Mes
         *pending = kept;
         taken
     };
+    if taken.is_empty() {
+        return;
+    }
+    let region = region();
     for (name, bytes, format) in taken {
         say(messages, ctx, format!("Opening {name}…"));
-        let req = open_request(format, bytes, region);
+        let req = open_request(format, bytes, &region);
         let (inbox, messages, ctx) = (inbox.clone(), messages.clone(), ctx.clone());
         convert(asset_base, &req, move |reply| match reply {
             Ok(docx) => {
