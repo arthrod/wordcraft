@@ -470,7 +470,8 @@ pub fn files_named_by_page(html: &str) -> Vec<String> {
     for (i, _) in live.match_indices("./") {
         let tail = live.get(i.saturating_add(2)..).unwrap_or_default();
         let end = tail.find(['"', '\'', ' ', '>', ')']).unwrap_or(tail.len());
-        let name = tail.get(..end).unwrap_or_default();
+        // The name on disk ends where a query or a fragment begins.
+        let name = tail.get(..end).unwrap_or_default().split(['?', '#']).next().unwrap_or_default();
         if !name.is_empty() && !name.contains("..") {
             names.push(name.to_string());
         }
@@ -1169,6 +1170,8 @@ await init({ module_or_path: './wordcraft-viewer-web-7858_bg.wasm' });</script>
         assert_eq!(on_demand_files_named_by_page(r#"<script src="wordcraft-web.js"></script><!-- open"#), ["wordcraft-web"]);
         assert!(on_demand_files_named_by_page("<!-- wordcraft-web.js").is_empty());
         assert!(files_named_by_page("./").is_empty() && files_named_by_page("<!--").is_empty());
+        // A query or a fragment is not part of the file's name on disk.
+        assert_eq!(files_named_by_page(r#"<script src="./p-1.js?v=1"></script><link href="./q.css#top"><a href="./?x">"#), ["p-1.js", "q.css"]);
     }
 
     #[test]
