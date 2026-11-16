@@ -116,6 +116,12 @@ under the old Free limit, by about 73 KB.
 
 **CPU.** Drawing a page takes far more than the Free plan's 10 ms of CPU per request (the older
 example measured 36 ms warm and 151 ms cold for one page), so this Worker needs the Paid plan.
+The worst upload is pages at the 4-million-pixel cap: measured on a host build (`opt-level = "z"`,
+`measure_worst_pages`), encoding one such page costs about 160 ms for a grey text page, 120 ms
+for a smooth many-coloured one and 330 ms for noise. A noisy page's PNG alone is past the 3 MiB
+answer, so the upload stops at the first one; twelve compressible pages cost about 2 s on the
+host, and more as wasm, which is what the 5,000 ms cap is for. A page with too many colours for a
+palette is found out with one reduction of its pixels, not four.
 
 ## Build, run and deploy
 

@@ -56,6 +56,8 @@ pub const MAX_REDUCE_BITS: u8 = 4;
 /// `pixels` with the low `bits` of red, green and blue cleared, full intensity (255) kept so paper
 /// stays white; alpha unchanged.
 pub fn reduce(pixels: &[u8], bits: u8) -> Vec<u8> {
+    #[cfg(test)]
+    tests::REDUCTIONS.set(tests::REDUCTIONS.get() + 1);
     let keep = 0xffu8 << bits.min(7);
     pixels
         .as_chunks::<4>()
@@ -84,12 +86,15 @@ pub fn encode(img: &PageImage) -> Result<(Vec<u8>, Kind), EncodeError> {
         let trns = (!opaque).then_some(alpha);
         return write(img, png::ColorType::Indexed, &indices, Some((palette, trns))).map(|b| (b, Kind::Palette));
     }
-    for bits in 1..=MAX_REDUCE_BITS {
-        let reduced = reduce(&img.pixels, bits);
-        if let Some((palette, alpha, indices)) = palette_of(reduced.as_chunks::<4>().0) {
-            let trns = (!opaque).then_some(alpha);
-            return write(img, png::ColorType::Indexed, &indices, Some((palette, trns))).map(|b| (b, Kind::ReducedPalette { bits }));
-        }
+    // Dropping more bits never adds colours (`reduce` by more bits is `reduce` by fewer, then by
+    // more), so when the coarsest drop still leaves more than 256, no smaller one can: one copy of
+    // the page decides, instead of one per bit width. Otherwise the smallest width that fits wins.
+    if let Some(coarsest) = palette_of(reduce(&img.pixels, MAX_REDUCE_BITS).as_chunks::<4>().0) {
+        let (bits, (palette, alpha, indices)) = (1..MAX_REDUCE_BITS)
+            .find_map(|bits| palette_of(reduce(&img.pixels, bits).as_chunks::<4>().0).map(|p| (bits, p)))
+            .unwrap_or((MAX_REDUCE_BITS, coarsest));
+        let trns = (!opaque).then_some(alpha);
+        return write(img, png::ColorType::Indexed, &indices, Some((palette, trns))).map(|b| (b, Kind::ReducedPalette { bits }));
     }
     if opaque {
         let rgb: Vec<u8> = px.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
@@ -143,6 +148,11 @@ fn write(img: &PageImage, colour: png::ColorType, data: &[u8], palette: Option<(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    thread_local! {
+        /// Calls to [`reduce`] on this thread.
+        pub(crate) static REDUCTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
 
     /// Decode a PNG to straight RGBA, whatever colour type it was written in.
     pub(crate) fn decode_rgba(png: &[u8]) -> ((u32, u32), Vec<u8>) {
@@ -229,6 +239,59 @@ pub(crate) mod tests {
             out
         };
         assert!(grey.len() * 2 < rgba.len(), "grey {} bytes, RGBA {} bytes", grey.len(), rgba.len());
+    }
+
+    /// The cost of the worst pages an upload can ask for, at the pixel cap (2000 × 2000): noise
+    /// (incompressible, so its PNG alone passes the response cap) and a smooth gradient with too
+    /// many colours for a palette even with four bits dropped (small once compressed, so twelve
+    /// fit the response). Run with `cargo test --release -- --ignored --nocapture measure_worst`.
+    #[test]
+    #[ignore = "a measurement, not a check"]
+    fn measure_worst_pages() {
+        let side = 2000u32;
+        // A hash of the position: noise with no state, as `image` wants.
+        let noisy = image(side, side, |x, y| {
+            let mut h = x.wrapping_mul(0x9e37_79b9) ^ y.wrapping_mul(0x85eb_ca6b);
+            h ^= h >> 15;
+            h = h.wrapping_mul(0x2c1b_3c6d);
+            h ^= h >> 12;
+            let n = h.to_le_bytes();
+            [n[0], n[1], n[2], 255]
+        });
+        let gradient = image(side, side, |x, y| [(x % 256) as u8, (y % 256) as u8, ((x / 8 + y / 8) % 256) as u8, 255]);
+        for (what, img) in [("noise", &noisy), ("gradient", &gradient)] {
+            for _ in 0..2 {
+                let t = std::time::Instant::now();
+                let (png, kind) = encode(img).unwrap();
+                let total = t.elapsed();
+                let t = std::time::Instant::now();
+                for bits in 1..=MAX_REDUCE_BITS {
+                    let r = reduce(&img.pixels, bits);
+                    let _ = palette_of(r.as_chunks::<4>().0).is_some();
+                }
+                eprintln!("{what}: {kind:?}, {} bytes, encode {total:?} (of which the four reductions {:?})", png.len(), t.elapsed());
+            }
+        }
+    }
+
+    /// A page with too many colours for a palette even with [`MAX_REDUCE_BITS`] dropped is
+    /// found out with one reduction, not one per bit width: each is a copy of the whole page
+    /// (16 MB at the pixel cap). A page that does reduce gets the same, smallest, bit width.
+    #[test]
+    fn a_photograph_costs_one_reduction() {
+        let photo = image(256, 64, |x, y| [x as u8, (y * 4) as u8, ((x * 7 + y * 13) % 256) as u8, 255]);
+        REDUCTIONS.set(0);
+        assert_eq!(encode(&photo).unwrap().1, Kind::Rgb);
+        assert_eq!(REDUCTIONS.get(), 1);
+        // Two inks blended into paper: reduces at the same width whichever pass finds it.
+        let text = image(512, 40, |x, y| {
+            let a = x % 256;
+            let ink: [u32; 3] = if y < 20 { [20, 60, 120] } else { [180, 30, 30] };
+            let mix = |c: u32| ((c * a + 255 * (255 - a)) / 255) as u8;
+            [mix(ink[0]), mix(ink[1]), mix(ink[2]), 255]
+        });
+        let smallest = (1..=MAX_REDUCE_BITS).find(|&b| palette_of(reduce(&text.pixels, b).as_chunks::<4>().0).is_some()).unwrap();
+        assert_eq!(encode(&text).unwrap().1, Kind::ReducedPalette { bits: smallest });
     }
 
     #[test]
