@@ -40,13 +40,15 @@ fn no_more_than_the_in_flight_limit_is_asked_at_once() {
 }
 
 #[test]
-fn a_new_scale_asks_again_and_drops_the_stale_reply() {
+fn a_new_scale_waits_for_the_page_in_flight_then_replaces_it() {
     let mut cache = PageCache::new(64 * MB);
     assert_eq!(cache.plan(&[key(0, 1.0)]), vec![key(0, 1.0)]);
-    // The window was resized before the page arrived.
+    // The window was resized before the page arrived: the worker renders the old request
+    // anyway, so it is awaited and painted, not asked for twice.
+    assert_eq!(cache.plan(&[key(0, 1.25)]), vec![]);
+    assert_eq!(cache.arrived(key(0, 1.0), 4 * MB, &[0]), Arrival::Paint { evict: vec![] });
+    assert_eq!(cache.painted(0), Some(key(0, 1.0)));
     assert_eq!(cache.plan(&[key(0, 1.25)]), vec![key(0, 1.25)]);
-    assert_eq!(cache.arrived(key(0, 1.0), 4 * MB, &[0]), Arrival::Stale);
-    assert_eq!(cache.painted(0), None);
     assert_eq!(cache.arrived(key(0, 1.25), 5 * MB, &[0]), Arrival::Paint { evict: vec![] });
     assert_eq!(cache.painted(0), Some(key(0, 1.25)));
     // A page painted at an old scale stays up until the new one arrives, then is replaced.
@@ -121,4 +123,20 @@ fn hostile_sizes_do_not_overflow() {
     cache.arrived(key(0, 1.0), u64::MAX, &[0]);
     cache.arrived(key(1, 1.0), u64::MAX, &[1]);
     assert_eq!(cache.used_bytes(), u64::MAX);
+}
+
+#[test]
+fn a_resize_storm_never_asks_more_than_the_in_flight_limit() {
+    let mut cache = PageCache::new(64 * MB);
+    let mut asked = cache.plan(&[key(0, 1.0), key(1, 1.0)]).len();
+    // Every resize lands on a new scale before the worker answers: each request asked is one
+    // the serial worker renders, answered or not, so none may pile up behind the two.
+    for step in 1..100u8 {
+        let scale = 1.0 + f32::from(step) / 100.0;
+        asked += cache.plan(&[key(0, scale), key(1, scale)]).len();
+    }
+    assert_eq!(asked, MAX_IN_FLIGHT);
+    // The old scale's answer is painted (stretched until replaced) and frees its slot.
+    assert_eq!(cache.arrived(key(0, 1.0), MB, &[0, 1]), Arrival::Paint { evict: vec![] });
+    assert_eq!(cache.plan(&[key(0, 1.99), key(1, 1.99)]), vec![key(0, 1.99)]);
 }

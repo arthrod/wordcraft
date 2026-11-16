@@ -1,7 +1,7 @@
 //! Which pages to ask the worker for and which painted pages to let go. The painted canvases
 //! are the cache; this is its book, kept apart from the DOM so the policy is tested on the
-//! host: a page is painted once per scale, a reply for a scale the window has left is
-//! dropped, and pages out of view are released oldest first once the budget is spent.
+//! host: a page is painted once per scale, no more than [`MAX_IN_FLIGHT`] renders are asked of
+//! the worker at once, and pages out of view are released oldest first once the budget is spent.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -34,8 +34,7 @@ impl PageKey {
 pub enum Arrival {
     /// Paint it, and release the canvases of the pages in `evict`.
     Paint { evict: Vec<u32> },
-    /// Nobody is waiting for it (the window moved to another scale, or the document was
-    /// replaced): drop it.
+    /// Nobody is waiting for it (the document was replaced, or laid out again): drop it.
     Stale,
 }
 
@@ -64,8 +63,8 @@ impl PageCache {
 
     /// The renders to ask the worker for now, given the pages the window wants, most wanted
     /// first. A page already painted at that scale, already asked for, or known to fail is
-    /// skipped, and no more than [`MAX_IN_FLIGHT`] wait at once: call again when a reply
-    /// lands. Wanting a page also marks it as recently shown.
+    /// skipped, as is a page awaited at another scale, and no more than [`MAX_IN_FLIGHT`] wait
+    /// at once: call again when a reply lands. Wanting a page also marks it as recently shown.
     pub fn plan(&mut self, wanted: &[PageKey]) -> Vec<PageKey> {
         let mut ask = Vec::new();
         for key in wanted {
@@ -76,12 +75,10 @@ impl PageCache {
                     continue;
                 }
             }
-            let waiting = self.pending.get(&key.page);
-            if waiting == Some(key) || self.failed.contains(key) {
-                continue;
-            }
-            // A new scale for a page already awaited takes over its slot.
-            if waiting.is_none() && self.pending.len() >= MAX_IN_FLIGHT {
+            // A page already awaited, at any scale, waits for that answer: the serial worker
+            // renders every request it is sent, so asking again at each resize would queue
+            // renders without bound. The answer is painted, then replaced at the new scale.
+            if self.pending.contains_key(&key.page) || self.failed.contains(key) || self.pending.len() >= MAX_IN_FLIGHT {
                 continue;
             }
             self.pending.insert(key.page, *key);
