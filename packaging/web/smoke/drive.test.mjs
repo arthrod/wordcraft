@@ -2,7 +2,10 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { autoWasmUrl, isChromeExecutable, isExpectedWasmMiss } from "./drive.mjs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { autoWasmUrl, isChromeExecutable, isExpectedWasmMiss, startServer } from "./drive.mjs";
 
 // Shape of window.__SMOKE after the deliberate zero-config wasm attempt missed
 // and the explicit-wasmUrl retry resolved (fixtures/main.shared.js): the real
@@ -109,4 +112,38 @@ test("recognizes every puppeteer-cache Chrome executable basename", () => {
     isChromeExecutable("/home/user/.cache/puppeteer/chrome/chrome-131.0.0.0/chrome-linux64/chrome_crashpad_handler"),
     false,
   );
+});
+
+// The request log records the path asked for, and the file served for it, so a check that
+// matches on logged paths sees what the page requested (review finding: a request for the
+// package root `/wordcraft-web/` was logged as `/index.html`).
+test("the request log records the requested path and the file served", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wordcraft-smoke-log-"));
+  const dist = join(root, "dist");
+  const pkg = join(root, "pkg");
+  mkdirSync(dist);
+  mkdirSync(pkg);
+  writeFileSync(join(dist, "index.html"), "<p>site</p>");
+  writeFileSync(join(pkg, "index.html"), "<p>package</p>");
+  writeFileSync(join(pkg, "wordcraft-web.js"), "export {};");
+  const log = [];
+  const { server, port } = await startServer(dist, pkg, { log, miss: (p) => p.endsWith("gone.js") });
+  try {
+    for (const path of ["/", "/wordcraft-web/", "/wordcraft-web/wordcraft-web.js", "/wordcraft-web/nothing.js", "/wordcraft-web/gone.js"]) {
+      await (await fetch(`http://127.0.0.1:${port}${path}`)).arrayBuffer();
+    }
+  } finally {
+    server.close();
+  }
+  assert.deepEqual(
+    log.map((r) => [r.path, r.status, r.served]),
+    [
+      ["/", 200, join(dist, "index.html")],
+      ["/wordcraft-web/", 200, join(pkg, "index.html")],
+      ["/wordcraft-web/wordcraft-web.js", 200, join(pkg, "wordcraft-web.js")],
+      ["/wordcraft-web/nothing.js", 404, null],
+      ["/wordcraft-web/gone.js", 404, null],
+    ],
+  );
+  rmSync(root, { recursive: true, force: true });
 });
