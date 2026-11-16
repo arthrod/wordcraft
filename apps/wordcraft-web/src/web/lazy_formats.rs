@@ -311,6 +311,28 @@ pub(crate) fn convert_input_error(len: usize) -> Option<String> {
     (len > wordcraft_worker_proto::MAX_CONVERT_BYTES).then(|| format!("the document is too large to convert in the browser ({len} bytes)"))
 }
 
+/// A conversion's refusal for a base64 string of `len` characters, before it is copied or
+/// decoded: its shortest decoding (`len / 4 * 3 - 2` bytes, every character in the alphabet,
+/// two of padding) past [`wordcraft_worker_proto::MAX_CONVERT_BYTES`], with the conversion's
+/// own refusal ([`convert_input_error`]). Whitespace, which decodes to nothing, counts as
+/// alphabet here: a string padded with that much of it is refused although its bytes would fit.
+pub(crate) fn convert_base64_error(len: usize) -> Option<String> {
+    convert_input_error((len / 4).saturating_mul(3).saturating_sub(2))
+}
+
+/// A base64 conversion input, decoded: `Err` for a string that is not base64, or whose bytes
+/// are past the conversion's cap ([`convert_input_error`]).
+pub(crate) fn decode_convert_base64(s: &str) -> Result<Vec<u8>, String> {
+    if let Some(refused) = convert_base64_error(s.len()) {
+        return Err(refused);
+    }
+    let bytes = wordcraft_engine::cmd::insert::base64_decode(s).ok_or("convertDocument: `data` is not valid base64")?;
+    match convert_input_error(bytes.len()) {
+        Some(refused) => Err(refused),
+        None => Ok(bytes),
+    }
+}
+
 /// Most page-API PDF exports waiting at once ([`ApiExports`]).
 pub(crate) const MAX_API_EXPORTS: usize = 16;
 
@@ -1337,5 +1359,32 @@ mod tests {
             convert_input_error(cap + 1).as_deref(),
             Some(format!("the document is too large to convert in the browser ({} bytes)", cap + 1).as_str())
         );
+    }
+
+    /// Review finding (gate 3, F6): `convertDocument`'s base64 string was decoded with no bound
+    /// first (a `Vec` of three quarters of its length, then filled), so a huge string cost that
+    /// allocation before the conversion's cap refused it. The string is bounded by its length
+    /// before it is copied or decoded — a base64 string of `len` characters decodes to at least
+    /// `len / 4 * 3 - 2` bytes when it is all alphabet — with the conversion's own refusal; the
+    /// exact check on the decoded bytes stays. A malformed string is refused as such, not turned
+    /// into an empty input.
+    #[test]
+    fn a_base64_conversion_input_is_bounded_before_it_is_decoded() {
+        use wordcraft_engine::cmd::insert::base64_encode;
+        let cap = wordcraft_worker_proto::MAX_CONVERT_BYTES;
+        // The base64 of an input at the cap is never refused by its length.
+        assert_eq!(convert_base64_error(base64_len(cap)), None);
+        assert_eq!(convert_base64_error(base64_len(cap) - 1), None);
+        // Three bytes past the cap make a string whose shortest decoding is past it too.
+        let over = base64_len(cap + 3);
+        assert_eq!(convert_base64_error(over), convert_input_error(over / 4 * 3 - 2));
+        assert!(convert_base64_error(over).is_some());
+        assert!(convert_base64_error(1 << 30).is_some(), "a gigabyte of base64 is refused before any copy");
+        assert!(convert_base64_error(usize::MAX).is_some());
+        assert_eq!(convert_base64_error(0), None);
+        // Decoding: the bytes, a typed refusal for junk, and the exact cap on what decoded.
+        assert_eq!(decode_convert_base64(&base64_encode(b"{\\rtf1 x}")), Ok(b"{\\rtf1 x}".to_vec()));
+        assert_eq!(decode_convert_base64("not base64!"), Err("convertDocument: `data` is not valid base64".to_string()));
+        assert_eq!(decode_convert_base64(&base64_encode(&[0u8; 7])).map(|v| v.len()), Ok(7));
     }
 }

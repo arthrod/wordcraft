@@ -251,8 +251,16 @@ fn attach_doc_helpers(api: &js_sys::Object, queue: Sender<ControlRequest>, ctx: 
             // flavors too — `from: "docx", to: "docm"` rewraps the package).
             let format = if direction == wordcraft_worker_proto::ConvertDirection::Import { from } else { to };
             let data = js_sys::Reflect::get(&val, &JsValue::from_str("data")).unwrap_or(JsValue::UNDEFINED);
-            let input = if let Some(s) = data.as_string() {
-                base64_decode(&s).unwrap_or_default()
+            let input = if let Some(s) = data.dyn_ref::<js_sys::JsString>() {
+                // Bounded by its length before it is copied here or decoded, with the
+                // conversion's own refusal; then the exact cap on the decoded bytes.
+                if let Some(refused) = crate::lazy_formats::convert_base64_error(s.length() as usize) {
+                    return fail(&reject, refused);
+                }
+                match crate::lazy_formats::decode_convert_base64(&String::from(s)) {
+                    Ok(bytes) => bytes,
+                    Err(e) => return fail(&reject, e),
+                }
             } else if let Some(view) = byte_view(&data) {
                 // Bounded before the copy, with the conversion's own refusal.
                 if let Some(refused) = crate::lazy_formats::convert_input_error(view.length() as usize) {
