@@ -468,7 +468,7 @@ fn the_bridge_names_every_document_field() {
         "glossary",
         "missing_pictures",
     ];
-    // Rebuilt or left empty on the other side; see `document_from_shared`.
+    // Rebuilt or left empty on the other side; see `document_from_shared` and the test below.
     let not_carried = ["media_index", "kept"];
     let known: Vec<&str> = carried.iter().chain(&not_carried).copied().collect();
     assert_eq!(fields(&wm::Document::new()), sorted(known.clone()), "the shared model's document");
@@ -479,4 +479,33 @@ fn the_bridge_names_every_document_field() {
     let report = ["list", "truncated", "total", "main", "part_names", "media_parts", "seen", "unlisted", "counted_chunks"];
     assert_eq!(fields(&wm::MissingPictures::default()), sorted(report.to_vec()), "the shared model's report of missing pictures");
     assert_eq!(fields(&doc::MissingPictures::default()), sorted(report.to_vec()), "WordCraft's report of missing pictures");
+}
+
+/// The two document fields the bridge does not carry, in each direction. `media_index` starts
+/// empty on the other side and is rebuilt from `media` the first time a picture is added, so
+/// adding a picture the document already has finds it rather than storing it twice. `kept` (the
+/// source markup a reader kept, for a writer to write back what was not edited) starts empty:
+/// after a conversion nothing a reader kept is written back. No reader or writer on either side
+/// fills or reads it today, so this loses nothing yet.
+#[test]
+fn the_media_index_is_rebuilt_and_kept_markup_is_left_behind() {
+    let bytes = vec![0x5a; 64];
+
+    let mut shared = wm::Document::new();
+    shared.media.insert("image1.png".into(), Arc::new(bytes.clone()));
+    shared.kept = wm::kept::Kept::new(wm::kept::KeptXml { format: "docx".into(), ..Default::default() });
+    let mut read = from_shared(shared).unwrap();
+    assert!(read.kept.get().is_none(), "kept markup is left behind on the way in");
+    assert_eq!(read.add_media(bytes.clone(), "png"), "image1.png", "the media index finds a picture read with the document");
+    assert_eq!(read.media.len(), 1);
+    assert_ne!(read.add_media(vec![0xa5; 64], "png"), "image1.png", "a new picture gets a key of its own");
+
+    let mut own = doc::Document::new();
+    own.media.insert("image1.png".into(), Arc::new(bytes.clone()));
+    own.kept = doc::kept::Kept::new(doc::kept::KeptXml { format: "docx".into(), ..Default::default() });
+    let mut written = to_shared(&own).unwrap();
+    assert!(written.kept.get().is_none(), "kept markup is left behind on the way out");
+    assert_eq!(written.add_media(bytes, "png"), "image1.png", "the media index finds a picture written with the document");
+    assert_eq!(written.media.len(), 1);
+    assert_ne!(written.add_media(vec![0xa5; 64], "png"), "image1.png", "a new picture gets a key of its own");
 }
