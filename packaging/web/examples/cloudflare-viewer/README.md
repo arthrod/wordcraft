@@ -33,6 +33,7 @@ percent-encoded `..` is refused too, and a doubly encoded one leaves a `%`, whic
 | 405 | Another method (`Allow` says which). |
 | 413 | An upload over 4 MiB, or a package whose parts would unpack to more than 24 MiB or that has more than 2,000 parts. |
 | 415 | Not a Word document (neither a zip package nor an encrypted Office file), or an upload not sent as `multipart/form-data`. |
+| 502 | The site's own storage (`ASSETS`) failed to return a deployed document: any answer but 200 or 404, or a read that broke off. `no-store`, so a retry can succeed. |
 | 422 | A protected document without its password or with a wrong one (the form comes back asking for it; choose the file again, since nothing is kept), a zip that isn't a readable Word document, or a page that can't be drawn. 422 rather than 401: a 401 must carry a `WWW-Authenticate` challenge, and this is a form. |
 
 Hostile input gets one of these, never a 500 and never a panic: the crate root denies `unwrap`,

@@ -160,9 +160,9 @@ fn page_of(session: &wordcraft_viewer::Session, query: &ViewQuery) -> Result<(u3
 async fn asset_session(env: &Env, url: &Url, doc: &DocPath) -> worker::Result<Result<wordcraft_viewer::Session, Response>> {
     let bytes = match fetch_asset(env, url, doc.as_str(), MAX_BODY_BYTES).await? {
         Fetched::Bytes(b) => b,
-        Fetched::Missing => return Ok(Err(error_response(404, "No such document", "This site has no document by that name.")?)),
-        Fetched::TooLarge => {
-            return Ok(Err(error_response(413, "Document too large", &OpenError::TooLarge { bytes: MAX_BODY_BYTES + 1 }.to_string())?));
+        other => {
+            let (status, title, detail) = unread_document(&other);
+            return Ok(Err(error_response(status, title, &detail)?));
         }
     };
     match document::open_document(&bytes, None) {
@@ -179,10 +179,40 @@ async fn asset_session(env: &Env, url: &Url, doc: &DocPath) -> worker::Result<Re
     }
 }
 
+/// A deployed file read through `ASSETS`.
+#[derive(Debug, PartialEq)]
 enum Fetched {
     Bytes(Vec<u8>),
+    /// The asset store answered 404: the deployment has no such file.
     Missing,
+    /// More than the reader's cap.
     TooLarge,
+    /// Any other answer (403, 500…), no answer, or a body that broke off: the store failed, not
+    /// the request, and another try may succeed.
+    Failed,
+}
+
+impl Fetched {
+    /// What an `ASSETS` answer with `status` is, before its body is read: `None` for a 200, whose
+    /// body is to be read.
+    fn from_status(status: u16) -> Option<Fetched> {
+        match status {
+            200 => None,
+            404 => Some(Fetched::Missing),
+            _ => Some(Fetched::Failed),
+        }
+    }
+}
+
+/// The answer for a deployed document that wasn't read, as (status, title, detail): 404 only
+/// when the store says there is no such file; a store that failed is a 502, so an operator
+/// isn't told a deployed document is missing.
+fn unread_document(fetched: &Fetched) -> (u16, &'static str, String) {
+    match fetched {
+        Fetched::Missing => (404, "No such document", "This site has no document by that name.".into()),
+        Fetched::TooLarge => (413, "Document too large", OpenError::TooLarge { bytes: MAX_BODY_BYTES + 1 }.to_string()),
+        Fetched::Bytes(_) | Fetched::Failed => (502, "Storage error", "The site's storage did not return the document. Try again later.".into()),
+    }
 }
 
 /// Read the deployed file at `path` (relative to the site root) through `ASSETS`, at most `cap`
@@ -190,14 +220,16 @@ enum Fetched {
 async fn fetch_asset(env: &Env, base: &Url, path: &str, cap: usize) -> worker::Result<Fetched> {
     let target = base.join(&format!("/{path}"))?;
     let assets = env.assets("ASSETS")?;
-    let mut resp = assets.fetch_request(Request::new(target.as_str(), Method::Get)?).await?;
-    if resp.status_code() != 200 {
-        return Ok(Fetched::Missing);
+    let Ok(mut resp) = assets.fetch_request(Request::new(target.as_str(), Method::Get)?).await else {
+        return Ok(Fetched::Failed);
+    };
+    if let Some(answer) = Fetched::from_status(resp.status_code()) {
+        return Ok(answer);
     }
     match read_capped(resp.stream()?, cap).await {
         Ok(bytes) => Ok(Fetched::Bytes(bytes)),
         Err(Capped::TooLarge) => Ok(Fetched::TooLarge),
-        Err(Capped::Broken) => Ok(Fetched::Missing),
+        Err(Capped::Broken) => Ok(Fetched::Failed),
     }
 }
 
@@ -322,4 +354,23 @@ async fn manifest(env: &Env, base: &Url) -> Option<Rc<Vec<fonts::Face>>> {
     let faces = Rc::new(fonts::parse_manifest(&json).ok()?);
     MANIFEST.with(|m| *m.borrow_mut() = Some(faces.clone()));
     Some(faces)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_404_from_the_store_is_a_missing_document() {
+        assert_eq!(Fetched::from_status(200), None);
+        assert_eq!(Fetched::from_status(404), Some(Fetched::Missing));
+        for status in [301, 403, 410, 429, 500, 503] {
+            assert_eq!(Fetched::from_status(status), Some(Fetched::Failed), "{status}");
+        }
+        assert_eq!(unread_document(&Fetched::Missing).0, 404);
+        assert_eq!(unread_document(&Fetched::TooLarge).0, 413);
+        let (status, _, detail) = unread_document(&Fetched::Failed);
+        assert_eq!(status, 502);
+        assert!(!detail.contains("no document"), "{detail}");
+    }
 }
