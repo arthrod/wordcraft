@@ -64,11 +64,24 @@ async function until(what, fn, timeoutMs = 90_000) {
   }
 }
 
-// One page on a fresh server log. `miss` makes matching paths 404.
+// One page on a fresh server log. `miss` makes matching paths 404. A setup that
+// fails closes its page and server before throwing: the caller never got the
+// `close`, and a listening server would keep Node running after the report.
 async function open(browser, siteDir, query, miss) {
   const log = [];
   const { server, port } = await startServer(siteDir, null, { log, miss });
-  const context = await browser.createBrowserContext();
+  let context = null;
+  try {
+    context = await browser.createBrowserContext();
+    return await setUp(context, server, port, log, query);
+  } catch (error) {
+    await context?.close().catch(() => {});
+    server.close();
+    throw error;
+  }
+}
+
+async function setUp(context, server, port, log, query) {
   const page = await context.newPage();
   await page.setCacheEnabled(false);
   const consoleLog = [];
