@@ -1275,7 +1275,12 @@ fn build_api(page: &Rc<Page>) -> js_sys::Object {
         }
         let page = p.clone();
         js_sys::Promise::new(&mut |resolve, reject| {
-            page.state.borrow_mut().open_waiters.push((resolve, reject));
+            // An earlier open() still waiting is superseded: its document is never shown, so its
+            // promise rejects instead of settling with this one's page count.
+            let superseded = std::mem::replace(&mut page.state.borrow_mut().open_waiters, vec![(resolve, reject)]);
+            for (_, reject) in superseded {
+                let _ = reject.call1(&JsValue::NULL, &js_error("open(): a later open() replaced this document"));
+            }
             open_document(&page, bytes.clone(), password.as_string());
         })
     });

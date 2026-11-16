@@ -618,6 +618,15 @@ try {
     const kept = await shown(slow.page);
     check("open() during the startup download: the host's document stays after it lands", opened === 6 && kept.count === 6 && kept.pages === 6, JSON.stringify({ opened, ...kept }));
 
+    // Two open() calls at once: the first is superseded and rejects; the second resolves with
+    // its own page count.
+    const both = await slow.page.evaluate(async (a, b) => {
+      const v = window.wordcraftViewer;
+      const first = v.open(new Uint8Array(a)).then((x) => x.pageCount, (e) => `rejected: ${e.message}`);
+      const second = v.open(new Uint8Array(b)).then((x) => x.pageCount, (e) => `rejected: ${e.message}`);
+      return { first: await first, second: await second };
+    }, long, six);
+    check("two open() calls: the superseded one rejects, the other resolves with its own count", String(both.first).startsWith("rejected:") && both.second === 6 && (await shown(slow.page)).count === 6, JSON.stringify(both));
     check("open() races: no uncaught errors", slow.log.uncaught.length === 0, slow.log.uncaught.join(" | "));
     await slow.page.close();
 
