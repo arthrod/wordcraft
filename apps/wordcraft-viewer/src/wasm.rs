@@ -1,4 +1,4 @@
-//! The `wasm-bindgen` handle over the pure functions in the crate root. A thin layer: every
+//! The `wasm-bindgen` handle over the pure functions in the library. A thin layer: every
 //! check is made underneath, where the host tests reach it.
 //!
 //! ```js
@@ -18,7 +18,7 @@
 
 use wasm_bindgen::prelude::*;
 
-use crate::ViewerError;
+use wordcraft_viewer::ViewerError;
 
 #[wasm_bindgen]
 extern "C" {
@@ -47,14 +47,14 @@ fn thrown(e: ViewerError) -> JsValue {
 /// An opened document. Free it (`viewer.free()`) to release the document and its layout.
 #[wasm_bindgen]
 pub struct Viewer {
-    session: crate::Session,
+    session: wordcraft_viewer::Session,
 }
 
 #[wasm_bindgen]
 impl Viewer {
     /// Open the `.docx` in `bytes`, with `password` if it is encrypted.
     pub fn open(bytes: &[u8], password: Option<String>) -> Result<Viewer, JsValue> {
-        crate::open(bytes, password.as_deref()).map(|session| Viewer { session }).map_err(thrown)
+        wordcraft_viewer::open(bytes, password.as_deref()).map(|session| Viewer { session }).map_err(thrown)
     }
 
     /// How many pages the document has.
@@ -94,25 +94,25 @@ impl Viewer {
     /// Largest document `open` accepts, in bytes.
     #[wasm_bindgen(js_name = maxDocumentBytes)]
     pub fn max_document_bytes() -> u32 {
-        u32::try_from(crate::MAX_DOCUMENT_BYTES).unwrap_or(u32::MAX)
+        u32::try_from(wordcraft_viewer::MAX_DOCUMENT_BYTES).unwrap_or(u32::MAX)
     }
 
     /// Largest font file `installFont` accepts, in bytes.
     #[wasm_bindgen(js_name = maxFontBytes)]
     pub fn max_font_bytes() -> u32 {
-        u32::try_from(crate::MAX_FONT_BYTES).unwrap_or(u32::MAX)
+        u32::try_from(wordcraft_viewer::MAX_FONT_BYTES).unwrap_or(u32::MAX)
     }
 
     /// Largest scale `render` accepts, in pixels per point.
     #[wasm_bindgen(js_name = maxScale)]
     pub fn max_scale() -> f32 {
-        crate::MAX_SCALE
+        wordcraft_viewer::MAX_SCALE
     }
 
     /// Most pixels one `render` call returns.
     #[wasm_bindgen(js_name = maxRenderPixels)]
     pub fn max_render_pixels() -> u32 {
-        u32::try_from(crate::MAX_RENDER_PIXELS).unwrap_or(u32::MAX)
+        u32::try_from(wordcraft_viewer::MAX_RENDER_PIXELS).unwrap_or(u32::MAX)
     }
 }
 
@@ -126,7 +126,7 @@ pub struct PageSize {
 /// One rendered page.
 #[wasm_bindgen]
 pub struct PageImage {
-    image: crate::PageImage,
+    image: wordcraft_viewer::PageImage,
 }
 
 #[wasm_bindgen]

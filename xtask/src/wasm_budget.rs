@@ -75,14 +75,14 @@ fn forbidden_symbols_for(worker_stem: &str) -> &[&str] {
 pub const VIEWER_STEM: &str = "wordcraft-viewer";
 
 /// The view-only module's ceilings, at measured size plus the headroom the multi-megabyte
-/// workers got (about 3% raw, 4% gzip). Measured 2026-11-15 on the SIMD release build
-/// (`cargo build -p wordcraft-viewer --lib --target wasm32-unknown-unknown --profile
-/// wasm-release`, `wasm-bindgen --target web --weak-refs`, then `wasm-opt -Oz` with the flags
-/// `apps/wordcraft-web/index.html` gives the workers): 8,159,381 raw / 3,440,073 gzip /
-/// 2,627,147 Brotli q11. That is above the PDF worker, not below it as plan 8.3 expected: the
-/// rasteriser's picture decoders and the document model's serde code outweigh `krilla`.
-/// Ceilings ratchet down; raising one is a recorded decision in the plan.
-pub const VIEWER_CEILING: WorkerCeiling = WorkerCeiling { name: VIEWER_STEM, max_raw: 8_400_000, max_gzip: 3_575_000 };
+/// workers got (about 3% raw, 4% gzip). Measured 2026-11-16 on the SIMD release build
+/// (`cargo build -p wordcraft-viewer --bin wordcraft-viewer --target wasm32-unknown-unknown
+/// --profile wasm-release`, `wasm-bindgen --target web --weak-refs`, then `wasm-opt -Oz` with
+/// the flags `apps/wordcraft-web/index.html` gives the workers): 7,496,105 raw / 3,198,016
+/// gzip / 2,537,321 Brotli q11. The first measurement (8,159,381 / 3,440,073) was of a `cdylib`
+/// built beside an `rlib`, which cargo builds without link-time optimisation; the module is a
+/// bin since. Ceilings ratchet down; raising one is a recorded decision in the plan.
+pub const VIEWER_CEILING: WorkerCeiling = WorkerCeiling { name: VIEWER_STEM, max_raw: 7_725_000, max_gzip: 3_325_000 };
 
 /// Crates the view-only module must never link (plan 8.2): it opens a document and paints its
 /// pages, so the editor (`wordcraft-engine`, `wordcraft-ui-egui`, `egui`, `eframe`), PDF export
@@ -688,7 +688,7 @@ pub fn run_viewer(root: &Path, args: &[&str]) -> Result<(), String> {
         Err(e) => {
             println!("  artifact:     MISSING ({e})");
             errs.push(format!(
-                "{VIEWER_STEM}: no artifact at {} ({e}); build it (cargo build -p {VIEWER_STEM} --lib --target wasm32-unknown-unknown --profile wasm-release, then wasm-bindgen --target web and wasm-opt -Oz) or pass --wasm <path>",
+                "{VIEWER_STEM}: no artifact at {} ({e}); build it (cargo build -p {VIEWER_STEM} --bin {VIEWER_STEM} --target wasm32-unknown-unknown --profile wasm-release, then wasm-bindgen --target web and wasm-opt -Oz) or pass --wasm <path>",
                 path.display()
             ));
         }
