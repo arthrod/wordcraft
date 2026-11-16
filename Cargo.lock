@@ -7612,6 +7612,7 @@ dependencies = [
  "web-sys",
  "wordcraft-doc",
  "wordcraft-docx",
+ "wordcraft-engine",
  "wordcraft-fonts",
  "wordcraft-layout",
  "wordcraft-pdf",

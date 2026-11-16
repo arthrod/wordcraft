@@ -64,6 +64,9 @@ pub const MAX_FONT_COPIES: usize = 256;
 /// Total font bytes one `renderPdf` request carries (user fonts cap at
 /// `wordcraft_fonts::MAX_FONT_FILE_BYTES` each; this bounds the batch).
 pub const MAX_FONT_TOTAL_BYTES: usize = 128 << 20;
+/// Most faces one `renderPdf` request lists as drawn ([`PdfRenderRequest::drawn`]): the
+/// engine's own bound on that list (`wordcraft_engine::strict::MAX_PDF_FACES`).
+pub const MAX_DRAWN_FACES: usize = 4096;
 /// Longest format name (`rtf`, `odt`, `docx`…) a `convert` request accepts, in bytes.
 pub const MAX_FORMAT_BYTES: usize = 32;
 /// Longest password a `convert` request carries, in bytes.
@@ -360,7 +363,7 @@ pub enum ConvertDirection {
 /// On the wire the payload is a [`pack_binary`] frame of two parts — the JSON metadata
 /// (`{format, direction, password}`) and the raw `input` bytes — so a file of up to
 /// [`MAX_CONVERT_BYTES`] never has to survive JSON.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ConvertRequest {
     /// Format of the non-`.docx` side, as a lower-case extension (`rtf`, `odt`, `doc`, `html`,
     /// `xml`…), at most [`MAX_FORMAT_BYTES`]. `.docx` and its sibling flavors (`.docm`, `.dotx`,
@@ -372,6 +375,45 @@ pub struct ConvertRequest {
     pub password: Option<String>,
     /// The file to convert, at most [`MAX_CONVERT_BYTES`].
     pub input: Vec<u8>,
+    /// Import only: the page a file that gives no page size of its own opens on — the paper of
+    /// the user's region, as the engine opens such a file in its session. `None` (also what a
+    /// client that predates the field sends) is a new blank document's page.
+    pub page: Option<PageSize>,
+}
+
+/// A page size in points, exactly as the client's document model holds it (an `f32` crosses
+/// JSON and back bit for bit), each side finite and within
+/// [`MIN_PAGE_POINTS`]..=[`MAX_PAGE_POINTS`]. Not twips: rounding the region's A4
+/// (595.28 × 841.89 pt) to twips would open a file on a page 0.02 pt off the one the engine
+/// opens it on in process.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PageSize {
+    pub width: f32,
+    pub height: f32,
+}
+
+/// The narrowest page side a `convert` request may ask for: 0.1 inch.
+pub const MIN_PAGE_POINTS: f32 = 7.2;
+/// The widest page side a `convert` request may ask for: 22 inches.
+pub const MAX_PAGE_POINTS: f32 = 1584.0;
+
+impl PageSize {
+    /// Both sides finite and within [`MIN_PAGE_POINTS`]..=[`MAX_PAGE_POINTS`] (NaN is not).
+    pub fn is_valid(&self) -> bool {
+        (MIN_PAGE_POINTS..=MAX_PAGE_POINTS).contains(&self.width) && (MIN_PAGE_POINTS..=MAX_PAGE_POINTS).contains(&self.height)
+    }
+
+    /// The size of a `width` × `height` point page, unchanged; `None` for a side that is not
+    /// finite or falls outside the bounds.
+    pub fn from_points(width: f32, height: f32) -> Option<PageSize> {
+        let page = PageSize { width, height };
+        page.is_valid().then_some(page)
+    }
+
+    /// `(width, height)` in points.
+    pub fn points(&self) -> (f32, f32) {
+        (self.width, self.height)
+    }
 }
 
 /// One font the client sends the PDF worker (§3.4): the file's bytes plus the family and style
@@ -402,6 +444,53 @@ pub struct PdfRenderRequest {
     /// Font copies to install before layout: at most [`MAX_FONT_COPIES`], totalling at most
     /// [`MAX_FONT_TOTAL_BYTES`].
     pub fonts: Vec<FontCopy>,
+    /// How the PDF shows the document. Not part of the document, so not in the package.
+    pub options: PdfJobOptions,
+    /// For a strict job, every face the client's own PDF of this document draws text in, as
+    /// `(typographic family, style)` (`wordcraft_engine::strict::pdf_faces`), at most
+    /// [`MAX_DRAWN_FACES`]: the worker fails the job when a copy it could not install is one of
+    /// them. `None` when the client does not know the whole list (an older client, or a list it
+    /// had to cut): a strict job then fails when any copy could not be installed. Rides in the
+    /// JSON part as `drawn`.
+    pub drawn: Option<Vec<(String, String)>>,
+}
+
+/// How a `renderPdf` job shows the document: the engine's export options for a PDF (Print
+/// Markup, its comments, the Numeral setting), as plain data the worker applies to its own
+/// `PdfOptions` the way the engine's export does.
+///
+/// It rides in the JSON part of the payload as `options`. Every field defaults, and the whole
+/// field may be absent: a request from a client that predates it renders as it always did (no
+/// markup, Western digits), and a worker that predates it ignores it — the same additive rule
+/// `convert`'s `password` follows, so the envelope's [`PROTOCOL_VERSION`] stays.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PdfJobOptions {
+    /// Print Markup: tracked changes shown marked up.
+    pub markup: bool,
+    /// With `markup`, the comments in balloons beside each page (ignored without it).
+    pub comments: bool,
+    /// How digits look.
+    pub numeral: Numeral,
+    /// A strict export: the page already checked that nothing would be left out with its own
+    /// faces, so the worker fails the job when a font copy it could not install is one the text
+    /// is drawn in ([`PdfRenderRequest::drawn`]; any, without that list), or a character then has
+    /// no face to draw it, rather than let that text fall back. Off, such a copy is skipped and
+    /// the export runs. An older worker ignores it.
+    pub strict: bool,
+}
+
+/// The digits a PDF shows (the Numeral setting, with `System` already resolved by the client).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Numeral {
+    /// Western digits everywhere.
+    #[default]
+    Arabic,
+    /// Eastern Arabic-Indic digits everywhere.
+    Hindi,
+    /// Hindi digits in and around right-to-left text, Western elsewhere.
+    Context,
 }
 
 /// The JSON part of a `convert` payload (everything but `input`).
@@ -411,12 +500,21 @@ struct ConvertMeta {
     direction: ConvertDirection,
     #[serde(default)]
     password: Option<String>,
+    /// Absent from an older client's request: the default page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    page: Option<PageSize>,
 }
 
-/// The JSON part of a `renderPdf` payload: the fonts' names, in `fonts` order.
+/// The JSON part of a `renderPdf` payload: the fonts' names, in `fonts` order, and the job's
+/// options (absent from an older client's request: the defaults).
 #[derive(Serialize, Deserialize)]
 struct PdfMeta {
     fonts: Vec<FontMeta>,
+    #[serde(default)]
+    options: PdfJobOptions,
+    /// [`PdfRenderRequest::drawn`]; absent from an older client's request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    drawn: Option<Vec<FontMeta>>,
 }
 
 /// One font's names inside [`PdfMeta`]; its bytes ride as a binary part.
@@ -494,7 +592,7 @@ pub fn unpack_binary(bytes: &[u8]) -> Result<Vec<&[u8]>, ProtoError> {
 
 /// Encode a `convert` payload: a two-part [`pack_binary`] frame, JSON metadata then `input`.
 pub fn encode_convert_request(req: &ConvertRequest) -> Result<Vec<u8>, ProtoError> {
-    let meta = encode_payload(&ConvertMeta { format: req.format.clone(), direction: req.direction, password: req.password.clone() })?;
+    let meta = encode_payload(&ConvertMeta { format: req.format.clone(), direction: req.direction, password: req.password.clone(), page: req.page })?;
     pack_binary(&[&meta, &req.input])
 }
 
@@ -521,12 +619,19 @@ pub fn decode_convert_request(bytes: &[u8]) -> Result<ConvertRequest, ProtoError
     if meta.format.is_empty() {
         return Err(ProtoError::Decode("convert payload has an empty format".into()));
     }
-    Ok(ConvertRequest { format: meta.format, direction: meta.direction, password: meta.password, input: input.to_vec() })
+    if meta.page.is_some_and(|p| !p.is_valid()) {
+        return Err(ProtoError::Decode(format!("convert payload has a page size outside {MIN_PAGE_POINTS}..={MAX_PAGE_POINTS} points")));
+    }
+    Ok(ConvertRequest { format: meta.format, direction: meta.direction, password: meta.password, input: input.to_vec(), page: meta.page })
 }
 
 /// Encode a `renderPdf` payload: `[metaJson, docx, font0, font1, …]`.
 pub fn encode_pdf_request(req: &PdfRenderRequest) -> Result<Vec<u8>, ProtoError> {
-    let meta = encode_payload(&PdfMeta { fonts: req.fonts.iter().map(|f| FontMeta { family: f.family.clone(), style: f.style.clone() }).collect() })?;
+    let meta = encode_payload(&PdfMeta {
+        fonts: req.fonts.iter().map(|f| FontMeta { family: f.family.clone(), style: f.style.clone() }).collect(),
+        options: req.options,
+        drawn: req.drawn.as_ref().map(|d| d.iter().map(|(family, style)| FontMeta { family: family.clone(), style: style.clone() }).collect()),
+    })?;
     let mut parts: Vec<&[u8]> = Vec::with_capacity(req.fonts.len().saturating_add(2));
     parts.push(&meta);
     parts.push(&req.docx);
@@ -553,6 +658,11 @@ pub fn decode_pdf_request(bytes: &[u8]) -> Result<PdfRenderRequest, ProtoError> 
     if meta.fonts.len() > MAX_FONT_COPIES {
         return Err(ProtoError::TooLarge { limit: MAX_FONT_COPIES, got: meta.fonts.len() });
     }
+    if let Some(drawn) = &meta.drawn
+        && drawn.len() > MAX_DRAWN_FACES
+    {
+        return Err(ProtoError::TooLarge { limit: MAX_DRAWN_FACES, got: drawn.len() });
+    }
     let font_total = parts[2..].iter().fold(0usize, |a, p| a.saturating_add(p.len()));
     if font_total > MAX_FONT_TOTAL_BYTES {
         return Err(ProtoError::TooLarge { limit: MAX_FONT_TOTAL_BYTES, got: font_total });
@@ -568,6 +678,8 @@ pub fn decode_pdf_request(bytes: &[u8]) -> Result<PdfRenderRequest, ProtoError> 
             .zip(&parts[2..])
             .map(|(f, bytes)| FontCopy { family: f.family, style: f.style, bytes: bytes.to_vec() })
             .collect(),
+        options: meta.options,
+        drawn: meta.drawn.map(|d| d.into_iter().map(|f| (f.family, f.style)).collect()),
     })
 }
 
@@ -867,7 +979,7 @@ pub fn convert_request_error(req: &ConvertRequest) -> Option<ErrorCode> {
     {
         return Some(ErrorCode::TooLarge);
     }
-    if req.format.is_empty() {
+    if req.format.is_empty() || req.page.is_some_and(|p| !p.is_valid()) {
         return Some(ErrorCode::BadRequest);
     }
     None
@@ -896,12 +1008,42 @@ pub fn request_payload_limit(kind: Kind) -> usize {
     }
 }
 
+/// Most bytes a converted file or a PDF may come back in: a client refuses a larger reply before
+/// copying it ([`reply_payload_limit`]).
+pub const MAX_OUTPUT_BYTES: usize = 256 << 20;
+
+/// The largest payload buffer a `kind` reply may arrive in, in bytes, so a client can refuse a
+/// malformed or oversized message from a worker before copying it into its heap, as a worker
+/// refuses a request ([`request_payload_limit`]). `0` for request kinds, which a worker never
+/// sends.
+pub fn reply_payload_limit(kind: Kind) -> usize {
+    match kind {
+        // Raw file bytes.
+        Kind::Converted | Kind::Pdf => MAX_OUTPUT_BYTES,
+        // JSON bodies (or none): `decode_payload`'s own cap.
+        Kind::Issues | Kind::Ack | Kind::Pong | Kind::Ready | Kind::Error | Kind::ViewOpened | Kind::ViewFonts => MAX_PAYLOAD_BYTES,
+        // RGBA pixels and their trailer.
+        Kind::ViewPage => usize::try_from(MAX_VIEW_PIXELS.saturating_mul(4)).unwrap_or(usize::MAX).saturating_add(VIEW_PAGE_TRAILER_BYTES),
+        Kind::Check
+        | Kind::Cancel
+        | Kind::Configure
+        | Kind::Convert
+        | Kind::RenderPdf
+        | Kind::Ping
+        | Kind::ViewOpen
+        | Kind::ViewRender
+        | Kind::ViewInstallFont
+        | Kind::ViewMissingFonts => 0,
+    }
+}
+
 /// Validate a [`PdfRenderRequest`] against the protocol bounds before a worker runs it, like
-/// [`check_request_error`]: `TooLarge` past [`MAX_PDF_DOC_BYTES`], [`MAX_FONT_COPIES`] or
-/// [`MAX_FONT_TOTAL_BYTES`], `BadRequest` for an empty package.
+/// [`check_request_error`]: `TooLarge` past [`MAX_PDF_DOC_BYTES`], [`MAX_FONT_COPIES`],
+/// [`MAX_FONT_TOTAL_BYTES`] or [`MAX_DRAWN_FACES`], `BadRequest` for an empty package.
 pub fn pdf_request_error(req: &PdfRenderRequest) -> Option<ErrorCode> {
     let font_total = req.fonts.iter().fold(0usize, |a, f| a.saturating_add(f.bytes.len()));
-    if req.docx.len() > MAX_PDF_DOC_BYTES || req.fonts.len() > MAX_FONT_COPIES || font_total > MAX_FONT_TOTAL_BYTES {
+    let drawn = req.drawn.as_ref().map_or(0, Vec::len);
+    if req.docx.len() > MAX_PDF_DOC_BYTES || req.fonts.len() > MAX_FONT_COPIES || font_total > MAX_FONT_TOTAL_BYTES || drawn > MAX_DRAWN_FACES {
         return Some(ErrorCode::TooLarge);
     }
     if req.docx.is_empty() {
@@ -1188,6 +1330,7 @@ mod tests {
             direction: ConvertDirection::Import,
             password: Some("open-sesame".into()),
             input: b"{\\rtf1 hi}".to_vec(),
+            page: Some(PageSize { width: 595.28, height: 841.89 }),
         }
     }
 
@@ -1255,6 +1398,73 @@ mod tests {
         assert_eq!(decode_convert_request(&encode_convert_request(&req).unwrap()).unwrap(), req);
     }
 
+    /// Review finding (the page of an opened file): the page an import opens on travels in the
+    /// JSON part, in points as the client holds them; a request without one, as an older client sends it, has none, and an
+    /// older worker reads a new request (serde ignores the field it does not know).
+    #[test]
+    fn convert_request_carries_the_page_compatibly() {
+        let req = sample_convert();
+        let meta: serde_json::Value = serde_json::from_slice(unpack_binary(&encode_convert_request(&req).unwrap()).unwrap()[0]).unwrap();
+        assert_eq!(meta["page"].to_string(), r#"{"height":841.89,"width":595.28}"#, "the shortest form that reads back exactly");
+        let none = ConvertRequest { page: None, ..sample_convert() };
+        let meta: serde_json::Value = serde_json::from_slice(unpack_binary(&encode_convert_request(&none).unwrap()).unwrap()[0]).unwrap();
+        assert!(meta.get("page").is_none(), "no page, no field: {meta}");
+        assert_eq!(decode_convert_request(&encode_convert_request(&none).unwrap()).unwrap(), none);
+        #[derive(Deserialize)]
+        struct OldConvertMeta {
+            format: String,
+        }
+        let old: OldConvertMeta = decode_payload(unpack_binary(&encode_convert_request(&req).unwrap()).unwrap()[0]).unwrap();
+        assert_eq!(old.format, "rtf");
+        // Points cross as they are, never rounded: A4 and Letter as the engine's regions give
+        // them come back bit for bit, on the wire too.
+        for (w, h) in [(595.28f32, 841.89f32), (612.0, 792.0), (7.2, 1584.0), (419.53, 595.28), (0.1 + 600.0, 800.3)] {
+            let page = PageSize::from_points(w, h).unwrap();
+            assert_eq!(page.points(), (w, h));
+            let req = ConvertRequest { page: Some(page), ..sample_convert() };
+            let back = decode_convert_request(&encode_convert_request(&req).unwrap()).unwrap().page.unwrap().points();
+            assert_eq!((back.0.to_bits(), back.1.to_bits()), (w.to_bits(), h.to_bits()), "{w} x {h}");
+        }
+        // Every f32 in the bounds survives the JSON, not just the regions' sizes.
+        let mut pt = MIN_PAGE_POINTS;
+        while pt <= MAX_PAGE_POINTS {
+            let req = ConvertRequest { page: PageSize::from_points(pt, MAX_PAGE_POINTS), ..sample_convert() };
+            let back = decode_convert_request(&encode_convert_request(&req).unwrap()).unwrap().page.unwrap().points();
+            assert_eq!(back.0.to_bits(), pt.to_bits(), "{pt}");
+            pt = f32::from_bits(pt.to_bits() + 997);
+        }
+        for (w, h) in [(f32::NAN, 792.0), (612.0, f32::INFINITY), (-612.0, 792.0), (0.0, 792.0), (612.0, 1e9), (7.1, 792.0), (1584.1, 792.0)] {
+            assert_eq!(PageSize::from_points(w, h), None, "{w} x {h}");
+        }
+        assert!(PageSize::from_points(7.2, 1584.0).is_some(), "the bounds themselves fit");
+    }
+
+    /// A hostile page is a typed error, never a panic or a page laid out at any size.
+    #[test]
+    fn convert_request_rejects_a_hostile_page() {
+        for page in [
+            serde_json::json!({"width": 0, "height": 792}),
+            serde_json::json!({"width": 612, "height": 1584.5}),
+            serde_json::json!({"width": 7.1, "height": 792}),
+            serde_json::json!({"width": u64::MAX, "height": 792}),
+            serde_json::json!({"width": 1e300, "height": 792}),
+            serde_json::json!({"width": -612, "height": 792}),
+            serde_json::json!({"width": 612}),
+            serde_json::json!({"width": "612", "height": 792}),
+            serde_json::json!("A4"),
+        ] {
+            let meta = encode_payload(&serde_json::json!({"format": "html", "direction": "import", "page": page})).unwrap();
+            let frame = pack_binary(&[&meta, b"<p>x</p>"]).unwrap();
+            assert!(matches!(decode_convert_request(&frame), Err(ProtoError::Decode(_))), "{page}");
+        }
+        for (w, h) in [(612.0, 0.0), (f32::NAN, 792.0), (612.0, f32::INFINITY), (-612.0, 792.0)] {
+            let req = ConvertRequest { page: Some(PageSize { width: w, height: h }), ..sample_convert() };
+            assert_eq!(convert_request_error(&req), Some(ErrorCode::BadRequest), "{w} x {h}");
+        }
+        let req = ConvertRequest { page: Some(PageSize { width: 612.0, height: 792.0 }), ..sample_convert() };
+        assert_eq!(convert_request_error(&req), None);
+    }
+
     #[test]
     fn convert_request_rejects_bad_shapes() {
         // Not a frame at all.
@@ -1274,6 +1484,8 @@ mod tests {
                 FontCopy { family: "Inter".into(), style: "Regular".into(), bytes: vec![0, 1, 0, 0, 9] },
                 FontCopy { family: "Liter".into(), style: "Italic".into(), bytes: vec![0, 1, 0, 0, 8, 8, 8] },
             ],
+            options: PdfJobOptions { markup: true, comments: true, numeral: Numeral::Context, strict: false },
+            drawn: Some(vec![("Inter".into(), "Regular".into()), ("Source Serif 4".into(), "Bold Italic".into())]),
         };
         let bytes = encode_pdf_request(&req).unwrap();
         let parts = unpack_binary(&bytes).unwrap();
@@ -1286,8 +1498,120 @@ mod tests {
         assert_eq!(parts[3], req.fonts[1].bytes.as_slice());
         assert_eq!(decode_pdf_request(&bytes).unwrap(), req);
         // A request without fonts is meta + docx and nothing else.
-        let bare = PdfRenderRequest { fonts: Vec::new(), ..req };
+        assert_eq!(meta["drawn"][1]["style"], "Bold Italic");
+        let bare = PdfRenderRequest { fonts: Vec::new(), drawn: None, ..req };
         assert_eq!(decode_pdf_request(&encode_pdf_request(&bare).unwrap()).unwrap(), bare);
+    }
+
+    /// Review finding (PDF options): the options travel in the JSON part, each value as sent.
+    #[test]
+    fn pdf_request_carries_its_options() {
+        for options in [
+            PdfJobOptions::default(),
+            PdfJobOptions { markup: true, comments: false, numeral: Numeral::Arabic, strict: false },
+            PdfJobOptions { markup: true, comments: true, numeral: Numeral::Hindi, strict: true },
+            PdfJobOptions { markup: false, comments: true, numeral: Numeral::Context, strict: false },
+        ] {
+            let req = PdfRenderRequest { docx: b"PK".to_vec(), fonts: Vec::new(), options, drawn: None };
+            let bytes = encode_pdf_request(&req).unwrap();
+            let meta: serde_json::Value = serde_json::from_slice(unpack_binary(&bytes).unwrap()[0]).unwrap();
+            assert_eq!(meta["options"]["markup"], options.markup);
+            assert_eq!(meta["options"]["strict"], options.strict);
+            assert_eq!(decode_pdf_request(&bytes).unwrap().options, options);
+        }
+        let meta: serde_json::Value = serde_json::from_slice(
+            unpack_binary(
+                &encode_pdf_request(&PdfRenderRequest {
+                    docx: b"PK".to_vec(),
+                    fonts: Vec::new(),
+                    options: PdfJobOptions { numeral: Numeral::Hindi, ..Default::default() },
+                    drawn: None,
+                })
+                .unwrap(),
+            )
+            .unwrap()[0],
+        )
+        .unwrap();
+        assert_eq!(meta["options"]["numeral"], "hindi");
+    }
+
+    /// The options are additive: a request from a client that predates them (no `options`, or
+    /// only some fields) renders as before, and a worker that predates them reads a new request
+    /// (serde ignores the field it does not know). The envelope's version is unchanged.
+    #[test]
+    fn pdf_options_are_compatible_both_ways() {
+        let old_client = encode_payload(&serde_json::json!({"fonts": []})).unwrap();
+        let frame = pack_binary(&[&old_client, b"PK"]).unwrap();
+        assert_eq!(decode_pdf_request(&frame).unwrap().options, PdfJobOptions::default());
+        let partial = encode_payload(&serde_json::json!({"fonts": [], "options": {"markup": true}})).unwrap();
+        let frame = pack_binary(&[&partial, b"PK"]).unwrap();
+        assert_eq!(decode_pdf_request(&frame).unwrap().options, PdfJobOptions { markup: true, ..Default::default() });
+        // A later client's extra option is ignored here, as this one's are by an older worker.
+        let later = encode_payload(&serde_json::json!({"fonts": [], "options": {"markup": true, "future": 1}, "more": [1]})).unwrap();
+        let frame = pack_binary(&[&later, b"PK"]).unwrap();
+        assert!(decode_pdf_request(&frame).unwrap().options.markup);
+        #[derive(Deserialize)]
+        struct OldPdfMeta {
+            fonts: Vec<serde_json::Value>,
+        }
+        let new_meta = unpack_binary(
+            &encode_pdf_request(&PdfRenderRequest {
+                docx: b"PK".to_vec(),
+                fonts: Vec::new(),
+                options: PdfJobOptions { markup: true, comments: true, numeral: Numeral::Hindi, strict: true },
+                drawn: Some(vec![("Inter".into(), "Regular".into())]),
+            })
+            .unwrap(),
+        )
+        .unwrap()[0]
+            .to_vec();
+        let old: OldPdfMeta = decode_payload(&new_meta).unwrap();
+        assert!(old.fonts.is_empty());
+    }
+
+    /// Review finding (gate 3, the strict font check): a strict job carries the faces the
+    /// client's PDF draws text in, so the worker decides from what the layout resolved rather
+    /// than from the font names the document asks for. The list is additive both ways (an older
+    /// client sends none: `None`, "not known"), bounded, and a junk list is a decode error.
+    #[test]
+    fn pdf_request_carries_the_faces_its_text_is_drawn_in() {
+        let frame = |meta: serde_json::Value| pack_binary(&[&encode_payload(&meta).unwrap(), b"PK"]).unwrap();
+        assert_eq!(decode_pdf_request(&frame(serde_json::json!({"fonts": []}))).unwrap().drawn, None);
+        assert_eq!(decode_pdf_request(&frame(serde_json::json!({"fonts": [], "drawn": []}))).unwrap().drawn, Some(Vec::new()));
+        let drawn = decode_pdf_request(&frame(serde_json::json!({"fonts": [], "drawn": [{"family": "Corrupt Copy Sans", "style": "SemiBold"}]})))
+            .unwrap()
+            .drawn;
+        assert_eq!(drawn, Some(vec![("Corrupt Copy Sans".to_string(), "SemiBold".to_string())]));
+        // No list on the wire when there is none.
+        let none = PdfRenderRequest { docx: b"PK".to_vec(), fonts: Vec::new(), options: PdfJobOptions::default(), drawn: None };
+        let meta: serde_json::Value = serde_json::from_slice(unpack_binary(&encode_pdf_request(&none).unwrap()).unwrap()[0]).unwrap();
+        assert!(meta.get("drawn").is_none());
+        for junk in [serde_json::json!(5), serde_json::json!(["Inter"]), serde_json::json!([{"family": "Inter"}])] {
+            assert!(matches!(decode_pdf_request(&frame(serde_json::json!({"fonts": [], "drawn": junk}))), Err(ProtoError::Decode(_))), "{junk}");
+        }
+        let many: Vec<serde_json::Value> = (0..=MAX_DRAWN_FACES).map(|_| serde_json::json!({"family": "a", "style": "b"})).collect();
+        assert!(matches!(
+            decode_pdf_request(&frame(serde_json::json!({"fonts": [], "drawn": many}))),
+            Err(ProtoError::TooLarge { limit: MAX_DRAWN_FACES, .. })
+        ));
+    }
+
+    /// Hostile options are a typed decode error, never a panic or a silent default.
+    #[test]
+    fn pdf_options_reject_junk() {
+        for options in [
+            serde_json::json!(5),
+            serde_json::json!("markup"),
+            serde_json::json!({"markup": "yes"}),
+            serde_json::json!({"comments": 1}),
+            serde_json::json!({"numeral": "system"}),
+            serde_json::json!({"numeral": "klingon"}),
+            serde_json::json!({"numeral": 2}),
+        ] {
+            let meta = encode_payload(&serde_json::json!({"fonts": [], "options": options})).unwrap();
+            let frame = pack_binary(&[&meta, b"PK"]).unwrap();
+            assert!(matches!(decode_pdf_request(&frame), Err(ProtoError::Decode(_))), "{options}");
+        }
     }
 
     #[test]
@@ -1332,9 +1656,17 @@ mod tests {
         assert_eq!(convert_request_error(&ConvertRequest { input: vec![0; MAX_CONVERT_BYTES + 1], ..ok.clone() }), Some(ErrorCode::TooLarge));
         assert_eq!(convert_request_error(&ConvertRequest { format: String::new(), ..ok.clone() }), Some(ErrorCode::BadRequest));
 
-        let ok = PdfRenderRequest { docx: b"PK".to_vec(), fonts: vec![FontCopy { family: "a".into(), style: "b".into(), bytes: vec![1; 8] }] };
+        let ok = PdfRenderRequest {
+            docx: b"PK".to_vec(),
+            fonts: vec![FontCopy { family: "a".into(), style: "b".into(), bytes: vec![1; 8] }],
+            options: PdfJobOptions::default(),
+            drawn: Some(vec![("a".into(), "b".into()); MAX_DRAWN_FACES]),
+        };
         assert_eq!(pdf_request_error(&ok), None);
-        assert_eq!(pdf_request_error(&PdfRenderRequest { docx: vec![0; MAX_PDF_DOC_BYTES + 1], fonts: Vec::new() }), Some(ErrorCode::TooLarge));
+        assert_eq!(
+            pdf_request_error(&PdfRenderRequest { docx: vec![0; MAX_PDF_DOC_BYTES + 1], fonts: Vec::new(), ..ok.clone() }),
+            Some(ErrorCode::TooLarge)
+        );
         assert_eq!(
             pdf_request_error(&PdfRenderRequest {
                 fonts: (0..MAX_FONT_COPIES + 1).map(|_| FontCopy { family: String::new(), style: String::new(), bytes: Vec::new() }).collect(),
@@ -1357,7 +1689,11 @@ mod tests {
             }),
             Some(ErrorCode::TooLarge)
         );
-        assert_eq!(pdf_request_error(&PdfRenderRequest { docx: Vec::new(), fonts: Vec::new() }), Some(ErrorCode::BadRequest));
+        assert_eq!(pdf_request_error(&PdfRenderRequest { docx: Vec::new(), fonts: Vec::new(), ..ok.clone() }), Some(ErrorCode::BadRequest));
+        assert_eq!(
+            pdf_request_error(&PdfRenderRequest { drawn: Some(vec![(String::new(), String::new()); MAX_DRAWN_FACES + 1]), ..ok.clone() }),
+            Some(ErrorCode::TooLarge)
+        );
     }
 
     #[test]
@@ -1623,5 +1959,25 @@ mod tests {
         }
         let json = String::from_utf8(encode_payload(&ErrorReply { code: ErrorCode::PasswordRequired, message: String::new() }).unwrap()).unwrap();
         assert!(json.contains(r#""passwordRequired""#), "{json}");
+    }
+    /// Every reply kind has a bound a client checks before copying; request kinds have none
+    /// (a worker never sends them), and file replies are the widest.
+    #[test]
+    fn reply_payload_limits_bound_every_reply_kind() {
+        for kind in [Kind::Issues, Kind::Ack, Kind::Pong, Kind::Ready, Kind::Error] {
+            assert_eq!(reply_payload_limit(kind), MAX_PAYLOAD_BYTES, "{kind:?}");
+        }
+        assert_eq!(reply_payload_limit(Kind::Pdf), MAX_OUTPUT_BYTES);
+        assert_eq!(reply_payload_limit(Kind::Converted), MAX_OUTPUT_BYTES);
+        assert_eq!(reply_payload_limit(Kind::ViewOpened), MAX_PAYLOAD_BYTES);
+        assert_eq!(reply_payload_limit(Kind::ViewFonts), MAX_PAYLOAD_BYTES);
+        assert_eq!(reply_payload_limit(Kind::ViewPage), MAX_VIEW_PIXELS as usize * 4 + VIEW_PAGE_TRAILER_BYTES);
+        for kind in [Kind::ViewOpen, Kind::ViewRender, Kind::ViewInstallFont, Kind::ViewMissingFonts] {
+            assert_eq!(reply_payload_limit(kind), 0, "{kind:?}");
+        }
+        for kind in [Kind::Check, Kind::Cancel, Kind::Configure, Kind::Convert, Kind::RenderPdf, Kind::Ping] {
+            assert!(kind.is_request());
+            assert_eq!(reply_payload_limit(kind), 0, "{kind:?}");
+        }
     }
 }

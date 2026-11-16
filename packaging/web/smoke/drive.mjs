@@ -55,16 +55,19 @@ function serveFile(res, path, headers = {}) {
 // everything else → the fixture's dist. Mirrors how a consumer serves the
 // runtime files bundlers don't copy.
 //
-// `opts.log` (an array) receives one `{ path, status, bytes }` per request, and
-// `opts.miss(path)` answering true makes that request a 404 — lazy.mjs uses both
-// to measure what a page fetches and to simulate a missing worker file.
+// `opts.log` (an array) receives one `{ path, served, status, bytes }` per
+// request — `path` as the page requested it, `served` the file sent for it (null
+// for none) — and `opts.miss(path)` answering true makes that request a 404 —
+// lazy.mjs uses both to measure what a page fetches and to simulate a missing
+// worker file.
 // `opts.headers` are added to every file served (viewer.mjs sends the deployed
 // Content-Security-Policy this way).
 export function startServer(distDir, pkgDir, opts = {}) {
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
-    let pathname = decodeURIComponent(url.pathname);
-    const note = (status, bytes) => opts.log?.push({ path: pathname === "/" ? "/index.html" : url.pathname, status, bytes });
+    const requested = decodeURIComponent(url.pathname);
+    let pathname = requested;
+    const note = (status, bytes, served = null) => opts.log?.push({ path: requested, served, status, bytes });
     if (opts.miss?.(pathname)) {
       note(404, 0);
       res.writeHead(404).end("not found");
@@ -86,7 +89,7 @@ export function startServer(distDir, pkgDir, opts = {}) {
     }
     const file = existsSync(path) && statSync(path).isDirectory() ? join(path, "index.html") : path;
     if (existsSync(file) && statSync(file).isFile()) {
-      note(200, statSync(file).size);
+      note(200, statSync(file).size, file);
       serveFile(res, file, opts.headers);
     } else {
       note(404, 0);
