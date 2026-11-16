@@ -23,7 +23,9 @@
 //   AC6  served with the deployed Content-Security-Policy (`_headers`, plus the inline
 //        bootstrap's hash as `package.sh` adds it), nothing is refused
 //   and the three modes a host can choose (view, viewer-first, edit), an edit action while
-//   the document still downloads, a document declared past the size limit, a protected document (the password asked in the page), a
+//   the document still downloads, a document declared past the size limit, the viewer failing
+//   for good (no viewer worker, not a .docx, a failed download) with Edit still offered, a
+//   protected document (the password asked in the page), a
 //   font installed just before another document opens, and the editor's parent bridge
 //   (?host=parent).
 //
@@ -384,6 +386,31 @@ try {
     check("oversized Content-Length: refused before the body with the too-large notice", state.error === "document-failed" && /too large/i.test(state.notice ?? ""), JSON.stringify(state));
     check("oversized Content-Length: no uncaught errors", big.log.uncaught.length === 0, big.log.uncaught.join(" | "));
     await big.page.close();
+  }
+
+  // ---- the viewer fails for good: the editor is still offered and fetches the document ----
+  {
+    const editVisible = (p) => p.evaluate(() => (document.querySelector("#wordcraft_viewer_edit")?.getClientRects().length ?? 0) > 0);
+    const noWorker = await open(browser, base, "/", { blocked: /\/wordcraft-worker-viewer_loader\.js$/ });
+    await waitAttr(noWorker.page, "data-wordcraft-error", "viewer-failed", 30000).catch(() => {});
+    await noWorker.page.waitForFunction(() => (document.querySelector("#wordcraft_viewer_edit")?.getClientRects().length ?? 0) > 0, { timeout: 10000 }).catch(() => {});
+    check("viewer worker missing: Edit is offered", await editVisible(noWorker.page));
+    await noWorker.page.click("#wordcraft_viewer_edit").catch(() => {});
+    await waitAttr(noWorker.page, "data-wordcraft-phase", "editing", 120000).catch(() => {});
+    const handed = await noWorker.page.evaluate(() => Promise.resolve(window.wordcraft?.getMarkdown?.()).catch(() => null));
+    check("viewer worker missing: the editor shows the document", typeof handed === "string" && handed.includes(SAMPLE_TEXT), JSON.stringify(String(handed).slice(0, 60)));
+    check("viewer worker missing: no uncaught errors", noWorker.log.uncaught.length === 0, noWorker.log.uncaught.join(" | "));
+    await noWorker.page.close();
+    for (const [what, doc] of [
+      ["not a .docx", "i18n/manifest.json"],
+      ["download failed", "missing-document.docx"],
+    ]) {
+      const bad = await open(browser, base, `/?doc=${doc}`);
+      await waitAttr(bad.page, "data-wordcraft-error", "document-failed", 30000).catch(() => {});
+      await new Promise((r) => setTimeout(r, 500));
+      check(`${what}: Edit is offered`, await editVisible(bad.page));
+      await bad.page.close();
+    }
   }
 
   // ---- a protected document: the password is asked for in the page ----

@@ -54,7 +54,9 @@ const VIEWER_GLOBAL: &str = "wordcraftViewer";
 const TOO_LARGE: &str = "The document is too large for this viewer.";
 /// Pixels kept in painted pages outside the window, in bytes of RGBA.
 const CACHE_BUDGET_BYTES: u64 = 192 << 20;
-/// Where the document comes from.
+/// Where the document comes from. Kept after the viewer reads it: if the viewer fails, the
+/// editor fetches it again.
+#[derive(Clone)]
 enum Source {
     /// Nothing was given: the viewer shows the built-in sample, the editor what it shows by
     /// itself.
@@ -554,6 +556,23 @@ fn show_error(page: &Page, code: &str, text: &str) {
     }
 }
 
+/// The viewer failed for good (its worker, the download, or the file): say so, and offer the
+/// editor, which fetches the document itself. A password asked for is not this
+/// ([`ask_password`]).
+fn document_failed(page: &Rc<Page>, code: &str, text: &str) {
+    show_error(page, code, text);
+    dispatch(page, Event::DocumentFailed);
+}
+
+/// Bytes refused before they were sent to the worker: a document already open stays open.
+fn refused(page: &Rc<Page>, text: &str) {
+    if page.state.borrow().handover.document_open() {
+        show_error(page, "document-failed", text);
+    } else {
+        document_failed(page, "document-failed", text);
+    }
+}
+
 fn remove_skeleton(page: &Page) {
     if let Some(skeleton) = page.document.get_element_by_id(SKELETON_ID) {
         skeleton.remove();
@@ -566,13 +585,13 @@ fn start_viewer(page: &Rc<Page>) {
     let failed = page.clone();
     let started = ViewerWorker::start(&page.asset_base, move |why| {
         web_sys::console::warn_1(&format!("wordcraft viewer: {why}").into());
-        show_error(&failed, "viewer-failed", "The document viewer could not start in this browser.");
+        document_failed(&failed, "viewer-failed", "The document viewer could not start in this browser.");
     });
     match started {
         Ok(worker) => page.state.borrow_mut().worker = Some(worker),
         Err(why) => {
             web_sys::console::warn_1(&format!("wordcraft viewer: {why}").into());
-            show_error(page, "viewer-failed", "The document viewer could not start in this browser.");
+            document_failed(page, "viewer-failed", "The document viewer could not start in this browser.");
             return;
         }
     }
@@ -584,7 +603,7 @@ fn start_viewer(page: &Rc<Page>) {
                 open_document(&page, bytes, password);
             }
             Ok(None) => {}
-            Err(why) => show_error(&page, "document-failed", &why),
+            Err(why) => document_failed(&page, "document-failed", &why),
         }
     });
 }
@@ -593,11 +612,11 @@ fn start_viewer(page: &Rc<Page>) {
 /// nothing said, the viewer gets the built-in sample and the editor gets nothing.
 async fn document_bytes(page: &Rc<Page>, for_viewer: bool) -> Result<Option<js_sys::Uint8Array>, String> {
     let source = {
-        let mut state = page.state.borrow_mut();
+        let state = page.state.borrow();
         if let Some(docx) = &state.docx {
             return Ok(Some(docx.clone()));
         }
-        std::mem::replace(&mut state.source, Source::Unset)
+        state.source.clone()
     };
     let bytes = match source {
         Source::Bytes(bytes) => bytes,
@@ -638,8 +657,8 @@ fn open_document(page: &Rc<Page>, bytes: js_sys::Uint8Array, password: Option<St
     let length = bytes.length();
     let prefix = match proto::view_open_request_prefix(password.as_deref(), length as usize) {
         Ok(prefix) => prefix,
-        Err(proto::ProtoError::TooLarge { .. }) => return show_error(page, "document-failed", TOO_LARGE),
-        Err(_) => return show_error(page, "document-failed", "The document is empty."),
+        Err(proto::ProtoError::TooLarge { .. }) => return refused(page, TOO_LARGE),
+        Err(_) => return refused(page, "The document is empty."),
     };
     let Ok(prefix_len) = u32::try_from(prefix.len()) else { return };
     let Some(total) = prefix_len.checked_add(length) else { return };
@@ -666,7 +685,7 @@ fn open_document(page: &Rc<Page>, bytes: js_sys::Uint8Array, password: Option<St
         .as_ref()
         .map(|w| w.request(proto::Kind::ViewOpen, frame, Box::new(move |env, payload| on_opened(&sink_page, generation, env, payload))));
     if !matches!(sent, Some(Ok(_))) {
-        show_error(page, "viewer-failed", "The document viewer could not start in this browser.");
+        document_failed(page, "viewer-failed", "The document viewer could not start in this browser.");
     }
 }
 
@@ -690,15 +709,15 @@ fn on_opened(page: &Rc<Page>, generation: u32, env: &proto::Envelope, payload: &
     if env.kind == proto::Kind::ViewOpened {
         return match worker::small_payload(payload).and_then(|b| proto::decode_payload::<proto::ViewOpenedReply>(&b).ok()) {
             Some(opened) if proto::view_opened_reply_error(&opened).is_none() => apply_opened(page, opened),
-            _ => show_error(page, "viewer-failed", "The document viewer answered with something unreadable."),
+            _ => document_failed(page, "viewer-failed", "The document viewer answered with something unreadable."),
         };
     }
     let reply = worker::error_reply(payload);
     match reply.code {
         proto::ErrorCode::PasswordRequired => ask_password(page, "password-required", "This document is protected with a password."),
         proto::ErrorCode::WrongPassword => ask_password(page, "wrong-password", "That password does not open this document."),
-        proto::ErrorCode::TooLarge => show_error(page, "document-failed", TOO_LARGE),
-        _ => show_error(page, "document-failed", "This file is not a Word document this viewer can read."),
+        proto::ErrorCode::TooLarge => document_failed(page, "document-failed", TOO_LARGE),
+        _ => document_failed(page, "document-failed", "This file is not a Word document this viewer can read."),
     }
 }
 

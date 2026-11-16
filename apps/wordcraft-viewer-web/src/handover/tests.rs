@@ -154,6 +154,7 @@ fn every_event_in_every_phase_leaves_a_valid_machine() {
         Event::DocumentOpened,
         Event::PasswordAsked,
         Event::DocumentOpening,
+        Event::DocumentFailed,
     ];
     const STEPS: u32 = 5;
     for mode in [Mode::ViewOnly, Mode::ViewerFirst, Mode::EditorFirst] {
@@ -161,26 +162,36 @@ fn every_event_in_every_phase_leaves_a_valid_machine() {
             // Every sequence of five events.
             for code in 0..events.len().pow(STEPS) {
                 let (mut h, first) = started(mode, can_edit);
-                // Whether the viewer, once started, has a document open: the editor is handed
-                // the viewer's document only then.
+                // The viewer's document, modelled here: the editor is handed it once open, or
+                // fetches it itself once the viewer failed for good; never while it is opening or
+                // its password is asked for.
                 let mut viewer = first.contains(&Action::StartViewer);
-                let mut open = false;
+                let mut doc = "opening";
                 let mut actions = first;
                 let mut n = code;
                 for _ in 0..STEPS {
                     let event = events[n % events.len()];
                     n /= events.len();
-                    match event {
-                        Event::DocumentOpened => open = true,
-                        Event::PasswordAsked | Event::DocumentOpening => open = false,
-                        _ => {}
-                    }
+                    doc = match event {
+                        Event::DocumentOpened => "open",
+                        Event::DocumentOpening => "opening",
+                        Event::PasswordAsked => "password",
+                        Event::DocumentFailed if doc != "password" => "failed",
+                        _ => doc,
+                    };
                     let step = h.on(event);
                     if step.contains(&Action::StartViewer) {
-                        (viewer, open) = (true, false);
+                        (viewer, doc) = (true, "opening");
                     }
+                    let getting = viewer && matches!(doc, "opening" | "password");
                     if step.contains(&Action::HandOver) {
-                        assert!(!viewer || open, "{mode:?} can_edit={can_edit} {code}: handed over while the viewer had no open document");
+                        assert!(!getting, "{mode:?} can_edit={can_edit} {code}: handed over while the viewer's document was {doc}");
+                    }
+                    if getting {
+                        assert!(!h.edit_offered(), "{mode:?} {code}: Edit offered while the document is {doc}");
+                    }
+                    if viewer && doc == "failed" && mode != Mode::ViewOnly && h.phase() == Phase::Viewing {
+                        assert!(h.edit_offered(), "{mode:?} {code}: Edit withheld after the viewer failed for good");
                     }
                     actions.extend(step);
                 }
@@ -445,4 +456,35 @@ fn a_document_is_open_from_its_opening_until_another_starts() {
     assert!(!h.document_open(), "refused for want of a password: the worker still holds the previous one");
     h.on(Event::DocumentOpened);
     assert!(h.document_open());
+}
+
+#[test]
+fn a_document_the_viewer_cannot_open_still_offers_the_editor() {
+    // The viewer worker did not start, the download failed, or the file is not one the viewer
+    // reads: the editor is offered and fetches the document itself.
+    let (mut h, _) = started(Mode::ViewerFirst, true);
+    assert_eq!(h.on(Event::DocumentFailed), Vec::new());
+    assert!(h.edit_offered());
+    assert!(!h.document_open(), "no layout of it is shown");
+    assert_eq!(h.on(Event::EditRequested), vec![Action::ShowLoading, Action::LoadEditor]);
+    assert_eq!(h.on(Event::EditorReady), vec![Action::HandOver]);
+    // The same after another document failed to open.
+    let (mut h, _) = opened(Mode::ViewerFirst, true);
+    h.on(Event::DocumentOpening);
+    h.on(Event::DocumentFailed);
+    assert!(h.edit_offered());
+}
+
+#[test]
+fn a_refused_or_cancelled_password_is_not_a_failure() {
+    // The editor is never handed a protected document without its password.
+    let (mut h, _) = started(Mode::ViewerFirst, true);
+    h.on(Event::PasswordAsked);
+    assert_eq!(h.on(Event::DocumentFailed), Vec::new());
+    assert!(!h.edit_offered());
+    assert_eq!(h.on(Event::EditRequested), Vec::new());
+    // A password typed in and then a failure: the editor gets it with that password.
+    h.on(Event::DocumentOpening);
+    h.on(Event::DocumentFailed);
+    assert!(h.edit_offered());
 }
