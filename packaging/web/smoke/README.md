@@ -85,6 +85,32 @@ flows wait for the download (or the `Couldn't export …` line), never for the c
 proofing command); `edit` types before waiting for them, as `drive.mjs`'s fixture page does.
 Limits of the worker jobs are listed in `packaging/web/README.md` ("Worker jobs").
 
+## Viewer-first page (`viewer.mjs`, plan 10.3)
+
+A second, separate driver for the demo page itself (no npm package, no bundler): it serves a
+Trunk release build (`dist/web`) with the deployed Content-Security-Policy and drives headless
+Chrome through the viewer-first flow.
+
+```sh
+cd apps/wordcraft-web && trunk build --release          # dist/web
+node packaging/web/smoke/viewer.mjs --dist dist/web --core <dir> --out <results.json>
+```
+
+`--core` is the view-only core built for Node (`cargo build -p wordcraft-viewer --bin
+wordcraft-viewer --target wasm32-unknown-unknown --profile wasm-release`, then
+`wasm-bindgen --target nodejs` and `wasm-opt` with the flags `index.html` gives the workers);
+without it the byte-for-byte page comparison is skipped and says so.
+
+| Check | What it proves |
+|---|---|
+| AC1 first visit | the network log has the page module and the view-only worker, and no `wordcraft-web*` editor file, no proofing, codecs or PDF worker |
+| AC2 first page | page 0's canvas is not blank and holds exactly the RGBA the core returns for that page at the canvas's scale |
+| AC3 edit action | the Edit control fetches the editor, which shows the same document, takes typing, and the viewer is gone |
+| AC4 sizes | raw / gzip -9 / Brotli q11 of every file in the first load and in the edit step |
+| AC5 no editor | without WebGL, or with the editor's glue or wasm answered 404, the viewer stays with a notice and nothing is thrown uncaught |
+| AC6 CSP | no `securitypolicyviolation` on the page under `_headers`' policy |
+| modes | `?mode=view` never offers or loads the editor; `?mode=edit` loads it at once; `?mode=edit` without WebGL falls back to the viewer |
+
 ## JavaScript exception
 
 The repository's "Rust only" rule covers shipped product code (the sole npm
