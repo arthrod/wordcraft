@@ -597,9 +597,11 @@ fn start_viewer(page: &Rc<Page>) {
             return;
         }
     }
+    // Read now, not at the first poll: a host's `open()` in this same task comes first.
+    let opens = page.state.borrow().opens;
     let page = page.clone();
     wasm_bindgen_futures::spawn_local(async move {
-        match document_bytes(&page, true).await {
+        match document_bytes(&page, true, opens).await {
             Ok(Some(bytes)) => {
                 let password = page.state.borrow().password.clone();
                 open_document(&page, bytes, password);
@@ -612,14 +614,18 @@ fn start_viewer(page: &Rc<Page>) {
 
 /// The document's bytes: the ones already held, else fetched from where the host said. With
 /// nothing said, the viewer gets the built-in sample and the editor gets nothing. `None` too when
-/// a host's `open()` came while they were fetched: that document is the one shown.
-async fn document_bytes(page: &Rc<Page>, for_viewer: bool) -> Result<Option<js_sys::Uint8Array>, String> {
-    let (source, opens) = {
+/// a host's `open()` came after the caller read `opens` (before or during a fetch): that document
+/// is the one shown, and it is already open or opening.
+async fn document_bytes(page: &Rc<Page>, for_viewer: bool, opens: u32) -> Result<Option<js_sys::Uint8Array>, String> {
+    let source = {
         let state = page.state.borrow();
+        if state.opens != opens {
+            return Ok(None);
+        }
         if let Some(docx) = &state.docx {
             return Ok(Some(docx.clone()));
         }
-        (state.source.clone(), state.opens)
+        state.source.clone()
     };
     let bytes = match source {
         Source::Bytes(bytes) => Ok(bytes),
@@ -1183,10 +1189,11 @@ async fn call_editor(api: &JsValue, name: &str, args: &js_sys::Array) -> Result<
 /// File › Home (`execute("ui.backstage", {value: false})`), which a command run through the
 /// API does not do by itself.
 fn hand_over(page: &Rc<Page>) {
+    let opens = page.state.borrow().opens;
     let page = page.clone();
     wasm_bindgen_futures::spawn_local(async move {
         let outcome = async {
-            let Some(bytes) = document_bytes(&page, false).await? else { return Ok(()) };
+            let Some(bytes) = document_bytes(&page, false, opens).await? else { return Ok(()) };
             let (api, _) = editor_load_fn(&page).ok_or("the editor's page API is gone")?;
             let password = page.state.borrow().password.clone().map_or(JsValue::UNDEFINED, |p| JsValue::from_str(&p));
             let args = js_sys::Array::of2(&bytes, &password);

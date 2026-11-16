@@ -61,8 +61,9 @@ function check(name, ok, detail = "") {
 // `noWebGl` makes every canvas refuse a WebGL context; `rootAttrs` are set on
 // #wordcraft_viewer as the parser inserts it, before the page module starts. `hooks` lets a case
 // hold the workers' replies (`window.__hold`, delivered in order by `window.__release()`) and make
-// `postMessage` throw (`window.__failPost`); `holdFromStart` holds from the first one, `ready`.
-async function open(browser, base, path, { blocked = null, stalled = null, noWebGl = false, rootAttrs = null, hooks = false, holdFromStart = false, width = 1280, height = 800 } = {}) {
+// `postMessage` throw (`window.__failPost`), and record each request's header (`window.__posted`);
+// `holdFromStart` holds from the first reply, `ready`. `init` is `[fn, ...args]` run before the page.
+async function open(browser, base, path, { blocked = null, stalled = null, noWebGl = false, rootAttrs = null, hooks = false, holdFromStart = false, init = null, width = 1280, height = 800 } = {}) {
   const page = await browser.newPage();
   await page.setViewport({ width, height, deviceScaleFactor: 1 });
   const log = { requests: [], consoleErrors: [], uncaught: [] };
@@ -103,6 +104,7 @@ async function open(browser, base, path, { blocked = null, stalled = null, noWeb
       window.__hold = hold;
       window.__held = [];
       window.__failPost = false;
+      window.__posted = [];
       window.__release = () => {
         window.__hold = false;
         for (const deliver of window.__held.splice(0)) deliver();
@@ -121,10 +123,12 @@ async function open(browser, base, path, { blocked = null, stalled = null, noWeb
       const post = Worker.prototype.postMessage;
       Worker.prototype.postMessage = function (...a) {
         if (window.__failPost) throw new DOMException("refused by the test", "DataCloneError");
+        window.__posted.push(String(a[0]?.[0] ?? ""));
         return post.apply(this, a);
       };
     }, holdFromStart);
   }
+  if (init) await page.evaluateOnNewDocument(...init);
   if (noWebGl) {
     await page.evaluateOnNewDocument(() => {
       const real = HTMLCanvasElement.prototype.getContext;
@@ -685,6 +689,29 @@ try {
     check("a queued request that cannot be posted ends in an error, with Edit offered", told.error === "viewer-failed" && told.edit, JSON.stringify(told));
     check("a queued request that cannot be posted: no uncaught errors", refused.log.uncaught.length === 0, refused.log.uncaught.join(" | "));
     await refused.page.close();
+
+    // start() and open() in the same task: the startup opens nothing of its own, so the host's
+    // document is sent to the worker once.
+    const sameTask = await open(browser, base, "/", {
+      hooks: true,
+      init: [
+        (doc) =>
+          addEventListener("TrunkApplicationStarted", () => {
+            window.wasmBindings.start({ installGlobal: true });
+            window.__hostOpen = window.wordcraftViewer.open(new Uint8Array(doc)).then((a) => a.pageCount, (e) => `rejected: ${e.message}`);
+          }),
+        six,
+      ],
+    });
+    await sameTask.page.waitForFunction(() => window.__hostOpen, { timeout: 30000 });
+    const once = await sameTask.page.evaluate(async () => {
+      const opened = await window.__hostOpen;
+      await new Promise((r) => setTimeout(r, 1500));
+      return { opened, count: window.wordcraftViewer.pageCount(), viewOpens: window.__posted.filter((h) => h.includes('"viewOpen"')).length };
+    });
+    check("start() then open() in one task: the host's document is opened once", once.opened === 6 && once.count === 6 && once.viewOpens === 1, JSON.stringify(once));
+    check("start() then open() in one task: no uncaught errors", sameTask.log.uncaught.length === 0, sameTask.log.uncaught.join(" | "));
+    await sameTask.page.close();
   }
 
   // ---- the modes a host can choose ----
