@@ -23,6 +23,8 @@ mod handover;
 mod mode;
 #[cfg(any(target_arch = "wasm32", test))]
 mod pages;
+#[cfg(any(target_arch = "wasm32", test))]
+mod settle;
 
 #[cfg(target_arch = "wasm32")]
 mod page;

@@ -54,10 +54,11 @@ const VIEWER_GLOBAL: &str = "wordcraftViewer";
 const TOO_LARGE: &str = "The document is too large for this viewer.";
 /// What the reader is told about a password longer than the viewer takes.
 const PASSWORD_TOO_LONG: &str = "That password is too long.";
+const EMPTY: &str = "The document is empty.";
 /// Pixels kept in painted pages outside the window, in bytes of RGBA.
 const CACHE_BUDGET_BYTES: u64 = 192 << 20;
-/// Where the document comes from. Kept after the viewer reads it: if the viewer fails, the
-/// editor fetches it again.
+/// Where the document comes from. Kept until a document is held (`State::hold`): if the viewer
+/// fails before, the editor fetches it again.
 #[derive(Clone)]
 enum Source {
     /// Nothing was given: the viewer shows the built-in sample, the editor what it shows by
@@ -99,6 +100,22 @@ struct State {
     editor_seen: bool,
     /// `resolve`/`reject` of `open()` calls waiting for the worker's answer.
     open_waiters: Vec<(js_sys::Function, js_sys::Function)>,
+    /// The bytes and password of the document the worker last opened. The worker keeps it when
+    /// it refuses the next one, so the page shows it again and the editor is handed it.
+    shown: Option<(js_sys::Uint8Array, Option<String>)>,
+    /// `opens` when the password form was shown: the form sends a password only for the
+    /// document it asked about, never for one that replaced it or was put back.
+    password_for: Option<u32>,
+}
+
+impl State {
+    /// `bytes` are the document in play now: kept for the hand-over, and what was given at the
+    /// start is let go (it is read only while no document is held, so it would otherwise stay,
+    /// a second long-lived copy, for the life of the page).
+    fn hold(&mut self, bytes: js_sys::Uint8Array) {
+        self.docx = Some(bytes);
+        self.source = Source::Unset;
+    }
 }
 
 struct Page {
@@ -186,15 +203,29 @@ fn str_prop(obj: &JsValue, key: &str) -> Result<Option<String>, JsValue> {
     }
 }
 
-/// The bytes a host passed: a `Uint8Array` as it is, an `ArrayBuffer` viewed.
+/// The bytes a host passed: a `Uint8Array` as it is, an `ArrayBuffer` viewed. A detached buffer
+/// is no bytes (viewing or copying one throws).
 fn bytes_of(val: &JsValue) -> Option<js_sys::Uint8Array> {
     if val.is_instance_of::<js_sys::Uint8Array>() {
-        val.clone().dyn_into().ok()
-    } else if val.is_instance_of::<js_sys::ArrayBuffer>() {
-        Some(js_sys::Uint8Array::new(val))
-    } else {
-        None
+        return val.clone().dyn_into().ok();
     }
+    val.dyn_ref::<js_sys::ArrayBuffer>()
+        .map(|buffer| if buffer.byte_length() == 0 { js_sys::Uint8Array::new_with_length(0) } else { js_sys::Uint8Array::new(buffer) })
+}
+
+/// A copy of a document a host passed ([`bytes_of`]). The page keeps it for the hand-over, so it
+/// must be the page's own: a host that changes, transfers or detaches its buffer after `open()`
+/// would otherwise hand the editor other bytes than the ones the reader sees. The one long-lived
+/// copy on the page (the frame sent to the worker is transferred away).
+/// Past [`proto::MAX_VIEW_DOC_BYTES`] the host's bytes are not copied: the viewer refuses them,
+/// and that limit is there to bound what the page allocates. (A startup document that large is
+/// still kept for the editor, which opens it itself: as the host's own buffer, not a copy.)
+fn document_of(val: &JsValue) -> Option<js_sys::Uint8Array> {
+    bytes_of(val).map(|bytes| match bytes.length() {
+        0 => js_sys::Uint8Array::new_with_length(0),
+        n if n as usize > proto::MAX_VIEW_DOC_BYTES => bytes,
+        n => bytes.slice(0, n),
+    })
 }
 
 fn normalize_asset_base(base: &str) -> String {
@@ -248,7 +279,7 @@ fn launch(options: &JsValue, auto: bool) -> Result<JsValue, JsValue> {
     let asset_base = str_prop(options, "assetBase")?.map(|b| normalize_asset_base(&b)).unwrap_or_else(|| default_asset_base(&document));
     let given = prop(options, "document");
     let source = if !(given.is_undefined() || given.is_null()) {
-        Source::Bytes(bytes_of(&given).ok_or_else(|| js_error("start(options): `document` must be a Uint8Array or an ArrayBuffer"))?)
+        Source::Bytes(document_of(&given).ok_or_else(|| js_error("start(options): `document` must be a Uint8Array or an ArrayBuffer"))?)
     } else if let Some(url) = str_prop(options, "url")?.or_else(|| query_get("doc")) {
         Source::Url(url)
     } else {
@@ -303,6 +334,8 @@ fn launch(options: &JsValue, auto: bool) -> Result<JsValue, JsValue> {
             removed: false,
             editor_seen: false,
             open_waiters: Vec::new(),
+            shown: None,
+            password_for: None,
         }),
     });
     let api = build_api(&page);
@@ -553,11 +586,16 @@ fn show_error(page: &Page, code: &str, text: &str) {
     notify(page, text);
 }
 
+/// Say `text` in the notice line.
+fn say(page: &Page, text: &str) {
+    page.notice.set_inner_text(text);
+    page.notice.set_hidden(false);
+}
+
 /// Say `text` in the notice line and reject the waiting `open()` calls with it. Alone, for a
 /// request refused beside an open document, which stays as it is (no error flag, its status).
 fn notify(page: &Page, text: &str) {
-    page.notice.set_inner_text(text);
-    page.notice.set_hidden(false);
+    say(page, text);
     let waiters = std::mem::take(&mut page.state.borrow_mut().open_waiters);
     for (_, reject) in waiters {
         let _ = reject.call1(&JsValue::NULL, &js_error(text));
@@ -579,6 +617,39 @@ fn refused(page: &Rc<Page>, text: &str) {
         notify(page, text);
     } else {
         document_failed(page, "document-failed", text);
+    }
+}
+
+/// The worker refused a replacement and still holds the document shown before it: show that
+/// one again, as it was (its bytes for the editor, its pages, no error flag), and say why.
+/// `false` when there was none.
+fn restore_shown(page: &Rc<Page>, text: &str) -> bool {
+    let Some((bytes, password)) = page.state.borrow().shown.clone() else { return false };
+    {
+        let mut state = page.state.borrow_mut();
+        state.hold(bytes);
+        state.password = password;
+    }
+    if let Some(html) = html(page) {
+        let _ = html.remove_attribute("data-wordcraft-error");
+    }
+    dismiss_password(page);
+    show_page_count(page);
+    notify(page, text);
+    dispatch(page, Event::DocumentOpened);
+    relayout(page);
+    true
+}
+
+/// Why `length` bytes with `password` would never be sent to the worker, if they would not.
+fn refusal(length: u32, password: Option<&str>) -> Option<&'static str> {
+    if password.is_some_and(|p| p.len() > proto::MAX_PASSWORD_BYTES) {
+        return Some(PASSWORD_TOO_LONG);
+    }
+    match proto::view_open_request_prefix(password, length as usize) {
+        Ok(_) => None,
+        Err(proto::ProtoError::TooLarge { .. }) => Some(TOO_LARGE),
+        Err(_) => Some(EMPTY),
     }
 }
 
@@ -645,12 +716,14 @@ async fn document_bytes(page: &Rc<Page>, for_viewer: bool, opens: u32) -> Result
         return Ok(None);
     }
     let bytes = bytes?;
-    state.docx = Some(bytes.clone());
+    state.hold(bytes.clone());
     Ok(Some(bytes))
 }
 
 /// Fetch `url` (relative to the page) as bytes. Only this origin: a document address comes
-/// from the page's URL, which anyone can write.
+/// from the page's URL, which anyone can write. The address is checked first, and the request
+/// is made in `same-origin` mode, so a redirect to another site ends the fetch with a network
+/// error (Fetch, "main fetch") instead of being followed.
 async fn fetch_same_origin(page: &Rc<Page>, url: &str) -> Result<js_sys::Uint8Array, String> {
     let base = page.document.base_uri().ok().flatten().unwrap_or_default();
     let resolved = web_sys::Url::new_with_base(url, &base).map_err(|_| "The document's address is not valid.".to_string())?;
@@ -658,18 +731,49 @@ async fn fetch_same_origin(page: &Rc<Page>, url: &str) -> Result<js_sys::Uint8Ar
         return Err("The document is on another site, which this viewer does not open.".to_string());
     }
     let failed = || "The document could not be downloaded.".to_string();
-    let response = wasm_bindgen_futures::JsFuture::from(page.window.fetch_with_str(&resolved.href())).await.map_err(|_| failed())?;
+    let init = web_sys::RequestInit::new();
+    init.set_mode(web_sys::RequestMode::SameOrigin);
+    let response = wasm_bindgen_futures::JsFuture::from(page.window.fetch_with_str_and_init(&resolved.href(), &init)).await.map_err(|_| failed())?;
     let response: web_sys::Response = response.dyn_into().map_err(|_| failed())?;
     if !response.ok() {
         return Err(failed());
     }
-    // Refused before the body is read when its declared length is past the limit; without a
-    // `Content-Length` the body is read and `open_document` judges its size.
+    // Refused before the body is read when its declared length is past the limit. A body
+    // without a `Content-Length`, or longer than it said, is read a chunk at a time and the
+    // read stops (the download is cancelled) as soon as it passes the limit: never more than
+    // [`proto::MAX_VIEW_DOC_BYTES`] and one chunk is held.
     if download::declared_too_large(response.headers().get("content-length").ok().flatten().as_deref()) {
         return Err(TOO_LARGE.to_string());
     }
-    let buffer = wasm_bindgen_futures::JsFuture::from(response.array_buffer().map_err(|_| failed())?).await.map_err(|_| failed())?;
-    Ok(js_sys::Uint8Array::new(&buffer))
+    let Some(body) = response.body() else { return Ok(js_sys::Uint8Array::new_with_length(0)) };
+    let reader = web_sys::ReadableStreamDefaultReader::new(&body).map_err(|_| failed())?;
+    let mut chunks = Vec::new();
+    let mut total = 0usize;
+    loop {
+        let read = wasm_bindgen_futures::JsFuture::from(reader.read()).await.map_err(|_| failed())?;
+        if js_sys::Reflect::get(&read, &JsValue::from_str("done")).ok().and_then(|d| d.as_bool()).unwrap_or(true) {
+            break;
+        }
+        let Ok(chunk) = js_sys::Reflect::get(&read, &JsValue::from_str("value")).and_then(|v| v.dyn_into::<js_sys::Uint8Array>()) else {
+            let _ = wasm_bindgen_futures::JsFuture::from(reader.cancel()).await;
+            return Err(failed());
+        };
+        total = total.saturating_add(chunk.length() as usize);
+        if total > proto::MAX_VIEW_DOC_BYTES {
+            let _ = wasm_bindgen_futures::JsFuture::from(reader.cancel()).await;
+            return Err(TOO_LARGE.to_string());
+        }
+        chunks.push(chunk);
+    }
+    // At most the limit, so it fits a `u32`.
+    let Ok(length) = u32::try_from(total) else { return Err(TOO_LARGE.to_string()) };
+    let bytes = js_sys::Uint8Array::new_with_length(length);
+    let mut at = 0u32;
+    for chunk in chunks {
+        bytes.set(&chunk, at);
+        at = at.saturating_add(chunk.length());
+    }
+    Ok(bytes)
 }
 
 /// Send `bytes` to the worker as the document to show. The bytes stay in JavaScript's memory:
@@ -685,7 +789,7 @@ fn open_document(page: &Rc<Page>, bytes: js_sys::Uint8Array, password: Option<St
         let stale = forget_pages(page);
         {
             let mut state = page.state.borrow_mut();
-            state.docx = Some(bytes);
+            state.hold(bytes);
             state.opens = state.opens.wrapping_add(1);
         }
         drop(stale);
@@ -695,7 +799,7 @@ fn open_document(page: &Rc<Page>, bytes: js_sys::Uint8Array, password: Option<St
     let prefix = match proto::view_open_request_prefix(password.as_deref(), length as usize) {
         Ok(prefix) => prefix,
         Err(proto::ProtoError::TooLarge { .. }) => return refused(page, TOO_LARGE),
-        Err(_) => return refused(page, "The document is empty."),
+        Err(_) => return refused(page, EMPTY),
     };
     let Ok(prefix_len) = u32::try_from(prefix.len()) else { return };
     let Some(total) = prefix_len.checked_add(length) else { return };
@@ -706,12 +810,14 @@ fn open_document(page: &Rc<Page>, bytes: js_sys::Uint8Array, password: Option<St
     let stale = forget_pages(page);
     let generation = {
         let mut state = page.state.borrow_mut();
-        state.docx = Some(bytes);
+        state.hold(bytes);
         state.password = password;
         state.opens = state.opens.wrapping_add(1);
         state.generation
     };
     drop(stale);
+    // A password asked for an earlier document is no longer asked.
+    dismiss_password(page);
     // Until it opens, no edit action: the editor would be handed bytes the viewer has not read.
     dispatch(page, Event::DocumentOpening);
     let sink_page = page.clone();
@@ -740,12 +846,18 @@ fn forget_pages(page: &Page) -> Vec<PageCanvas> {
 }
 
 fn on_opened(page: &Rc<Page>, generation: u32, env: &proto::Envelope, payload: &js_sys::Uint8Array) {
-    if page.state.borrow().generation != generation {
+    // A request answered as the viewer goes (`remove_viewer`) is no concern of the editor's page.
+    if page.state.borrow().removed || page.state.borrow().generation != generation {
         return;
     }
     if env.kind == proto::Kind::ViewOpened {
         return match worker::small_payload(payload).and_then(|b| proto::decode_payload::<proto::ViewOpenedReply>(&b).ok()) {
-            Some(opened) if proto::view_opened_reply_error(&opened).is_none() => apply_opened(page, opened),
+            Some(opened) if proto::view_opened_reply_error(&opened).is_none() => {
+                let mut state = page.state.borrow_mut();
+                state.shown = state.docx.clone().map(|bytes| (bytes, state.password.clone()));
+                drop(state);
+                apply_opened(page, opened)
+            }
             _ => document_failed(page, "viewer-failed", "The document viewer answered with something unreadable."),
         };
     }
@@ -753,10 +865,15 @@ fn on_opened(page: &Rc<Page>, generation: u32, env: &proto::Envelope, payload: &
     match reply.code {
         proto::ErrorCode::PasswordRequired => ask_password(page, "password-required", "This document is protected with a password."),
         proto::ErrorCode::WrongPassword => ask_password(page, "wrong-password", "That password does not open this document."),
-        proto::ErrorCode::TooLarge => document_failed(page, "document-failed", TOO_LARGE),
         // The worker's own failure (or a request it was never sent), not the file's.
         proto::ErrorCode::Internal => document_failed(page, "viewer-failed", "The document viewer could not start in this browser."),
-        _ => document_failed(page, "document-failed", "This file is not a Word document this viewer can read."),
+        // The file's: the worker still holds the document before it, which comes back.
+        code => {
+            let text = if code == proto::ErrorCode::TooLarge { TOO_LARGE } else { "This file is not a Word document this viewer can read." };
+            if !restore_shown(page, text) {
+                document_failed(page, "document-failed", text);
+            }
+        }
     }
 }
 
@@ -771,7 +888,20 @@ fn ask_password(page: &Rc<Page>, code: &str, text: &str) {
     page.password.message.set_inner_text("Password:");
     page.password.input.set_value("");
     page.password.form.set_hidden(false);
+    let mut state = page.state.borrow_mut();
+    state.password_for = Some(state.opens);
+    drop(state);
     let _ = page.password.input.focus();
+}
+
+/// The password form goes, with the notice that asked for it, and sends nothing more.
+fn dismiss_password(page: &Page) {
+    page.state.borrow_mut().password_for = None;
+    if !page.password.form.hidden() {
+        page.password.form.set_hidden(true);
+        page.password.input.set_value("");
+        page.notice.set_hidden(true);
+    }
 }
 
 /// Not now: the form goes, the notice says the document is protected, and editing stays
@@ -785,7 +915,16 @@ fn cancel_password(page: &Page) {
 
 fn submit_password(page: &Rc<Page>) {
     let given = page.password.input.value();
-    let bytes = page.state.borrow().docx.clone();
+    let bytes = {
+        let state = page.state.borrow();
+        (state.password_for == Some(state.opens)).then(|| state.docx.clone())
+    };
+    // Shown for another document than the one in `docx` now: it sends nothing.
+    let Some(bytes) = bytes else {
+        page.password.form.set_hidden(true);
+        page.password.input.set_value("");
+        return;
+    };
     let Some(bytes) = bytes.filter(|_| !given.is_empty()) else { return };
     page.password.form.set_hidden(true);
     page.notice.set_hidden(true);
@@ -807,11 +946,7 @@ fn apply_opened(page: &Rc<Page>, opened: proto::ViewOpenedReply) {
     if let Some(html) = html(page) {
         let _ = html.remove_attribute("data-wordcraft-error");
     }
-    if !page.password.form.hidden() {
-        page.password.form.set_hidden(true);
-        page.password.input.set_value("");
-        page.notice.set_hidden(true);
-    }
+    dismiss_password(page);
     if !matches!(page.state.borrow().handover.phase(), Phase::LoadingEditor | Phase::HandingOver) {
         show_page_count(page);
     }
@@ -913,7 +1048,9 @@ fn page_indices(wanted: &pages::Wanted) -> Vec<u32> {
 fn refresh(page: &Rc<Page>) {
     let mut guard = page.state.borrow_mut();
     let state = &mut *guard;
-    if state.removed || state.worker.is_none() || state.sheet.pages.is_empty() {
+    // Only the open document's pages: while a replacement opens or waits for its password,
+    // the sheet is still the old one's, and painting it would show it under the new one's name.
+    if state.removed || state.worker.is_none() || state.sheet.pages.is_empty() || !state.handover.document_open() {
         return;
     }
     let ratio = page.window.device_pixel_ratio();
@@ -1006,6 +1143,11 @@ fn on_page(page: &Rc<Page>, generation: u32, key: PageKey, env: &proto::Envelope
                             }
                         }
                         let painted = state.canvases.get_mut(&key.page).is_some_and(|canvas| paint(canvas, payload, pixels, &header));
+                        // Not painted after all: the book must not count it (a blank canvas kept
+                        // as if painted), nor ask for it again at once (a loop); another scale is.
+                        if !painted {
+                            state.cache.failed(key);
+                        }
                         if let Some(canvas) = state.canvases.get(&key.page) {
                             place(canvas, state.sheet.pages.get(key.page as usize), state.sheet.zoom);
                         }
@@ -1035,15 +1177,23 @@ fn view_page_header(payload: &js_sys::Uint8Array) -> Option<proto::ViewPageHeade
 /// Put the page's pixels on its canvas: an `ImageData` over the transferred buffer, no copy
 /// through this module, then one `putImageData`. The canvas's bitmap is the page's raster,
 /// pixel for pixel.
+///
+/// `false` when the pixels do not make an image of the size the trailer says, the canvas gives
+/// no 2D context, or the browser refuses the bitmap: the canvas then shows what it showed
+/// before, or nothing (never a bitmap it does not hold), and the caller stops counting the page
+/// as painted.
 fn paint(canvas: &mut PageCanvas, payload: &js_sys::Uint8Array, pixels: u32, header: &proto::ViewPageHeader) -> bool {
     let rgba = js_sys::Uint8ClampedArray::new_with_byte_offset_and_length(&payload.buffer(), payload.byte_offset(), pixels);
     let Ok(image) = web_sys::ImageData::new_with_js_u8_clamped_array_and_sh(&rgba, header.width, header.height) else { return false };
-    canvas.el.set_width(header.width);
-    canvas.el.set_height(header.height);
     let Some(context) = canvas.el.get_context("2d").ok().flatten().and_then(|c| c.dyn_into::<web_sys::CanvasRenderingContext2d>().ok()) else {
         return false;
     };
+    // Resizing clears the bitmap: from here a failure leaves the canvas blank.
+    canvas.el.set_width(header.width);
+    canvas.el.set_height(header.height);
     if context.put_image_data(&image, 0.0, 0.0).is_err() {
+        canvas.bitmap = None;
+        let _ = canvas.el.remove_attribute("data-scale");
         return false;
     }
     canvas.bitmap = Some((header.width, header.height, header.scale));
@@ -1248,14 +1398,19 @@ fn await_paint(page: &Rc<Page>) {
 /// The editor has painted: stop the worker, take the viewer's elements away, and give the
 /// editor's canvas the focus.
 fn remove_viewer(page: &Rc<Page>) {
-    let (worker, canvases) = {
+    let (worker, canvases, waiters) = {
         let mut state = page.state.borrow_mut();
         state.removed = true;
         state.cache.clear();
-        (state.worker.take(), state.canvases.drain().collect::<Vec<_>>())
+        (state.worker.take(), state.canvases.drain().collect::<Vec<_>>(), std::mem::take(&mut state.open_waiters))
     };
+    // Outside the borrow: stopping the worker answers its waiting requests (an `installFont`
+    // promise among them), whose sinks come back to the page.
     drop(worker);
     drop(canvases);
+    for (_, reject) in waiters {
+        let _ = reject.call1(&JsValue::NULL, &js_error("the editor took over the page"));
+    }
     page.root.remove();
     remove_skeleton(page);
     if let Some(canvas) = page.document.get_element_by_id(EDITOR_CANVAS_ID).and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok()) {
@@ -1299,7 +1454,7 @@ fn build_api(page: &Rc<Page>) -> js_sys::Object {
 
     let p = page.clone();
     let open = Closure::<dyn Fn(JsValue, JsValue) -> js_sys::Promise>::new(move |bytes: JsValue, password: JsValue| {
-        let Some(bytes) = bytes_of(&bytes) else {
+        let Some(bytes) = document_of(&bytes) else {
             return js_sys::Promise::reject(&js_error("open(bytes): expected a Uint8Array or an ArrayBuffer"));
         };
         if p.state.borrow().worker.is_none() {
@@ -1309,6 +1464,20 @@ fn build_api(page: &Rc<Page>) -> js_sys::Object {
         if !p.state.borrow().handover.opens_allowed() {
             return js_sys::Promise::reject(&js_error("the editor is taking over the page"));
         }
+        // Refused before the worker beside a document in play (open, opening, or waiting for
+        // its password): only this call fails. That document, its waiting `open()` and the
+        // lock on editing stay as they are, and so does what the page says about it: the
+        // reason goes in the notice only when the notice is not stating that document's error
+        // (its password asked for), and the rejection says it in any case.
+        let password = password.as_string();
+        if let Some(why) = refusal(bytes.length(), password.as_deref())
+            && p.state.borrow().handover.holds_document()
+        {
+            if !html(&p).is_some_and(|h| h.has_attribute("data-wordcraft-error")) {
+                say(&p, why);
+            }
+            return js_sys::Promise::reject(&js_error(why));
+        }
         let page = p.clone();
         js_sys::Promise::new(&mut |resolve, reject| {
             // An earlier open() still waiting is superseded: its document is never shown, so its
@@ -1317,7 +1486,7 @@ fn build_api(page: &Rc<Page>) -> js_sys::Object {
             for (_, reject) in superseded {
                 let _ = reject.call1(&JsValue::NULL, &js_error("open(): a later open() replaced this document"));
             }
-            open_document(&page, bytes.clone(), password.as_string());
+            open_document(&page, bytes.clone(), password.clone());
         })
     });
     set_fn(&api, "open", open.as_ref());

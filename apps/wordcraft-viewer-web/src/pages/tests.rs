@@ -136,6 +136,27 @@ fn the_render_scale_stays_inside_the_protocol_and_the_pixel_budget() {
 }
 
 #[test]
+fn a_long_narrow_page_is_painted_no_taller_than_the_core_draws() {
+    use wordcraft_worker_proto::MAX_VIEW_SIDE;
+    // 100 by 10,000 points at zoom 1 on a 2x display: 200 by 20,000 pixels is only 4 million,
+    // inside the pixel budget, but a side past what the core draws, so the worker refuses it
+    // and the page would stay blank. The scale is lowered until the long side fits.
+    let side = |points: f32, scale: f32| (points * scale).ceil();
+    for (page, zoom, ratio) in [
+        (ViewPageSize { width: 100.0, height: 10_000.0 }, 1.0, 2.0),
+        (ViewPageSize { width: 10_000.0, height: 100.0 }, 1.0, 2.0),
+        (ViewPageSize { width: 30.0, height: 99_999.0 }, CSS_PX_PER_POINT, 4.0),
+    ] {
+        let scale = render_scale(zoom, ratio, &page).unwrap();
+        let (w, h) = (side(page.width, scale), side(page.height, scale));
+        assert!(w <= MAX_VIEW_SIDE as f32 && h <= MAX_VIEW_SIDE as f32, "{page:?}: {w}x{h} at {scale}");
+        assert!(w.max(h) > MAX_VIEW_SIDE as f32 * 0.99, "{page:?}: and no smaller than it has to be: {w}x{h}");
+    }
+    // A page that fits keeps its scale.
+    assert_eq!(render_scale(1.0, 2.0, &ViewPageSize { width: 100.0, height: 7_999.0 }), Some(2.0));
+}
+
+#[test]
 fn a_window_taller_than_the_document_mounts_a_bounded_run_of_pages() {
     // The most pages the protocol allows, each at the smallest zoom, in a window as tall as a
     // host page can make it: no more than the cap is mounted or asked for.

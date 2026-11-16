@@ -153,3 +153,25 @@ fn a_page_whose_canvas_went_is_asked_for_again() {
     // Scrolled back: asked for again, not taken for painted.
     assert_eq!(cache.plan(&[key(0, 1.0)]), vec![key(0, 1.0)]);
 }
+
+#[test]
+fn a_page_that_arrived_but_could_not_be_painted_is_not_painted_and_not_asked_again() {
+    // The worker answered, so the book counts the page as painted; then putting the pixels on the
+    // canvas failed. It must not stay counted (a blank canvas kept as if painted, never asked
+    // for again), and it must not be asked for at once again either (a loop).
+    let mut cache = PageCache::new(64 * MB);
+    assert_eq!(cache.plan(&[key(0, 1.0)]), vec![key(0, 1.0)]);
+    assert_eq!(cache.arrived(key(0, 1.0), 4 * MB, &[0]), Arrival::Paint { evict: vec![] });
+    cache.failed(key(0, 1.0));
+    assert_eq!(cache.painted(0), None, "not painted");
+    assert_eq!(cache.used_bytes(), 0, "its pixels are not counted");
+    for _ in 0..3 {
+        assert_eq!(cache.plan(&[key(0, 1.0)]), vec![], "not asked again at that scale");
+    }
+    assert_eq!(cache.plan(&[key(0, 2.0)]), vec![key(0, 2.0)], "another scale still is");
+    // A failure for a scale the page is not painted at leaves the painted one alone.
+    assert_eq!(cache.arrived(key(0, 2.0), 4 * MB, &[0]), Arrival::Paint { evict: vec![] });
+    cache.failed(key(0, 1.0));
+    assert_eq!(cache.painted(0), Some(key(0, 2.0)));
+    assert_eq!(cache.used_bytes(), 4 * MB);
+}

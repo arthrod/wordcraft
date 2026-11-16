@@ -29,3 +29,7 @@ web-sys = { version = "0.3", features = ["DedicatedWorkerGlobalScope", "ErrorEve
 [dev-dependencies]
 wordcraft-doc = { workspace = true }
 wordcraft-docx = { workspace = true }
+# Packages a test .docx that embeds a font (the docx writer embeds none).
+craft-zip = { workspace = true }
+# Looks at the font list the worker leaves behind.
+wordcraft-fonts = { workspace = true }

@@ -70,6 +70,10 @@ pub struct ExportOptions {
     /// face can draw, a picture that is missing or can't be decoded); else the save fails with
     /// `strict: …` (#6005). Ignored for other formats.
     pub strict: bool,
+    /// A host's own id for this export (`hostTag`; 0 when none), handed back with the options
+    /// to a host that writes the export later (the web app's workers), so it can tell which
+    /// caller asked for it. Never written anywhere; the engine's own writers ignore it.
+    pub host_tag: u64,
 }
 
 /// A document password: wiped from memory when dropped, never printed (`Debug` shows `***`).

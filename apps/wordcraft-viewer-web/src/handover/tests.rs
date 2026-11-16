@@ -488,3 +488,24 @@ fn a_refused_or_cancelled_password_is_not_a_failure() {
     h.on(Event::DocumentFailed);
     assert!(h.edit_offered());
 }
+
+#[test]
+fn a_document_is_held_while_it_opens_is_open_or_waits_for_its_password() {
+    // A host's open() the page refuses before the worker (empty, too large, a password too
+    // long) changes nothing while this holds: the document in play stays, and so does the lock
+    // on the edit action. Only with none in play is a refusal the viewer's failure.
+    let (mut h, _) = started(Mode::ViewerFirst, true);
+    assert!(h.holds_document(), "the first one is being fetched");
+    h.on(Event::DocumentOpened);
+    assert!(h.holds_document());
+    h.on(Event::DocumentOpening);
+    assert!(h.holds_document() && !h.edit_offered(), "a replacement is opening");
+    h.on(Event::PasswordAsked);
+    assert!(h.holds_document() && !h.edit_offered(), "its password is asked for");
+    h.on(Event::DocumentOpening);
+    h.on(Event::DocumentFailed);
+    assert!(!h.holds_document(), "none, and none coming");
+    // Editor-first with WebGL: no viewer, no document.
+    let (h, _) = started(Mode::EditorFirst, true);
+    assert!(!h.holds_document());
+}

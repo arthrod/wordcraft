@@ -127,6 +127,48 @@ pub(crate) fn worker_failure(worker: &str, ready: bool) -> String {
     }
 }
 
+/// Read one `[headerJson, payloadBuffer]` message from the `worker` worker, checked as the
+/// workers check a request ([`crate::lazy_formats::inbound`]): it is an array, its header a
+/// string no longer than a JSON payload, its payload an `ArrayBuffer` or `Uint8Array` within the
+/// reply kind's bound — all before anything is copied. A reply that fails the checks comes back
+/// as a typed `error` reply for its own job; a message that answers no job is logged and `None`.
+pub(crate) fn read_worker_message(worker: &str, data: &wasm_bindgen::JsValue) -> Option<(wordcraft_worker_proto::Envelope, Vec<u8>)> {
+    use crate::lazy_formats::{Inbound, inbound};
+    // `is_array` before the cast: an array-like object never goes through `Array.from`.
+    let (header, payload) = if js_sys::Array::is_array(data) {
+        let arr: &js_sys::Array = data.unchecked_ref();
+        (arr.get(0), arr.get(1))
+    } else {
+        (wasm_bindgen::JsValue::UNDEFINED, wasm_bindgen::JsValue::UNDEFINED)
+    };
+    let limit = u32::try_from(wordcraft_worker_proto::MAX_PAYLOAD_BYTES).unwrap_or(u32::MAX);
+    let header = header.dyn_ref::<js_sys::JsString>().filter(|s| s.length() <= limit).and_then(|s| s.as_string());
+    // A `Uint8Array` (what the workers post) is used as it is: `new Uint8Array(typedArray)` would
+    // copy every byte (ECMA-262 InitializeTypedArrayFromTypedArray clones the buffer) before the
+    // length check. An `ArrayBuffer` gets a view, which copies nothing.
+    let bytes = match payload.dyn_into::<js_sys::Uint8Array>() {
+        Ok(view) => Some(view),
+        Err(other) if other.is_instance_of::<js_sys::ArrayBuffer>() => Some(js_sys::Uint8Array::new(&other)),
+        Err(_) => None,
+    };
+    match inbound(header.as_deref(), bytes.as_ref().map(|b| b.length() as usize)) {
+        Inbound::Route(env) => {
+            // `ready` carries nothing read; anything else is within its bound by now.
+            let copied = if env.kind == wordcraft_worker_proto::Kind::Ready { Vec::new() } else { bytes.map(|b| b.to_vec()).unwrap_or_default() };
+            Some((env, copied))
+        }
+        Inbound::Refuse(env, reply) => {
+            log::warn!("{worker} worker: {}", reply.message);
+            let payload = wordcraft_worker_proto::encode_payload(&reply).ok()?;
+            Some((env, payload))
+        }
+        Inbound::Drop(why) => {
+            log::warn!("{worker} worker: dropped {why}");
+            None
+        }
+    }
+}
+
 const CANVAS_ID: &str = "wordcraft_canvas";
 const LOADING_ID: &str = "wordcraft_loading";
 
@@ -535,7 +577,7 @@ impl eframe::App for WebShell {
         }
         // Picked, dropped or host-sent files only the codecs worker reads leave the inbox here
         // and come back as Word packages on a later frame (plan 10.2); the app opens the rest.
-        lazy_io::take_foreign_opens(&self.inbox, &self.asset_base, &self.messages, ctx);
+        lazy_io::take_foreign_opens(&self.inbox, &self.asset_base, &self.messages, ctx, || self.app.session.region());
         self.app.logic(ctx);
         // Wanted pack faces are recorded during layout, so drain them after the app ran.
         font_packs::drain_wanted(ctx);
@@ -637,7 +679,13 @@ fn listen_for_pasted_pictures(inbox: Inbox, ctx: egui::Context) -> Result<(), St
 
 /// [`wordcraft_ui_egui::Services::lazy_export`] answered by `exporter`.
 fn lazy_export_hook(exporter: lazy_io::Exporter) -> wordcraft_ui_egui::LazyExportFn {
-    Box::new(move |name: &str, password: Option<&str>, docx: &dyn Fn() -> Result<Vec<u8>, String>| exporter.export(name, password, docx))
+    Box::new(
+        move |name: &str,
+              password: Option<&str>,
+              opts: &wordcraft_engine::io::ExportOptions,
+              docx: &dyn Fn() -> Result<Vec<u8>, String>,
+              used: &dyn Fn() -> wordcraft_engine::strict::PdfFaces| exporter.export(name, password, opts, docx, used),
+    )
 }
 
 /// `dirty` is the flag the `beforeunload` guard reads ([`guard_unload`]).
