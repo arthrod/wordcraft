@@ -539,6 +539,60 @@ impl JobQueue {
     }
 }
 
+/// A job's reply continuation.
+pub(crate) type Reply = Box<dyn FnOnce(Result<Vec<u8>, String>)>;
+
+/// The answer half of a job ([`Once`]) and what starts its deadline ([`deadline_job`]).
+pub(crate) type Job = (Once<Reply>, Box<dyn FnOnce()>);
+
+/// Wrap `on_reply` with a deadline of `budget_ms` in `queue`, the jobs one `what` worker holds.
+/// The deadline starts when the second half runs, which the worker client does when it posts
+/// the job to a worker that said it is ready — never while the worker is still being fetched
+/// (that has its own bound, [`LOAD_MS`]). From then `arm` is asked to call its continuation in
+/// `due_ms` (the budgets of the jobs posted ahead of it, then its own); if the job is still
+/// unanswered by then it answers "did not answer" and `stop`s the stuck worker, so the next job
+/// starts a fresh one. A reply first makes the timer do nothing; a job answered before it was
+/// posted starts no clock and holds up no other job; every answer, whichever path gives it,
+/// releases the job's place in `queue`. No browser types: `lazy_io` passes `setTimeout` as
+/// `arm` and the worker's stop, and host tests drive both by hand.
+pub(crate) fn deadline_job(
+    queue: Rc<RefCell<JobQueue>>,
+    budget_ms: u64,
+    what: &'static str,
+    on_reply: impl FnOnce(Result<Vec<u8>, String>) + 'static,
+    arm: impl FnOnce(u64, Box<dyn FnOnce()>) + 'static,
+    stop: impl FnOnce() + 'static,
+) -> Job {
+    // Set when the job is posted: until then it holds up no other job.
+    let token: Rc<std::cell::Cell<Option<u64>>> = Rc::default();
+    let finish = (token.clone(), queue.clone());
+    let once: Once<Reply> = Once::new(Box::new(move |reply| {
+        let (token, queue) = finish;
+        if let Some(token) = token.take() {
+            queue.borrow_mut().finish(token);
+        }
+        on_reply(reply);
+    }));
+    let on_timeout = once.share();
+    let start = Box::new(move || {
+        if on_timeout.answered() {
+            return;
+        }
+        let (admitted, due_ms) = queue.borrow_mut().admit(budget_ms);
+        token.set(Some(admitted));
+        let minutes = due_ms.div_ceil(60_000);
+        arm(
+            due_ms,
+            Box::new(move || {
+                if on_timeout.call(Err(format!("the {what} worker {NO_ANSWER} in {minutes} minutes"))) {
+                    stop();
+                }
+            }),
+        );
+    });
+    (once, start)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1009,5 +1063,101 @@ mod tests {
             assert_eq!(api, wordcraft_engine::cmd::file::export_options(&s, &user), "{markup:?}");
         }
         assert!(wordcraft_engine::cmd::file::export_options(&s, &api_pdf_params(&a, None)).markup);
+    }
+
+    /// A job's answers, its armed timers and the worker stops, recorded for the deadline tests.
+    #[derive(Default)]
+    struct Rig {
+        answers: Rc<RefCell<Vec<(&'static str, Result<Vec<u8>, String>)>>>,
+        timers: Rc<RefCell<Vec<(&'static str, u64, Box<dyn FnOnce()>)>>>,
+        stops: Rc<std::cell::Cell<usize>>,
+    }
+
+    impl Rig {
+        fn job(&self, queue: &Rc<RefCell<JobQueue>>, name: &'static str, budget_ms: u64) -> Job {
+            let (answers, timers, stops) = (self.answers.clone(), self.timers.clone(), self.stops.clone());
+            deadline_job(
+                queue.clone(),
+                budget_ms,
+                "pdf",
+                move |reply| answers.borrow_mut().push((name, reply)),
+                move |due, fire| timers.borrow_mut().push((name, due, fire)),
+                move || stops.set(stops.get() + 1),
+            )
+        }
+
+        /// Fire the timer job `name` armed.
+        fn fire(&self, name: &str) {
+            let at = self.timers.borrow().iter().position(|(n, _, _)| *n == name).unwrap();
+            let (_, _, fire) = self.timers.borrow_mut().remove(at);
+            fire();
+        }
+
+        fn answers_of(&self, name: &str) -> Vec<Result<Vec<u8>, String>> {
+            self.answers.borrow().iter().filter(|(n, _)| *n == name).map(|(_, r)| r.clone()).collect()
+        }
+    }
+
+    /// Review finding (the deadline glue was browser-only): the handshake between a job's
+    /// reply, its posting and its timer, driven by hand. A timer that fires after its job
+    /// answered does nothing; a timer only ever fails its own job; a job answered before it was
+    /// posted arms nothing; and a worker stopped with jobs queued fails each exactly once, the
+    /// timers firing later changing nothing.
+    #[test]
+    fn a_jobs_deadline_answers_only_its_own_unanswered_job() {
+        let rig = Rig::default();
+        let queue: Rc<RefCell<JobQueue>> = Rc::default();
+
+        // A answered before its timer fires: the timer does nothing, stops nothing.
+        let (a, start_a) = rig.job(&queue, "a", 1_000);
+        start_a();
+        assert_eq!(queue.borrow().len(), 1);
+        assert!(a.call(Ok(b"%PDF a".to_vec())));
+        assert_eq!(queue.borrow().len(), 0, "the answer releases its place");
+        rig.fire("a");
+        assert_eq!(rig.answers_of("a"), [Ok(b"%PDF a".to_vec())]);
+        assert_eq!(rig.stops.get(), 0);
+
+        // B and C posted; B's timer fires: B fails, the stuck worker is stopped, C is untouched
+        // and answers with its own reply. C's deadline counted B's budget ahead of its own.
+        let (b, start_b) = rig.job(&queue, "b", 1_000);
+        let (c, start_c) = rig.job(&queue, "c", 2_000);
+        start_b();
+        start_c();
+        let due: Vec<(&str, u64)> = rig.timers.borrow().iter().map(|(n, d, _)| (*n, *d)).collect();
+        assert_eq!(due, [("b", 1_000), ("c", 3_000)]);
+        rig.fire("b");
+        assert_eq!(rig.answers_of("b"), [Err("the pdf worker did not answer in 1 minutes".to_string())]);
+        assert!(!b.call(Ok(b"late".to_vec())), "a late reply is dropped");
+        assert_eq!(rig.stops.get(), 1);
+        assert!(rig.answers_of("c").is_empty(), "B's timer never fails C");
+        assert!(c.call(Ok(b"%PDF c".to_vec())));
+        rig.fire("c");
+        assert_eq!(rig.answers_of("c"), [Ok(b"%PDF c".to_vec())]);
+        assert_eq!(rig.stops.get(), 1);
+
+        // A job answered before it was posted (its send failed) arms nothing and holds nothing.
+        let (d, start_d) = rig.job(&queue, "d", 1_000);
+        assert!(d.call(Err("could not take it".into())));
+        start_d();
+        assert!(rig.timers.borrow().iter().all(|(n, _, _)| *n != "d"));
+        assert_eq!(queue.borrow().len(), 0);
+
+        // A worker stopped with jobs queued — E posted, F still held before `ready` — fails
+        // each once (as a client's `Drop` does through every pending sink); E's timer then
+        // fires into nothing, and F, never posted, never armed one.
+        let (e, start_e) = rig.job(&queue, "e", 1_000);
+        let (f, _start_f) = rig.job(&queue, "f", 1_000);
+        start_e();
+        for sink in [&e, &f] {
+            assert!(sink.call(Err("the pdf worker was stopped".into())));
+            assert!(!sink.call(Err("the pdf worker was stopped".into())), "once");
+        }
+        rig.fire("e");
+        assert_eq!(rig.answers_of("e").len(), 1);
+        assert_eq!(rig.answers_of("f").len(), 1);
+        assert!(rig.timers.borrow().iter().all(|(n, _, _)| *n != "f"));
+        assert_eq!(rig.stops.get(), 1, "only a timer that answered stops the worker");
+        assert_eq!(queue.borrow().len(), 0, "nothing is left holding up a later job");
     }
 }

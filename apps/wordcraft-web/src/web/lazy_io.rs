@@ -9,8 +9,8 @@
 //! to the host page, when one hosts the app). Progress and failures go to the app's status bar
 //! (and the console); a worker that cannot be loaded leaves the open document as it was.
 //!
-//! Every job answers exactly once ([`Once`]): with the bytes, with the reason there are none, or
-//! when it outlives its deadline ([`JobQueue`]), counted from when it is posted to a worker that
+//! Every job answers exactly once ([`Once`](crate::lazy_formats::Once)): with the bytes, with the reason there are none, or
+//! when it outlives its deadline ([`deadline_job`]), counted from when it is posted to a worker that
 //! said it is ready, so a slow first fetch of the worker never eats into it (loading has its own
 //! bound, `LOAD_MS`); a worker stuck past a deadline is stopped, so the next job starts a fresh
 //! one.
@@ -24,7 +24,7 @@ use wordcraft_worker_proto as proto;
 
 use super::{codec_worker, pdf_worker};
 use crate::lazy_formats::{
-    ApiExports, ExportRoute, FONT_BUDGET, JobKind, JobQueue, NO_ANSWER, Once, export_route, failure_message, font_batch, import_format,
+    ApiExports, ExportRoute, FONT_BUDGET, Job, JobKind, JobQueue, deadline_job, export_route, failure_message, font_batch, import_format,
     job_budget_ms, open_request, opened_name, pdf_job_options,
 };
 
@@ -39,8 +39,8 @@ const NO_PDF_WORKER: &str = "the pdf worker is unavailable in this browser";
 
 thread_local! {
     /// The jobs each worker holds, for their deadlines.
-    static CONVERTS: RefCell<JobQueue> = RefCell::new(JobQueue::default());
-    static PDFS: RefCell<JobQueue> = RefCell::new(JobQueue::default());
+    static CONVERTS: Rc<RefCell<JobQueue>> = Rc::default();
+    static PDFS: Rc<RefCell<JobQueue>> = Rc::default();
     /// Save As / Export jobs between the request and the delivery: the leave-page guard asks
     /// while there are any ([`exports_in_flight`]).
     static EXPORTS_IN_FLIGHT: Cell<usize> = const { Cell::new(0) };
@@ -68,57 +68,30 @@ pub(crate) fn exports_in_flight() -> usize {
     EXPORTS_IN_FLIGHT.with(Cell::get)
 }
 
-/// The answer half of a job ([`Once`]) and what starts its deadline.
-type Job = (Once<Box<dyn FnOnce(Result<Vec<u8>, String>)>>, Box<dyn FnOnce()>);
-
-/// Wrap `on_reply` with job `kind`'s deadline. The deadline starts when the second half runs,
-/// which the worker client does when it posts the job to a worker that said it is ready — never
-/// while the worker is still being fetched (that has its own bound, `LOAD_MS`). From then a timer
-/// answers "did not answer" when the job outlives its budget (the budgets of the jobs posted
-/// ahead of it, then its own), and stops the stuck worker so the next job starts a fresh one. A
-/// reply first makes the timer do nothing; a job answered before it was posted starts no clock.
+/// Wrap `on_reply` with job `kind`'s deadline ([`deadline_job`]): the timer is the browser's
+/// `setTimeout`, and a job past its deadline stops its worker, so the next job starts a fresh
+/// one.
 fn with_deadline(kind: JobKind, input_bytes: usize, on_reply: impl FnOnce(Result<Vec<u8>, String>) + 'static) -> Job {
-    let queue = match kind {
-        JobKind::Convert => &CONVERTS,
-        JobKind::Pdf => &PDFS,
+    let (queue, what) = match kind {
+        JobKind::Convert => (CONVERTS.with(Rc::clone), "codec"),
+        JobKind::Pdf => (PDFS.with(Rc::clone), "pdf"),
     };
-    // Set when the job is posted: until then it holds up no other job.
-    let token: Rc<Cell<Option<u64>>> = Rc::default();
-    let finish = token.clone();
-    let once: Once<Box<dyn FnOnce(Result<Vec<u8>, String>)>> = Once::new(Box::new(move |reply| {
-        if let Some(token) = finish.take() {
-            queue.with(|q| q.borrow_mut().finish(token));
-        }
-        on_reply(reply);
-    }));
-    let on_timeout = once.share();
-    let start = Box::new(move || {
-        if on_timeout.answered() {
-            return;
-        }
-        let (admitted, due_ms) = queue.with(|q| q.borrow_mut().admit(job_budget_ms(kind, input_bytes)));
-        token.set(Some(admitted));
-        let minutes = due_ms.div_ceil(60_000);
-        let fire = wasm_bindgen::closure::Closure::once_into_js(move || {
-            let what = match kind {
-                JobKind::Convert => "codec",
-                JobKind::Pdf => "pdf",
-            };
-            if on_timeout.call(Err(format!("the {what} worker {NO_ANSWER} in {minutes} minutes"))) {
-                log::warn!("the {what} worker held a job past its deadline; stopping it");
-                match kind {
-                    JobKind::Convert => codec_worker::stop(),
-                    JobKind::Pdf => pdf_worker::stop(),
-                }
-            }
-        });
+    let arm = |due_ms: u64, fire: Box<dyn FnOnce()>| {
+        let fire = wasm_bindgen::closure::Closure::once_into_js(fire);
         let ms = i32::try_from(due_ms).unwrap_or(i32::MAX);
         let armed = web_sys::window().map(|w| w.set_timeout_with_callback_and_timeout_and_arguments_0(fire.unchecked_ref(), ms));
         if !matches!(armed, Some(Ok(_))) {
             log::warn!("no timer for a worker job's deadline; it waits for the worker alone");
         }
-    });
-    (once, start)
+    };
+    let stop = move || {
+        log::warn!("the {what} worker held a job past its deadline; stopping it");
+        match kind {
+            JobKind::Convert => codec_worker::stop(),
+            JobKind::Pdf => pdf_worker::stop(),
+        }
+    };
+    deadline_job(queue, job_budget_ms(kind, input_bytes), what, on_reply, arm, stop)
 }
 
 /// Convert between `.docx` and another format in the codecs worker, starting it on first
