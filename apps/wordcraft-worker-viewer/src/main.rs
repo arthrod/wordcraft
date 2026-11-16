@@ -536,6 +536,52 @@ mod tests {
         assert_eq!(missing(&mut worker, 0), Vec::<String>::new(), "a new document's own font is still loaded");
     }
 
+    /// `font`'s bytes with four more after them: another file of the same family and style.
+    fn other_bytes(font: &[u8]) -> Vec<u8> {
+        let mut data = font.to_vec();
+        data.extend_from_slice(&[0; 4]);
+        data
+    }
+
+    #[test]
+    fn a_replacement_kept_before_anything_opened_keeps_the_shown_documents_fonts() {
+        const FAMILY: &str = "JetBrains WkrB";
+        let shown = wordcraft_viewer::open(&docx_in(FAMILY, Some(&font_named(FAMILY))), None).unwrap();
+        assert_eq!(wordcraft_fonts::FontDb::global().styles(FAMILY), ["Regular"]);
+        wordcraft_viewer::Replacement::begin(Some(&shown)).keep();
+        assert_eq!(wordcraft_fonts::FontDb::global().styles(FAMILY), ["Regular"], "nothing took its place: its font stays");
+        // Kept after an open that failed: the same.
+        let mut replacing = wordcraft_viewer::Replacement::begin(Some(&shown));
+        assert!(replacing.open(b"not a package", None).is_err());
+        replacing.keep();
+        assert_eq!(wordcraft_fonts::FontDb::global().styles(FAMILY), ["Regular"]);
+        assert_eq!(shown.missing_fonts(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_second_replacement_is_laid_out_with_its_own_fonts_not_the_firsts() {
+        const FAMILY: &str = "JetBrains WkrC";
+        let font = font_named(FAMILY);
+        let mut replacing = wordcraft_viewer::Replacement::begin(None);
+        let first = replacing.open(&docx_in(FAMILY, Some(&font)), None).unwrap();
+        let second = replacing.open(&docx_in(FAMILY, Some(&other_bytes(&font))), None).unwrap();
+        // The second embeds the same family and style in other bytes: its own face is added,
+        // not skipped as the first's, so it is the second's still once the first has gone.
+        assert_eq!(wordcraft_fonts::FontDb::global().styles(FAMILY), ["Regular"]);
+        replacing.keep();
+        drop(first);
+        assert_eq!(wordcraft_fonts::FontDb::global().styles(FAMILY), ["Regular"], "the shown document's own face");
+        assert_eq!(second.missing_fonts(), Vec::<String>::new());
+        // One that cannot be opened after another did leaves the one opened in place.
+        let mut replacing = wordcraft_viewer::Replacement::begin(Some(&second));
+        let third = replacing.open(&docx_in(FAMILY, Some(&font)), None).unwrap();
+        assert!(replacing.open(b"not a package", None).is_err());
+        replacing.keep();
+        drop(second);
+        assert_eq!(wordcraft_fonts::FontDb::global().styles(FAMILY), ["Regular"], "the replacement opened before the failure is kept");
+        assert_eq!(third.missing_fonts(), Vec::<String>::new());
+    }
+
     #[test]
     fn the_protocol_bounds_are_the_cores() {
         // The page module sizes its requests by the protocol's copies, without linking the core.

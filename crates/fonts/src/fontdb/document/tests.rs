@@ -95,3 +95,15 @@ fn an_install_over_a_document_leaves_its_other_faces_its_own() {
     db.withdraw_document_fonts(&doc);
     assert_eq!(db.styles("Twin Sans Abc"), ["Bold"]);
 }
+
+#[test]
+fn an_install_over_a_document_that_fails_or_unwinds_puts_its_faces_back() {
+    let db = FontDb::with_font_dirs(vec![]);
+    let doc = db.add_document_fonts_scoped(vec![(renamed("SourceSans3-Regular.ttf", "Back Sans Abc"), "Back Sans Abc".to_string())]);
+    let failed: Result<usize, &str> = db.installing_over(&doc, || Err("not a font"));
+    assert!(failed.is_err());
+    assert_eq!(db.styles("Back Sans Abc"), ["Regular"], "an install that fails leaves the document's face");
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| db.installing_over(&doc, || -> usize { panic!("the install unwound") })));
+    assert!(unwound.is_err());
+    assert_eq!(db.styles("Back Sans Abc"), ["Regular"], "an install that unwinds leaves the document's face");
+}

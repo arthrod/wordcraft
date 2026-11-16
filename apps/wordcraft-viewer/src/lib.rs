@@ -224,19 +224,36 @@ impl<'a> Replacement<'a> {
         Replacement { current, opened: None }
     }
 
-    /// [`open`] the replacement. Its fonts are withdrawn again if this is dropped unkept.
+    /// [`open`] the replacement. Its fonts are withdrawn again if this is dropped unkept. A
+    /// replacement opened before through this one has its fonts withdrawn first, so this one is
+    /// laid out with its own; they are put back if this one cannot be opened.
     pub fn open(&mut self, bytes: &[u8], password: Option<&str>) -> Result<Session, ViewerError> {
-        let session = open(bytes, password)?;
-        if let Some(earlier) = self.opened.replace(session.fonts.clone()) {
-            wordcraft_fonts::FontDb::global().withdraw_document_fonts(&earlier);
+        let db = wordcraft_fonts::FontDb::global();
+        if let Some(earlier) = &self.opened {
+            db.withdraw_document_fonts(earlier);
         }
-        Ok(session)
+        match open(bytes, password) {
+            Ok(session) => {
+                self.opened = Some(session.fonts.clone());
+                Ok(session)
+            }
+            Err(e) => {
+                if let Some(earlier) = &self.opened {
+                    db.reinstate_document_fonts(earlier);
+                }
+                Err(e)
+            }
+        }
     }
 
-    /// The replacement is in place: its fonts stay and `current`'s stay withdrawn.
+    /// The replacement last opened is in place: its fonts stay and `current`'s stay withdrawn.
+    /// With none opened, nothing took `current`'s place: this is as if it were dropped, and
+    /// `current`'s fonts come back.
     pub fn keep(mut self) {
-        self.current = None;
-        self.opened = None;
+        if self.opened.is_some() {
+            self.current = None;
+            self.opened = None;
+        }
     }
 }
 

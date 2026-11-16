@@ -67,6 +67,19 @@ fn file_faces(data: &Arc<Vec<u8>>, name: Option<&str>) -> Vec<Arc<FontFace>> {
     faces
 }
 
+/// Puts a document's withdrawn faces back when dropped ([`FontDb::installing_over`]), so they
+/// come back on every way out, unwinding included.
+struct Reinstate<'a> {
+    db: &'a FontDb,
+    faces: &'a DocumentFaces,
+}
+
+impl Drop for Reinstate<'_> {
+    fn drop(&mut self) {
+        self.db.reinstate_document_fonts(self.faces);
+    }
+}
+
 /// A face's family and style, as the font list tells faces apart.
 fn key(f: &FontFace) -> (String, String) {
     (f.family.to_ascii_lowercase(), f.style.to_ascii_lowercase())
@@ -164,13 +177,13 @@ impl FontDb {
     /// list, then put them back where it left their family and style free: an installed face
     /// takes the place of the document's own instead of being skipped as already present, so
     /// the family stays when the document goes, and the document's other faces still leave with
-    /// it. The steps are not one atomic change: a lookup on another thread in between sees the
-    /// document's faces gone (the view-only core runs on one thread).
+    /// it. They are put back however `install` ends, an error or an unwind. The steps are not
+    /// one atomic change: a lookup on another thread in between sees the document's faces gone
+    /// (the view-only core runs on one thread).
     pub fn installing_over<R>(&self, faces: &DocumentFaces, install: impl FnOnce() -> R) -> R {
         self.withdraw_document_fonts(faces);
-        let installed = install();
-        self.reinstate_document_fonts(faces);
-        installed
+        let _back = Reinstate { db: self, faces };
+        install()
     }
 
     /// Faces left the list or came back: every fallback choice may be another now. The run cache
