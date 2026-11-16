@@ -7516,6 +7516,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "wordcraft-viewer"
+version = "0.18.1"
+dependencies = [
+ "image",
+ "serde_json",
+ "wasm-bindgen",
+ "wordcraft-doc",
+ "wordcraft-docx",
+ "wordcraft-engine",
+ "wordcraft-fonts",
+ "wordcraft-layout",
+ "wordcraft-render",
+]
+
+[[package]]
 name = "wordcraft-web"
 version = "0.18.1"
 dependencies = [

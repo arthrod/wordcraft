@@ -1,0 +1,34 @@
+[package]
+name = "wordcraft-viewer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WordCraft view-only module: opens a .docx and paints its pages, with no editor in it (host-agnostic; bytes in, RGBA out)"
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+# `cdylib` is the wasm module a host loads; `rlib` is what the host tests link.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wordcraft-doc = { workspace = true }
+wordcraft-docx = { workspace = true }
+wordcraft-fonts = { workspace = true }
+wordcraft-layout = { workspace = true, default-features = false }
+wordcraft-render = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# The module only runs as wasm there: the minimal bundle, the full one on host builds (an
+# unconditional feature would unify it onto every workspace build and test).
+wordcraft-fonts = { workspace = true, features = ["minimal-wasm-fonts"] }
+wasm-bindgen = "0.2"
+
+[dev-dependencies]
+# The tests compare against the path `wordcraft-cli render` takes; the module itself must
+# never link the engine (`cargo xtask wasm-budget --viewer`).
+wordcraft-engine = { workspace = true }
+serde_json = { workspace = true }
+image = { workspace = true }
