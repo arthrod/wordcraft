@@ -41,7 +41,7 @@ pub fn escape(text: &str) -> String {
 /// The start of every page: doctype, encoding, viewport, title and the stylesheet.
 fn head(title: &str) -> String {
     format!(
-        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{}</title>{STYLE}",
+        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{}</title><link rel=\"icon\" href=\"data:,\">{STYLE}",
         escape(title)
     )
 }
@@ -179,6 +179,8 @@ pub(crate) mod tests {
         assert_inert(&html);
         assert!(html.len() < 2_000, "{} bytes", html.len());
         assert!(html.starts_with("<!doctype html>"));
+        // An empty icon, so the browser does not ask the server for /favicon.ico.
+        assert!(html.contains(r#"<link rel="icon" href="data:,">"#), "{html}");
         // The image, with its size so the layout doesn't shift, pointing at the PNG route.
         assert!(html.contains(r#"<img src="/view/page.png?doc=samples/welcome.docx&amp;page=2&amp;scale=1" width="612" height="792""#), "{html}");
         // Page number and count, previous and next, the editor.
