@@ -1054,6 +1054,7 @@ source = "git+https://github.com/storytold/craft-libs?rev=41fb227542efb8a7748caa
 [[package]]
 name = "craft-convert"
 version = "0.1.0"
+source = "git+https://github.com/arthrod/craft-libs?rev=8a46e13e2#8a46e13e254210ffe9cd21573fb99d1a475b2d82"
 
 [[package]]
 name = "craft-doc-binary"
