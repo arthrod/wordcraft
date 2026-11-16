@@ -608,6 +608,19 @@ try {
     await maker.page.close();
     const shown = (p) => p.evaluate(() => ({ count: window.wordcraftViewer.pageCount(), pages: Number(document.querySelector("#wordcraft_viewer").dataset.pages) }));
 
+    // A host's open() while the ?doc= download is still in flight: the host's document stays
+    // once the download lands.
+    const slow = await open(browser, base, "/?doc=samples/welcome.docx", { stalled: /\/samples\/welcome\.docx$/ });
+    await slow.page.waitForFunction(() => window.wordcraftViewer, { timeout: 30000 });
+    const opened = await slow.page.evaluate((doc) => window.wordcraftViewer.open(new Uint8Array(doc)).then((a) => a.pageCount, (e) => `rejected: ${e.message}`), six);
+    for (const r of slow.held.splice(0)) await r.continue();
+    await new Promise((r) => setTimeout(r, 3000));
+    const kept = await shown(slow.page);
+    check("open() during the startup download: the host's document stays after it lands", opened === 6 && kept.count === 6 && kept.pages === 6, JSON.stringify({ opened, ...kept }));
+
+    check("open() races: no uncaught errors", slow.log.uncaught.length === 0, slow.log.uncaught.join(" | "));
+    await slow.page.close();
+
     // Pages answered after the reader scrolled away (their canvases gone) are painted again when
     // scrolled back to, not left blank.
     const away = await open(browser, base, "/", { hooks: true });

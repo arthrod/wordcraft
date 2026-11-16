@@ -609,22 +609,28 @@ fn start_viewer(page: &Rc<Page>) {
 }
 
 /// The document's bytes: the ones already held, else fetched from where the host said. With
-/// nothing said, the viewer gets the built-in sample and the editor gets nothing.
+/// nothing said, the viewer gets the built-in sample and the editor gets nothing. `None` too when
+/// a host's `open()` came while they were fetched: that document is the one shown.
 async fn document_bytes(page: &Rc<Page>, for_viewer: bool) -> Result<Option<js_sys::Uint8Array>, String> {
-    let source = {
+    let (source, opens) = {
         let state = page.state.borrow();
         if let Some(docx) = &state.docx {
             return Ok(Some(docx.clone()));
         }
-        state.source.clone()
+        (state.source.clone(), state.opens)
     };
     let bytes = match source {
-        Source::Bytes(bytes) => bytes,
-        Source::Url(url) => fetch_same_origin(page, &url).await?,
-        Source::Unset if for_viewer => fetch_same_origin(page, &format!("{}{SAMPLE_FILE}", page.asset_base)).await?,
+        Source::Bytes(bytes) => Ok(bytes),
+        Source::Url(url) => fetch_same_origin(page, &url).await,
+        Source::Unset if for_viewer => fetch_same_origin(page, &format!("{}{SAMPLE_FILE}", page.asset_base)).await,
         Source::Unset => return Ok(None),
     };
-    page.state.borrow_mut().docx = Some(bytes.clone());
+    let mut state = page.state.borrow_mut();
+    if state.opens != opens {
+        return Ok(None);
+    }
+    let bytes = bytes?;
+    state.docx = Some(bytes.clone());
     Ok(Some(bytes))
 }
 
