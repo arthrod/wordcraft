@@ -107,10 +107,12 @@ pub const VIEWER_WORKER_FORBIDDEN_SYMBOLS: &[&str] = &["egui::", "eframe::", "wo
 pub const PAGE_STEM: &str = "wordcraft-viewer-web";
 
 /// The page module's ceilings, at measured size plus about 3% raw and 4% gzip (the headroom
-/// the workers got). Re-measured 2026-11-16, with the in-page password form and the bounded
-/// editor wait, on the SIMD release build (`trunk build --release`, no optional inputs):
-/// 206,075 raw / 92,450 gzip -9 / 78,819 Brotli q11.
-pub const PAGE_CEILING: WorkerCeiling = WorkerCeiling { name: PAGE_STEM, max_raw: 212_300, max_gzip: 96_200 };
+/// the workers got). Re-measured 2026-11-16 on the SIMD release build (`trunk build --release`,
+/// no optional inputs): 212,845 raw / 95,138 gzip -9 / 81,150 Brotli q11. Raised from
+/// 212,300 / 96,200 (measured then: 206,075 / 92,450 / 78,819): the page now reads a document
+/// it fetches as a bounded stream, refuses a cross-origin answer, and puts the document on
+/// screen back when a replacement is refused, which is 6,770 bytes of page code.
+pub const PAGE_CEILING: WorkerCeiling = WorkerCeiling { name: PAGE_STEM, max_raw: 219_200, max_gzip: 98_900 };
 
 /// Crates the page module must never link: it is `web-sys` glue that starts the view-only
 /// worker and loads the editor on an edit action. The editor, PDF export and the whole document
