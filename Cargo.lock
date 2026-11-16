@@ -7310,9 +7310,8 @@ dependencies = [
  "cfb",
  "craft-doc-binary",
  "craft-wordmodel",
- "serde",
- "serde_json",
  "wordcraft-doc",
+ "wordcraft-model-bridge",
 ]
 
 [[package]]
