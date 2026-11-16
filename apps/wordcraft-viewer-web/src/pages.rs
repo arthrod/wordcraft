@@ -4,7 +4,7 @@
 
 use std::ops::Range;
 
-use wordcraft_worker_proto::{MAX_VIEW_PIXELS, MAX_VIEW_SCALE, ViewPageSize};
+use wordcraft_worker_proto::{MAX_VIEW_PIXELS, MAX_VIEW_SCALE, MAX_VIEW_SIDE, ViewPageSize};
 
 /// CSS pixels in a point at 100% zoom (96 to the inch against 72).
 pub const CSS_PX_PER_POINT: f64 = 96.0 / 72.0;
@@ -142,9 +142,10 @@ pub fn wanted(sheet: &Sheet, scroll_top: f64, viewport_height: f64) -> Wanted {
 }
 
 /// The scale to paint a page at, in pixels per point: zoom times the device pixel ratio, so a
-/// page pixel is a device pixel. Lowered to the protocol's largest scale and until the page
-/// fits [`PAGE_PIXEL_BUDGET`]. `None` for a page or zoom that is not a positive finite number;
-/// a ratio that is not one is read as 1.
+/// page pixel is a device pixel. Lowered to the protocol's largest scale, and until the page fits
+/// [`PAGE_PIXEL_BUDGET`] and neither side is past [`MAX_VIEW_SIDE`] (a long narrow page can be
+/// few pixels and still too tall for the core). `None` for a page or zoom that is not a positive
+/// finite number; a ratio that is not one is read as 1.
 pub fn render_scale(zoom: f64, device_pixel_ratio: f64, size: &ViewPageSize) -> Option<f32> {
     let ok = |v: f32| v.is_finite() && v > 0.0;
     if !(zoom.is_finite() && zoom > 0.0 && ok(size.width) && ok(size.height)) {
@@ -154,19 +155,24 @@ pub fn render_scale(zoom: f64, device_pixel_ratio: f64, size: &ViewPageSize) -> 
     let mut scale = ((zoom * ratio) as f32).min(MAX_VIEW_SCALE);
     // The raster the view-only core makes is `ceil(points * scale)` a side, in single
     // precision; the same arithmetic here, so the size checked is the size asked for.
-    let pixels = |scale: f32| (f64::from((size.width * scale).ceil().max(1.0)) * f64::from((size.height * scale).ceil().max(1.0))) as u64;
-    if pixels(scale) > PAGE_PIXEL_BUDGET {
+    let side = |points: f32, scale: f32| (points * scale).ceil().max(1.0);
+    let max_side = MAX_VIEW_SIDE as f32;
+    let fits = |scale: f32| {
+        let (w, h) = (side(size.width, scale), side(size.height, scale));
+        w <= max_side && h <= max_side && (f64::from(w) * f64::from(h)) as u64 <= PAGE_PIXEL_BUDGET
+    };
+    if !fits(scale) {
         let area = f64::from(size.width) * f64::from(size.height);
-        scale = scale.min((PAGE_PIXEL_BUDGET as f64 / area).sqrt() as f32);
-        // Rounding each side up can still land a few pixels over: step down until it fits.
+        scale = scale.min((PAGE_PIXEL_BUDGET as f64 / area).sqrt() as f32).min(max_side / size.width.max(size.height));
+        // Rounding each side up can still land a pixel over: step down until it fits.
         for _ in 0..64 {
-            if pixels(scale) <= PAGE_PIXEL_BUDGET {
+            if fits(scale) {
                 break;
             }
             scale *= 0.999;
         }
     }
-    (scale.is_finite() && scale > 0.0 && pixels(scale) <= PAGE_PIXEL_BUDGET).then_some(scale)
+    (scale.is_finite() && scale > 0.0 && fits(scale)).then_some(scale)
 }
 
 #[cfg(test)]

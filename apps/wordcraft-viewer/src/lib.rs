@@ -46,6 +46,12 @@ pub const MAX_SCALE: f32 = 16.0;
 /// on-screen use fits twice over, while one call can never ask for gigabytes.
 pub const MAX_RENDER_PIXELS: u64 = 32_000_000;
 
+/// Longest side of a page image, in pixels: what the rasteriser draws
+/// (`wordcraft_render::MAX_SIDE`). A page whose side at the asked scale is longer is refused
+/// ([`ViewerError::TooManyPixels`]). Hosts that must not link the renderer read the protocol's
+/// copy, `wordcraft_worker_proto::MAX_VIEW_SIDE`, which the viewer worker's tests hold equal.
+pub const MAX_RASTER_SIDE: u32 = wordcraft_render::MAX_SIDE;
+
 /// Largest font file [`install_font`] accepts: the limit the font database applies itself.
 pub const MAX_FONT_BYTES: usize = wordcraft_fonts::MAX_FONT_FILE_BYTES;
 
@@ -80,7 +86,7 @@ pub enum ViewerError {
     /// A page index at or past the page count.
     NoSuchPage { page: u32, pages: usize },
     /// The page at this scale is more than [`MAX_RENDER_PIXELS`], or a side is past what the
-    /// rasteriser draws (`wordcraft_render::MAX_SIDE`).
+    /// rasteriser draws ([`MAX_RASTER_SIDE`]).
     TooManyPixels { width: u64, height: u64, limit: u64 },
     /// A font name that is empty or longer than [`MAX_FONT_NAME_CHARS`].
     BadFontName,
@@ -123,7 +129,7 @@ impl std::fmt::Display for ViewerError {
             ViewerError::BadScale { scale } => write!(f, "scale {scale} is not a number above 0 and at most {MAX_SCALE}"),
             ViewerError::NoSuchPage { page, pages } => write!(f, "no page at index {page}: the document has {pages}"),
             ViewerError::TooManyPixels { width, height, limit } => {
-                write!(f, "the page at this scale is {width}×{height} pixels; at most {limit} pixels and {} a side", wordcraft_render::MAX_SIDE)
+                write!(f, "the page at this scale is {width}×{height} pixels; at most {limit} pixels and {MAX_RASTER_SIDE} a side")
             }
             ViewerError::BadFontName => write!(f, "a font name is 1 to {MAX_FONT_NAME_CHARS} characters"),
             ViewerError::FontTooLarge { bytes, limit } => write!(f, "the font file is {bytes} bytes; at most {limit} bytes"),
@@ -291,7 +297,7 @@ fn raster_size(page: &wordcraft_layout::Page, scale: f32) -> Result<(u32, u32), 
     let side = |points: f32| ((points * scale).ceil() as u64).max(1);
     let (width, height) = (side(page.w), side(page.h.min(1e6)));
     let too_many = || ViewerError::TooManyPixels { width, height, limit: MAX_RENDER_PIXELS };
-    let max_side = u64::from(wordcraft_render::MAX_SIDE);
+    let max_side = u64::from(MAX_RASTER_SIDE);
     if width > max_side || height > max_side || width.checked_mul(height).is_none_or(|n| n > MAX_RENDER_PIXELS) {
         return Err(too_many());
     }

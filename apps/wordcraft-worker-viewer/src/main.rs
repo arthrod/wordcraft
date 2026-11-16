@@ -363,6 +363,15 @@ mod tests {
     }
 
     #[test]
+    fn the_protocol_bounds_are_the_cores() {
+        // The page module sizes its requests by the protocol's copies, without linking the core.
+        assert_eq!(proto::MAX_VIEW_SIDE, wordcraft_viewer::MAX_RASTER_SIDE);
+        assert_eq!(proto::MAX_VIEW_SCALE, wordcraft_viewer::MAX_SCALE);
+        assert_eq!(proto::MAX_VIEW_PIXELS, wordcraft_viewer::MAX_RENDER_PIXELS);
+        assert_eq!(proto::MAX_VIEW_DOC_BYTES, wordcraft_viewer::MAX_DOCUMENT_BYTES);
+    }
+
+    #[test]
     fn requests_before_a_document_is_open_are_typed_errors() {
         let mut worker = ViewerWorker::new();
         let (env, payload) = render(&mut worker, 0, 1.0, 1);

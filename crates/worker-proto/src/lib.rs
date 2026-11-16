@@ -85,6 +85,11 @@ pub const MAX_VIEW_SCALE: f32 = 16.0;
 /// Most pixels one `viewPage` reply carries (the core's `wordcraft_viewer::MAX_RENDER_PIXELS`):
 /// 32 million, which is 128 MiB of RGBA.
 pub const MAX_VIEW_PIXELS: u64 = 32_000_000;
+/// Longest side, in pixels, of a page a `viewRender` request may ask for: what the core's
+/// rasteriser draws (`wordcraft_render::MAX_SIDE`, through `wordcraft_viewer::MAX_RASTER_SIDE`;
+/// the viewer worker's tests hold them equal). The page module reads it here, so it never links
+/// the renderer.
+pub const MAX_VIEW_SIDE: u32 = 16_000;
 /// Most page sizes a `viewOpened` reply lists. A longer document reports its real page count
 /// and the sizes of its first pages; at about 40 bytes of JSON a size, a reply at the cap is
 /// still under [`MAX_PAYLOAD_BYTES`].
