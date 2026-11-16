@@ -10,8 +10,10 @@
 //! (and the console); a worker that cannot be loaded leaves the open document as it was.
 //!
 //! Every job answers exactly once ([`Once`]): with the bytes, with the reason there are none, or
-//! when it outlives its deadline ([`JobQueue`]); a worker stuck past a deadline is stopped, so
-//! the next job starts a fresh one.
+//! when it outlives its deadline ([`JobQueue`]), counted from when it is posted to a worker that
+//! said it is ready, so a slow first fetch of the worker never eats into it (loading has its own
+//! bound, `LOAD_MS`); a worker stuck past a deadline is stopped, so the next job starts a fresh
+//! one.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -49,44 +51,57 @@ pub(crate) fn exports_in_flight() -> usize {
     EXPORTS_IN_FLIGHT.with(Cell::get)
 }
 
-/// Wrap `on_reply` with job `kind`'s deadline: a timer answers "did not answer" when the job
-/// outlives it (the budgets of the jobs ahead, then its own), and stops the stuck worker so the
-/// next job starts a fresh one. A reply first makes the timer do nothing.
-fn with_deadline(
-    kind: JobKind,
-    input_bytes: usize,
-    on_reply: impl FnOnce(Result<Vec<u8>, String>) + 'static,
-) -> Once<Box<dyn FnOnce(Result<Vec<u8>, String>)>> {
+/// The answer half of a job ([`Once`]) and what starts its deadline.
+type Job = (Once<Box<dyn FnOnce(Result<Vec<u8>, String>)>>, Box<dyn FnOnce()>);
+
+/// Wrap `on_reply` with job `kind`'s deadline. The deadline starts when the second half runs,
+/// which the worker client does when it posts the job to a worker that said it is ready — never
+/// while the worker is still being fetched (that has its own bound, `LOAD_MS`). From then a timer
+/// answers "did not answer" when the job outlives its budget (the budgets of the jobs posted
+/// ahead of it, then its own), and stops the stuck worker so the next job starts a fresh one. A
+/// reply first makes the timer do nothing; a job answered before it was posted starts no clock.
+fn with_deadline(kind: JobKind, input_bytes: usize, on_reply: impl FnOnce(Result<Vec<u8>, String>) + 'static) -> Job {
     let queue = match kind {
         JobKind::Convert => &CONVERTS,
         JobKind::Pdf => &PDFS,
     };
-    let (token, due_ms) = queue.with(|q| q.borrow_mut().admit(job_budget_ms(kind, input_bytes)));
+    // Set when the job is posted: until then it holds up no other job.
+    let token: Rc<Cell<Option<u64>>> = Rc::default();
+    let finish = token.clone();
     let once: Once<Box<dyn FnOnce(Result<Vec<u8>, String>)>> = Once::new(Box::new(move |reply| {
-        queue.with(|q| q.borrow_mut().finish(token));
+        if let Some(token) = finish.take() {
+            queue.with(|q| q.borrow_mut().finish(token));
+        }
         on_reply(reply);
     }));
     let on_timeout = once.share();
-    let minutes = due_ms.div_ceil(60_000);
-    let fire = wasm_bindgen::closure::Closure::once_into_js(move || {
-        let what = match kind {
-            JobKind::Convert => "codec",
-            JobKind::Pdf => "pdf",
-        };
-        if on_timeout.call(Err(format!("the {what} worker {NO_ANSWER} in {minutes} minutes"))) {
-            log::warn!("the {what} worker held a job past its deadline; stopping it");
-            match kind {
-                JobKind::Convert => codec_worker::stop(),
-                JobKind::Pdf => pdf_worker::stop(),
+    let start = Box::new(move || {
+        if on_timeout.answered() {
+            return;
+        }
+        let (admitted, due_ms) = queue.with(|q| q.borrow_mut().admit(job_budget_ms(kind, input_bytes)));
+        token.set(Some(admitted));
+        let minutes = due_ms.div_ceil(60_000);
+        let fire = wasm_bindgen::closure::Closure::once_into_js(move || {
+            let what = match kind {
+                JobKind::Convert => "codec",
+                JobKind::Pdf => "pdf",
+            };
+            if on_timeout.call(Err(format!("the {what} worker {NO_ANSWER} in {minutes} minutes"))) {
+                log::warn!("the {what} worker held a job past its deadline; stopping it");
+                match kind {
+                    JobKind::Convert => codec_worker::stop(),
+                    JobKind::Pdf => pdf_worker::stop(),
+                }
             }
+        });
+        let ms = i32::try_from(due_ms).unwrap_or(i32::MAX);
+        let armed = web_sys::window().map(|w| w.set_timeout_with_callback_and_timeout_and_arguments_0(fire.unchecked_ref(), ms));
+        if !matches!(armed, Some(Ok(_))) {
+            log::warn!("no timer for a worker job's deadline; it waits for the worker alone");
         }
     });
-    let ms = i32::try_from(due_ms).unwrap_or(i32::MAX);
-    let armed = web_sys::window().map(|w| w.set_timeout_with_callback_and_timeout_and_arguments_0(fire.unchecked_ref(), ms));
-    if !matches!(armed, Some(Ok(_))) {
-        log::warn!("no timer for a worker job's deadline; it waits for the worker alone");
-    }
-    once
+    (once, start)
 }
 
 /// Convert between `.docx` and another format in the codecs worker, starting it on first
@@ -100,10 +115,10 @@ pub(crate) fn convert(asset_base: &str, req: &proto::ConvertRequest, on_reply: i
     if !codec_worker::ensure(asset_base) {
         return on_reply(Err(NO_CODEC_WORKER.into()));
     }
-    let on_reply = with_deadline(JobKind::Convert, req.input.len(), on_reply);
+    let (on_reply, posted) = with_deadline(JobKind::Convert, req.input.len(), on_reply);
     let for_reply = on_reply.share();
     let sent = codec_worker::with(|w| {
-        w.convert(req, move |reply| {
+        w.convert(req, posted, move |reply| {
             for_reply.call(reply.map_err(|e| format!("conversion failed: {}", e.message)));
         })
     });
@@ -167,10 +182,10 @@ pub(crate) fn render_pdf(
     if !pdf_worker::ensure(asset_base) {
         return on_reply(Err(NO_PDF_WORKER.into()));
     }
-    let on_reply = with_deadline(JobKind::Pdf, input_bytes, on_reply);
+    let (on_reply, posted) = with_deadline(JobKind::Pdf, input_bytes, on_reply);
     let for_reply = on_reply.share();
     let sent = pdf_worker::with(|w| {
-        w.render_pdf(&req, move |reply| {
+        w.render_pdf(&req, posted, move |reply| {
             for_reply.call(match reply {
                 Ok(bytes) if bytes.starts_with(b"%PDF") => Ok(bytes),
                 Ok(_) => Err("the pdf worker answered bytes that are not a PDF".into()),

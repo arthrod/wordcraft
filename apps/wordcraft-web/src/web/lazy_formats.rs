@@ -232,6 +232,11 @@ impl<F: FnOnce(Result<Vec<u8>, String>)> Once<F> {
         Once(self.0.clone())
     }
 
+    /// Something already answered: the job is over.
+    pub(crate) fn answered(&self) -> bool {
+        self.0.borrow().is_none()
+    }
+
     /// Answer with `reply`; `true` when this was the answer (nothing had answered yet).
     pub(crate) fn call(&self, reply: Result<Vec<u8>, String>) -> bool {
         // Taken out before it runs: the continuation may start another job.
@@ -256,6 +261,53 @@ const PDF_BASE_MS: u64 = 3 * 60_000;
 const PDF_PER_MIB_MS: u64 = 15_000;
 /// No single job gets longer than this, however large.
 const MAX_JOB_MS: u64 = 15 * 60_000;
+
+/// How long an on-demand worker may take to load — fetch and compile its script and wasm (the PDF
+/// worker is about 3 MB compressed) and say it is ready — before its waiting jobs fail as "could
+/// not be loaded". Generous: a slow connection is not a stuck worker. A job's own deadline
+/// ([`job_budget_ms`]) starts only when it is posted to a ready worker ([`ReadyGate`]).
+pub(crate) const LOAD_MS: u64 = 10 * 60_000;
+
+/// The jobs a worker client holds until the worker says it is ready (a module worker still
+/// running its top-level `await init()` drops what is posted to it), oldest first. A job leaves
+/// here when it is posted, and only then does its deadline start: the time a slow connection
+/// takes to bring the worker in is never counted against a conversion. Plain state, so host
+/// tests cover it; the clients post what it hands back.
+pub(crate) struct ReadyGate<J> {
+    ready: bool,
+    held: Vec<J>,
+}
+
+impl<J> ReadyGate<J> {
+    pub(crate) const fn new() -> Self {
+        ReadyGate { ready: false, held: Vec::new() }
+    }
+
+    /// The worker said it is ready.
+    pub(crate) fn is_ready(&self) -> bool {
+        self.ready
+    }
+
+    /// `Some(job)`: the worker is ready, post it now. `None`: held until [`ReadyGate::open`].
+    pub(crate) fn submit(&mut self, job: J) -> Option<J> {
+        if self.ready {
+            return Some(job);
+        }
+        self.held.push(job);
+        None
+    }
+
+    /// The worker is ready: the held jobs, oldest first, to post now.
+    pub(crate) fn open(&mut self) -> Vec<J> {
+        self.ready = true;
+        std::mem::take(&mut self.held)
+    }
+
+    /// The worker is gone: the held jobs, never to be posted.
+    pub(crate) fn close(&mut self) -> Vec<J> {
+        std::mem::take(&mut self.held)
+    }
+}
 
 /// Which worker a job runs in: each runs its jobs one at a time, in order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -580,6 +632,49 @@ mod tests {
         let mut q = JobQueue::default();
         q.admit(u64::MAX);
         assert_eq!(q.admit(5).1, u64::MAX, "saturates");
+    }
+
+    /// Review finding (the job deadline): a job submitted while its worker is still loading is
+    /// held, not posted, so its deadline has not started; it is posted (and its clock starts) when
+    /// the worker says it is ready, oldest first. Once ready, a job is posted at once. A worker
+    /// that never loads hands its held jobs back unposted. Loading has its own, longer bound.
+    #[test]
+    fn a_jobs_deadline_starts_when_it_is_posted_to_a_ready_worker() {
+        let posted: Rc<RefCell<Vec<&str>>> = Rc::default();
+        // A job is its name and what posting it starts: its deadline, here a record.
+        let job = |name: &'static str| {
+            let posted = posted.clone();
+            (name, Box::new(move || posted.borrow_mut().push(name)) as Box<dyn FnOnce()>)
+        };
+        let post = |j: (&str, Box<dyn FnOnce()>)| (j.1)();
+        let mut gate = ReadyGate::new();
+        assert!(!gate.is_ready());
+        for name in ["first", "second"] {
+            assert!(gate.submit(job(name)).is_none(), "held while the worker loads");
+        }
+        assert!(posted.borrow().is_empty(), "no clock runs while the worker loads, however long that takes");
+        gate.open().into_iter().for_each(post);
+        assert_eq!(*posted.borrow(), ["first", "second"], "posted, oldest first, when ready");
+        assert!(gate.is_ready());
+        gate.submit(job("third")).map(post).unwrap();
+        assert_eq!(posted.borrow().last(), Some(&"third"), "a ready worker takes a job at once");
+
+        let mut never = ReadyGate::new();
+        assert!(never.submit(job("lost")).is_none());
+        assert_eq!(never.close().len(), 1, "a worker that never loads hands its jobs back");
+        assert!(never.close().is_empty() && !never.is_ready());
+        assert!(posted.borrow().iter().all(|n| *n != "lost"));
+        // Loading is bounded on its own, and more generously than the shortest job.
+        assert!(LOAD_MS >= job_budget_ms(JobKind::Pdf, 0));
+    }
+
+    #[test]
+    fn once_knows_it_was_answered() {
+        let once = Once::new(|_: Result<Vec<u8>, String>| {});
+        let other = once.share();
+        assert!(!other.answered());
+        assert!(once.call(Ok(Vec::new())));
+        assert!(other.answered() && !other.call(Err("late".into())));
     }
 
     /// Review finding (the lazy PDF's options): the export options the command resolved reach the
