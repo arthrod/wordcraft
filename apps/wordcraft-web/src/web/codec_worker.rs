@@ -85,14 +85,16 @@ impl CodecWorker {
 
         let handler = inner.clone();
         let onerror = Closure::<dyn FnMut(web_sys::ErrorEvent)>::new(move |event: web_sys::ErrorEvent| {
-            let pending = {
+            let (pending, ready) = {
                 let mut inner = handler.borrow_mut();
                 inner.failed = true;
                 inner.queued.clear();
-                inner.pending.drain().map(|(id, p)| (id, p.sink)).collect::<Vec<_>>()
+                (inner.pending.drain().map(|(id, p)| (id, p.sink)).collect::<Vec<_>>(), inner.ready)
             };
             log::warn!("codec worker failed: {}", super::worker_error_text(&event));
-            fail_pending(pending, "the codec worker stopped");
+            // Before `ready` its files never arrived (or would not run); after it, it died with
+            // work in hand. The user is told different things (`lazy_formats::failure_message`).
+            fail_pending(pending, &super::worker_failure("codec", ready));
         });
         worker.set_onerror(Some(onerror.as_ref().unchecked_ref()));
 
@@ -272,17 +274,17 @@ pub(crate) fn ensure(asset_base: &str) -> bool {
     // weight here: drop it (its `Drop` terminates the JS worker and fails its pending
     // requests) and start fresh below. `WORKER_FAILED` stays reserved for `start` failures,
     // remembered per asset base.
-    let alive = WORKER.with(|w| {
+    let (alive, dropped) = WORKER.with(|w| {
         let mut slot = w.borrow_mut();
         let reusable = slot.as_ref().is_some_and(|worker| {
             let inner = worker.inner.borrow();
             !inner.failed && inner.asset_base == asset_base
         });
-        if !reusable && slot.is_some() {
-            *slot = None;
-        }
-        reusable
+        (reusable, if reusable { None } else { slot.take() })
     });
+    // Dropped outside the slot's borrow: its `Drop` completes waiting requests, whose
+    // continuations may ask for the worker again.
+    drop(dropped);
     if alive {
         return true;
     }
@@ -300,6 +302,14 @@ pub(crate) fn ensure(asset_base: &str) -> bool {
             false
         }
     }
+}
+
+/// Stop the shared worker (one stuck past a job's deadline): its waiting requests fail, and the
+/// next [`ensure`] starts a fresh one. Dropped outside the slot's borrow, so a request's
+/// continuation may start the next job.
+pub(crate) fn stop() {
+    let stopped = WORKER.with(|w| w.borrow_mut().take());
+    drop(stopped);
 }
 
 /// Run `f` on the shared worker when it is up (after [`ensure`]).

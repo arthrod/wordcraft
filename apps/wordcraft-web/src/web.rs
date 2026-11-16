@@ -116,6 +116,17 @@ pub(crate) fn worker_error_text(event: &web_sys::Event) -> String {
     }
 }
 
+/// Why an on-demand worker failed its waiting requests: before its `ready` notice its files never
+/// arrived or would not run; after it, it died with work in hand (out of memory on a large
+/// document, a fault). `lazy_formats::failure_message` words the two differently.
+pub(crate) fn worker_failure(worker: &str, ready: bool) -> String {
+    if ready {
+        format!("the {worker} worker {}", crate::lazy_formats::STOPPED_WORKING)
+    } else {
+        format!("the {worker} worker {}", crate::lazy_formats::NOT_LOADED)
+    }
+}
+
 const CANVAS_ID: &str = "wordcraft_canvas";
 const LOADING_ID: &str = "wordcraft_loading";
 
@@ -358,6 +369,16 @@ fn launch_with_config(config: StartConfig) -> js_sys::Promise {
                     let mut services = services(inbox.clone(), cc.egui_ctx.clone(), dirty, saves.clone(), messages.clone(), &initial_asset_base);
                     if let Some(bridge) = &app_bridge {
                         bridge.connect(&mut services, inbox.clone(), cc.egui_ctx.clone());
+                        // A worker's export goes to the host too, as a copy (the document keeps
+                        // its unsaved changes, so it never becomes the document's file).
+                        let host = bridge.clone();
+                        let exporter = lazy_io::Exporter {
+                            asset_base: initial_asset_base.clone(),
+                            messages: messages.clone(),
+                            ctx: cc.egui_ctx.clone(),
+                            deliver: Rc::new(move |name: &str, bytes: &[u8]| host.post_copy(name, bytes)),
+                        };
+                        services.lazy_export = Some(lazy_export_hook(exporter));
                     }
                     let (control, api_obj) = crate::api::install_with_global(cc.egui_ctx.clone(), install_global, &initial_asset_base);
                     *created_api_slot.borrow_mut() = Some(api_obj);
@@ -370,9 +391,10 @@ fn launch_with_config(config: StartConfig) -> js_sys::Promise {
                     crate::prefs::restore(&mut app, stored.as_deref());
                     let asset_base = initial_asset_base;
                     font_packs::init(&asset_base, messages.clone());
-                    // §3.2's smoke path (`?proof-worker`): the flag only adds console lines the
-                    // smoke harness waits for. The worker itself starts on the first edit
-                    // (`proof_squiggles::StartGate`, plan 10.1), flag or no flag.
+                    // §3.2's smoke path (`?proof-worker`): the flag adds console lines once the
+                    // proofing worker starts, and never starts it. The worker starts on the first
+                    // edit or proofing command (`proof_squiggles::StartGate`, plan 10.1), so a
+                    // page nobody edits prints none of them; the smoke harnesses type first.
                     if query().contains("proof-worker") {
                         crate::proof_squiggles::enable_smoke();
                     }
@@ -613,6 +635,11 @@ fn listen_for_pasted_pictures(inbox: Inbox, ctx: egui::Context) -> Result<(), St
     Ok(())
 }
 
+/// [`wordcraft_ui_egui::Services::lazy_export`] answered by `exporter`.
+fn lazy_export_hook(exporter: lazy_io::Exporter) -> wordcraft_ui_egui::LazyExportFn {
+    Box::new(move |name: &str, password: Option<&str>, docx: &dyn Fn() -> Result<Vec<u8>, String>| exporter.export(name, password, docx))
+}
+
 /// `dirty` is the flag the `beforeunload` guard reads ([`guard_unload`]).
 fn services(
     inbox: Inbox,
@@ -623,8 +650,14 @@ fn services(
     asset_base: &str,
 ) -> Services {
     // Save As and Export in a format a worker writes (plan 10.2): the worker is fetched on the
-    // first such save, and the finished file goes to the same download as every other save.
-    let exporter = lazy_io::Exporter { asset_base: asset_base.to_string(), messages: messages.clone(), saves: saves.clone(), ctx: ctx.clone() };
+    // first such save, and the finished file is an anchor download (the host page's, when one
+    // hosts the app: see the bridge's wiring).
+    let exporter = lazy_io::Exporter {
+        asset_base: asset_base.to_string(),
+        messages: messages.clone(),
+        ctx: ctx.clone(),
+        deliver: Rc::new(lazy_io::anchor_download),
+    };
     let open_inbox = inbox.clone();
     let save_ctx = ctx.clone();
     let font_ctx = ctx.clone();
@@ -665,13 +698,13 @@ fn services(
         // Exports ask for a name; the browser decides where the download goes.
         pick_save: Some(Box::new(|name: &str| Some(name.to_string()))),
         async_saves: Some(saves.clone()),
-        lazy_export: Some(Box::new(move |name: &str, password: Option<&str>, docx: &dyn Fn() -> Result<Vec<u8>, String>| {
-            exporter.export(name, password, docx)
-        })),
+        lazy_export: Some(lazy_export_hook(exporter)),
         download: Some(Box::new(move |path: &str, bytes: &[u8]| download(&saves, &save_ctx, path, bytes))),
         print: Some(Box::new(print_pdf)),
         inbox: Some(inbox),
         on_dirty: Some(Box::new(move |d| dirty.set(d))),
+        // The proofing worker starts on the first proofing command too, heard as it runs (plan 10.1).
+        on_command: Some(Box::new(crate::proof_squiggles::observe_command)),
         animations_enabled: Some(animations_enabled()),
         store_font: Some(Box::new(font_store::store)),
         forget_font: Some(Box::new(font_store::forget)),
@@ -801,8 +834,9 @@ fn animations_enabled() -> Box<dyn Fn() -> Option<bool>> {
 fn guard_unload(dirty: Rc<Cell<bool>>, saves: AsyncSaves) -> Result<(), String> {
     let window = web_sys::window().ok_or("no window")?;
     let on_unload = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::BeforeUnloadEvent)>::new(move |e: web_sys::BeforeUnloadEvent| {
-        // A save still in the browser's picker hasn't written anything yet.
-        if dirty.get() || saves.pending() > 0 {
+        // A save still in the browser's picker hasn't written anything yet, nor has an export a
+        // worker is still writing.
+        if dirty.get() || saves.pending() > 0 || lazy_io::exports_in_flight() > 0 {
             e.prevent_default();
             // Older browsers ask only when `returnValue` is set.
             e.set_return_value("unsaved changes");

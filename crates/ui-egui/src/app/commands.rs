@@ -112,16 +112,25 @@ impl WordApp {
     /// Offer a web save or export under `name` to the host ([`Services::lazy_export`]): a format
     /// it writes in a module it loads on first use is its job, taken as a Word package and
     /// delivered later. Asked before the engine, whose answer for such a format is "not included
-    /// in this build". `None`: the engine writes it.
+    /// in this build". `None`: the engine writes it. The answer says the export is under way
+    /// (`exporting`), never that it was downloaded: the host reports how it ended itself.
     fn lazy_export(&self, name: &str, password: Option<&str>, opts: &wordcraft_engine::io::ExportOptions) -> Option<Result<Value, String>> {
         let lazy = self.services.lazy_export.as_ref()?;
         let docx = || wordcraft_engine::io::save_bytes_opts("document.docx", &self.session.doc, opts);
-        Some(lazy(name, password, &docx)?.map(|()| json!({"downloaded": name, "pending": true})))
+        Some(lazy(name, password, &docx)?.map(|()| json!({"exporting": name, "pending": true})))
+    }
+
+    /// Tell the host the command `id` is about to run ([`Services::on_command`]).
+    fn announce_command(&self, id: &str) {
+        if let Some(seen) = &self.services.on_command {
+            seen(id);
+        }
     }
 
     /// Run a command for a script or an agent (control channel, MCP bridge): never asks first.
     /// UI-level commands (`ui.*`) are handled here, the rest by the engine.
     pub fn execute(&mut self, id: &str, params: Value) -> Result<Value, String> {
+        self.announce_command(id);
         self.clear_command_targets(id);
         if let Some(error) = self.document_required_error(id) {
             return Err(error);

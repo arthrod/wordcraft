@@ -55,6 +55,11 @@ pub struct Services {
     /// job and delivers the file itself, later, saying how it went. Such a save is a copy: the
     /// document keeps its unsaved changes.
     pub lazy_export: Option<LazyExportFn>,
+    /// Told the id of each command [`crate::WordApp::execute`] runs (the user's, a script's, an
+    /// agent's), before it runs. Web: the proofing worker starts on the first proofing command,
+    /// even on a document nobody edited; most of those commands change nothing in the session
+    /// that would show afterwards.
+    pub on_command: Option<Box<dyn Fn(&str)>>,
     /// Web: told whether the document has unsaved changes after each pass, for the browser's
     /// leave-page guard (`beforeunload` runs between frames and can't ask the app).
     pub on_dirty: Option<Box<dyn Fn(bool)>>,

@@ -114,15 +114,13 @@ fn check_key(doc: &wordcraft_doc::Document, p: &wordcraft_doc::Paragraph) -> u64
 }
 
 /// Commands that ask for proofing outright: they start the worker even on a document nobody
-/// has edited (the check itself, its dictionary and "ignore" actions, the as-you-type switch).
-const PROOFING_COMMANDS: &[&str] = &["review.spelling", "review.addToDictionary", "review.ignoreAll", "review.proofing"];
-
-/// Whether the session has been used in a way that wants squiggles: the document was edited
-/// (`dirty` — opening a file, loading the sample or a new blank document leave it clear), or
-/// the last recorded command was one of [`PROOFING_COMMANDS`].
-fn wants_proofing(dirty: bool, last_command: Option<&str>) -> bool {
-    dirty || last_command.is_some_and(|id| PROOFING_COMMANDS.contains(&id))
-}
+/// has edited. Read from the engine and the UI: Spelling & Grammar and Editor (both open the
+/// spelling pane, `WordApp::execute_user`), the issue and suggestion lists a script or the pane
+/// reads, the pane's Add to Dictionary and Ignore All, and Check Spelling as You Type. Most are
+/// `pure` (they change nothing a later frame could see), so the gate hears them as they run
+/// ([`StartGate::observe`], fed by `Services::on_command`), not from the session afterwards.
+const PROOFING_COMMANDS: &[&str] =
+    &["review.spelling", "review.editor", "review.issues", "review.suggestions", "review.addToDictionary", "review.ignoreAll", "review.proofing"];
 
 /// What [`StartGate::poll`] answers for one frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -141,14 +139,27 @@ pub(crate) enum Gate {
 #[derive(Default)]
 pub(crate) struct StartGate {
     started: bool,
+    /// A proofing command ran ([`PROOFING_COMMANDS`]); latched, however many commands follow
+    /// before the next frame.
+    asked: bool,
 }
 
 impl StartGate {
+    /// Hear one command as it runs.
+    pub(crate) fn observe(&mut self, id: &str) {
+        if PROOFING_COMMANDS.contains(&id) {
+            self.asked = true;
+        }
+    }
+
+    /// Whether the session has been used in a way that wants squiggles: the document was edited
+    /// (`dirty` — opening a file, loading the sample or a new blank document leave it clear), or
+    /// a proofing command ran.
     pub(crate) fn poll(&mut self, session: &wordcraft_engine::Session) -> Gate {
         if self.started {
             return Gate::Started;
         }
-        if !wants_proofing(session.dirty, session.last_command.as_ref().map(|(id, _)| id.as_str())) {
+        if !(session.dirty || self.asked) {
             return Gate::Wait;
         }
         self.started = true;
@@ -169,6 +180,12 @@ thread_local! {
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn enable_smoke() {
     SMOKE.with(|s| s.set(true));
+}
+
+/// `Services::on_command`: every command the app runs passes the gate ([`StartGate::observe`]).
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn observe_command(id: &str) {
+    GATE.with(|g| g.borrow_mut().observe(id));
 }
 
 /// The known-bad check of the smoke path, sent once when the worker starts.
@@ -390,17 +407,38 @@ mod tests {
         assert_eq!(gate.poll(&session), Gate::Started);
     }
 
-    /// An explicit proofing command starts the worker on a document nobody edited; other
-    /// commands do not.
+    /// Review finding 7: an explicit proofing command starts the worker on a document nobody
+    /// edited, heard as it runs through the app — even a `pure` one that leaves no trace in the
+    /// session, and even when other commands run before the next frame. Other commands do not.
     #[test]
     fn a_proofing_command_starts_the_worker_without_an_edit() {
-        assert!(!wants_proofing(false, None));
-        assert!(!wants_proofing(false, Some("view.zoom")));
-        assert!(!wants_proofing(false, Some("review.newComment")));
+        use std::{cell::RefCell, rc::Rc};
         for id in PROOFING_COMMANDS {
-            assert!(wants_proofing(false, Some(id)), "{id}");
+            let gate = Rc::new(RefCell::new(StartGate::default()));
+            let hear = gate.clone();
+            let services =
+                wordcraft_ui_egui::Services { on_command: Some(Box::new(move |id: &str| hear.borrow_mut().observe(id))), ..Default::default() };
+            let mut app = wordcraft_ui_egui::WordApp::new(wordcraft_engine::Session::new(Document::from_text("Ths is a tst.")), services);
+            for other in ["view.zoom", "review.newComment", "caret.docEnd"] {
+                let _ = app.execute(other, serde_json::json!({}));
+            }
+            app.session.dirty = false;
+            assert_eq!(gate.borrow_mut().poll(&app.session), Gate::Wait, "no proofing asked yet ({id})");
+            let _ = app.execute(id, serde_json::json!({"word": "Ths", "value": true}));
+            let _ = app.execute("caret.docEnd", serde_json::json!({}));
+            app.session.dirty = false;
+            assert_eq!(gate.borrow_mut().poll(&app.session), Gate::Start, "{id}, then another command, before the frame");
+            assert_eq!(gate.borrow_mut().poll(&app.session), Gate::Started);
         }
-        assert!(wants_proofing(true, None));
+    }
+
+    /// The gate's list names commands that exist: every id is one the engine registers.
+    #[test]
+    fn every_proofing_command_is_registered() {
+        let session = wordcraft_engine::Session::new(Document::new());
+        for id in PROOFING_COMMANDS {
+            assert!(session.registry.get(id).is_some(), "{id} is not an engine command");
+        }
     }
 
     /// Paragraphs deleted between path refreshes must not leave `scan` indexing past the new

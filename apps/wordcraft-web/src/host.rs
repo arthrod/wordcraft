@@ -23,6 +23,9 @@
 //!     is now that file; the next Save sends its name with `false`.
 //!   - Save As or Export to a format that doesn't (PDF, Markdown, plain text), Export as PDF and
 //!     Export Page as PNG: `false`. They are copies; the document's file stays the same.
+//!   - A format the browser build writes in an on-demand worker (`.rtf`, `.odt`, `.html`, PDF…;
+//!     `web/lazy_io.rs`): `false`, sent when the worker has written it, after the command
+//!     returned. Such a save is a copy, whatever the format keeps.
 //! - `wordcraft:dirty` whenever unsaved changes appear or go away, `wordcraft:failed` when the
 //!   app couldn't start.
 //!
@@ -114,6 +117,12 @@ impl Bridge {
     /// The app couldn't start (no WebGPU or WebGL2, for example): let the host say so.
     pub fn post_failed(&self, error: &str) {
         let _ = self.host.post_failed(error, None);
+    }
+
+    /// A file the host stores that does not become the document's file (`saveAs: false`): an
+    /// on-demand worker's export, delivered after the save command returned.
+    pub(crate) fn post_copy(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
+        self.post_save(path, bytes, false)
     }
 
     fn post_save(&self, path: &str, bytes: &[u8], save_as: bool) -> Result<(), String> {
