@@ -809,11 +809,4 @@ impl DocumentFaces {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
-
-    /// Let go of the faces answering to `family`: they are no longer the document's alone (a
-    /// host installed a font by that name, which found them already there), so they stay when
-    /// the document's faces are withdrawn.
-    pub fn release_family(&mut self, family: &str) {
-        self.0.retain(|f| !f.named(family));
-    }
 }

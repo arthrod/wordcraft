@@ -491,6 +491,23 @@ mod tests {
     }
 
     #[test]
+    fn a_font_the_host_installs_does_not_keep_the_documents_own_faces_of_that_family() {
+        // The document embeds the family's Regular; the host installs its Bold under that name.
+        // Once another document takes its place, the Regular it embedded goes with it: only
+        // the host's Bold is left of the family.
+        const FAMILY: &str = "JetBrains Wkr7";
+        let mut worker = ViewerWorker::new();
+        assert_eq!(open(&mut worker, &docx_in(FAMILY, Some(&font_named(FAMILY))), None, 1).0.kind, Kind::ViewOpened);
+        let bold = std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts/SourceSans3-Bold.ttf")).unwrap();
+        let payload = proto::encode_view_install_font_request(&proto::ViewInstallFontRequest { name: FAMILY.into(), bytes: bold }).unwrap();
+        let (rh, rp) = worker.handle_message(&header(Kind::ViewInstallFont, 2), &payload);
+        assert_eq!(proto::decode_envelope(&rh).unwrap().kind, Kind::ViewOpened, "{}", String::from_utf8_lossy(&rp));
+        assert_eq!(wordcraft_fonts::FontDb::global().styles(FAMILY), ["Regular", "Bold"]);
+        assert_eq!(open(&mut worker, &docx_in(FAMILY, None), None, 3).0.kind, Kind::ViewOpened);
+        assert_eq!(wordcraft_fonts::FontDb::global().styles(FAMILY), ["Bold"], "the document's own face left with it");
+    }
+
+    #[test]
     fn the_protocol_bounds_are_the_cores() {
         // The page module sizes its requests by the protocol's copies, without linking the core.
         assert_eq!(proto::MAX_VIEW_SIDE, wordcraft_viewer::MAX_RASTER_SIDE);

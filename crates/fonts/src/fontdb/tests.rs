@@ -533,10 +533,4 @@ fn a_documents_fonts_leave_with_it_and_come_back_if_the_next_one_fails() {
     // Withdrawing faces it does not hold changes nothing.
     db.withdraw_document_fonts(&faces);
     assert_eq!(db.runtime_faces().len(), 1);
-    // Faces a host has since installed under that name are let go of: they stay.
-    let mut next = next;
-    next.release_family("contract bold");
-    assert!(next.is_empty());
-    db.withdraw_document_fonts(&next);
-    assert!(db.has_family("Contract Bold"));
 }

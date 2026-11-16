@@ -336,10 +336,10 @@ impl Session {
     /// [`install_font`], then lay this document out again so it uses the font. Other open
     /// sessions see the font once they [`Session::relayout`].
     pub fn install_font(&mut self, name: &str, bytes: &[u8]) -> Result<(), ViewerError> {
+        // The host's faces take the place of any of this document's own of the same family and
+        // style (`wordcraft_fonts::FontDb::add_document_fonts`), so they stay when the document
+        // goes; the document's other faces still go with it.
         install_font(name, bytes)?;
-        // The host's font by that name now: faces this document embedded under it, which the
-        // install may have found already there, outlive the document.
-        self.fonts.release_family(name.trim());
         self.relayout();
         Ok(())
     }
