@@ -106,12 +106,6 @@ fn configure(payload: &[u8]) -> Result<(Kind, Vec<u8>), (ErrorCode, String)> {
     {
         return error(ErrorCode::TooLarge, format!("{words} dictionary words in one configure message"));
     }
-    // `None` keeps the current options; `Some(ProofOptions::default())` resets to Word's.
-    // Applied only once every word validated: a rejected configure must not change the options
-    // later checks run under either.
-    if let Some(opts) = cfg.options {
-        CONFIGURED_OPTIONS.with(|o| o.set(Some(opts)));
-    }
     // Validate every word before mutating any dictionary: a rejected word fails the whole
     // configure with a typed error instead of being silently skipped behind an `Ack`, so the
     // worker's dictionaries can't diverge from what the client believes was applied.
@@ -124,6 +118,12 @@ fn configure(payload: &[u8]) -> Result<(Kind, Vec<u8>), (ErrorCode, String)> {
     let add = validate(&cfg.add_words)?;
     let remove = validate(&cfg.remove_words)?;
     let ignore = validate(&cfg.ignore_words)?;
+    // `None` keeps the current options; `Some(ProofOptions::default())` resets to Word's.
+    // Applied only once every word validated: a rejected configure must not change the options
+    // later checks run under either.
+    if let Some(opts) = cfg.options {
+        CONFIGURED_OPTIONS.with(|o| o.set(Some(opts)));
+    }
     for word in add {
         wordcraft_proof::add_word(&word);
     }
@@ -453,5 +453,26 @@ mod tests {
         assert_eq!(header.kind, Kind::Error);
         assert_eq!(payload["code"], serde_json::json!("badRequest"));
         assert!(!wordcraft_proof::is_correct("zqxjvw"), "a rejected configure must not partially apply");
+    }
+
+    #[test]
+    fn configure_rejection_keeps_the_active_options() {
+        // A first configure turns grammar checks off; a second carries new options *and* an
+        // invalid word, and is rejected whole — so the options later checks run under stay the
+        // first request's, not the rejected second's.
+        let first = proto::ConfigureRequest { options: Some(proto::ProofOptions { grammar: false, ..Default::default() }), ..Default::default() };
+        let (h, p) = request(Kind::Configure, &first, 5);
+        let (rh, rp) = handle_message(&h, &p);
+        assert_eq!(decode_reply(&rh, &rp).0.kind, Kind::Ack);
+        assert!(!options().grammar, "the first configure applied");
+
+        let second =
+            proto::ConfigureRequest { options: Some(proto::ProofOptions::default()), add_words: vec!["two words".into()], ..Default::default() };
+        let (h, p) = request(Kind::Configure, &second, 6);
+        let (rh, rp) = handle_message(&h, &p);
+        let (header, payload) = decode_reply(&rh, &rp);
+        assert_eq!(header.kind, Kind::Error);
+        assert_eq!(payload["code"], serde_json::json!("badRequest"));
+        assert!(!options().grammar, "a rejected configure must not change the active options");
     }
 }
