@@ -292,9 +292,16 @@ try {
   printSizes("AC4 first load", report.firstLoad);
 
   // ---- AC3: the edit action ----
+  // The editor's wasm is held until the viewer has been seen in place, so what is checked is
+  // the state while the editor loads, not whichever state a quick or slow machine reaches first.
+  await first.page.setRequestInterception(true);
+  const heldEditor = [];
+  first.page.on("request", (r) => (/\/wordcraft-web_bg\.wasm$/.test(new URL(r.url()).pathname) ? heldEditor.push(r) : r.continue()));
   await first.page.click("#wordcraft_viewer_edit");
+  for (let waited = 0; heldEditor.length === 0 && waited < 60000; waited += 50) await new Promise((r) => setTimeout(r, 50));
   const loadingSeen = await first.page.evaluate(() => [document.documentElement.getAttribute("data-wordcraft-phase"), !!document.querySelector("#wordcraft_viewer canvas[data-scale]")]);
-  check("AC3 viewer stays while the editor loads", loadingSeen[0] !== "editing" && loadingSeen[1], JSON.stringify(loadingSeen));
+  check("AC3 viewer stays while the editor loads", heldEditor.length > 0 && loadingSeen[0] === "loading-editor" && loadingSeen[1], JSON.stringify({ held: heldEditor.length, loadingSeen }));
+  for (const r of heldEditor.splice(0)) await r.continue();
   await waitAttr(first.page, "data-wordcraft-phase", "editing");
   await idle(first.page);
   const editStep = first.log.requests.slice(firstLoad.length);
