@@ -46,6 +46,12 @@ pub const MAX_SCALE: f32 = 16.0;
 /// on-screen use fits twice over, while one call can never ask for gigabytes.
 pub const MAX_RENDER_PIXELS: u64 = 32_000_000;
 
+/// Longest side of a page image, in pixels: what the rasteriser draws
+/// (`wordcraft_render::MAX_SIDE`). A page whose side at the asked scale is longer is refused
+/// ([`ViewerError::TooManyPixels`]). Hosts that must not link the renderer read the protocol's
+/// copy, `wordcraft_worker_proto::MAX_VIEW_SIDE`, which the viewer worker's tests hold equal.
+pub const MAX_RASTER_SIDE: u32 = wordcraft_render::MAX_SIDE;
+
 /// Largest font file [`install_font`] accepts: the limit the font database applies itself.
 pub const MAX_FONT_BYTES: usize = wordcraft_fonts::MAX_FONT_FILE_BYTES;
 
@@ -80,7 +86,7 @@ pub enum ViewerError {
     /// A page index at or past the page count.
     NoSuchPage { page: u32, pages: usize },
     /// The page at this scale is more than [`MAX_RENDER_PIXELS`], or a side is past what the
-    /// rasteriser draws (`wordcraft_render::MAX_SIDE`).
+    /// rasteriser draws ([`MAX_RASTER_SIDE`]).
     TooManyPixels { width: u64, height: u64, limit: u64 },
     /// A font name that is empty or longer than [`MAX_FONT_NAME_CHARS`].
     BadFontName,
@@ -123,7 +129,7 @@ impl std::fmt::Display for ViewerError {
             ViewerError::BadScale { scale } => write!(f, "scale {scale} is not a number above 0 and at most {MAX_SCALE}"),
             ViewerError::NoSuchPage { page, pages } => write!(f, "no page at index {page}: the document has {pages}"),
             ViewerError::TooManyPixels { width, height, limit } => {
-                write!(f, "the page at this scale is {width}×{height} pixels; at most {limit} pixels and {} a side", wordcraft_render::MAX_SIDE)
+                write!(f, "the page at this scale is {width}×{height} pixels; at most {limit} pixels and {MAX_RASTER_SIDE} a side")
             }
             ViewerError::BadFontName => write!(f, "a font name is 1 to {MAX_FONT_NAME_CHARS} characters"),
             ViewerError::FontTooLarge { bytes, limit } => write!(f, "the font file is {bytes} bytes; at most {limit} bytes"),
@@ -167,6 +173,19 @@ pub struct PageImage {
 pub struct Session {
     doc: Document,
     layout: DocLayout,
+    /// The faces this document's embedded fonts added: withdrawn when another document takes
+    /// its place ([`open_after`]), and released when the session is dropped.
+    fonts: wordcraft_fonts::DocumentFaces,
+}
+
+/// A dropped session's embedded fonts leave the font list, unless another open session holds
+/// them (the same document opened twice, as a server may for two requests at once): a font one
+/// document embeds never answers for a later one that only names the family, however the
+/// session ends. Already withdrawn by a [`Replacement`], they stay out.
+impl Drop for Session {
+    fn drop(&mut self) {
+        wordcraft_fonts::FontDb::global().release_document_fonts(&self.fonts);
+    }
 }
 
 /// Open the `.docx` package in `bytes` (decrypted with `password` when it is encrypted) and lay
@@ -192,24 +211,127 @@ fn open_with(bytes: &[u8], password: Option<&str>, embedded_fonts: bool) -> Resu
     }
     let mut doc = wordcraft_docx::read_with_password(bytes, password)?;
     doc.ensure_nonempty();
-    if embedded_fonts {
-        load_embedded_fonts(&doc);
-    }
+    // Without them the session holds no faces of its own, so it withdraws and releases none.
+    let fonts = if embedded_fonts { load_embedded_fonts(&doc) } else { wordcraft_fonts::DocumentFaces::default() };
     let layout = lay_out(&doc);
-    Ok(Session { doc, layout })
+    Ok(Session { doc, layout, fonts })
 }
+
+/// [`open`], to take the place of `current`: `current`'s embedded fonts are withdrawn first, so
+/// the new document is never laid out with fonts another document embedded (nor is its own
+/// subset of a family skipped as already present), and they are put back if it cannot be
+/// opened, when the caller keeps `current`.
+pub fn open_after(current: Option<&Session>, bytes: &[u8], password: Option<&str>) -> Result<Session, ViewerError> {
+    let mut replacing = Replacement::begin(current);
+    let session = replacing.open(bytes, password)?;
+    replacing.keep();
+    Ok(session)
+}
+
+/// A document taking another's place, for a caller with more to do between the open and the
+/// switch (a reply to make): [`open_after`] in steps. `current`'s embedded fonts are withdrawn
+/// from [`Replacement::begin`]; unless [`Replacement::keep`] is called, dropping it puts the
+/// fonts back as they were, the new document's withdrawn and `current`'s reinstated, however
+/// the caller's work fails after the open.
+pub struct Replacement<'a> {
+    current: Option<&'a Session>,
+    opened: Option<wordcraft_fonts::DocumentFaces>,
+}
+
+impl<'a> Replacement<'a> {
+    /// Withdraw `current`'s embedded fonts (see [`open_after`]).
+    pub fn begin(current: Option<&'a Session>) -> Replacement<'a> {
+        if let Some(current) = current {
+            wordcraft_fonts::FontDb::global().withdraw_document_fonts(&current.fonts);
+        }
+        Replacement { current, opened: None }
+    }
+
+    /// [`open`] the replacement. Its fonts are withdrawn again if this is dropped unkept. A
+    /// replacement opened before through this one has its fonts withdrawn first, so this one is
+    /// laid out with its own; they are put back if this one cannot be opened.
+    pub fn open(&mut self, bytes: &[u8], password: Option<&str>) -> Result<Session, ViewerError> {
+        let db = wordcraft_fonts::FontDb::global();
+        if let Some(earlier) = &self.opened {
+            db.withdraw_document_fonts(earlier);
+        }
+        match open(bytes, password) {
+            Ok(session) => {
+                self.opened = Some(session.fonts.clone());
+                Ok(session)
+            }
+            Err(e) => {
+                if let Some(earlier) = &self.opened {
+                    db.reinstate_document_fonts(earlier);
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// The replacement last opened is in place: its fonts stay and `current`'s stay withdrawn.
+    /// With none opened, nothing took `current`'s place: this is as if it were dropped, and
+    /// `current`'s fonts come back.
+    pub fn keep(mut self) {
+        if self.opened.is_some() {
+            self.current = None;
+            self.opened = None;
+        }
+    }
+}
+
+impl Drop for Replacement<'_> {
+    fn drop(&mut self) {
+        let db = wordcraft_fonts::FontDb::global();
+        if let Some(opened) = self.opened.take() {
+            db.withdraw_document_fonts(&opened);
+        }
+        if let Some(current) = self.current.take() {
+            db.reinstate_document_fonts(&current.fonts);
+        }
+    }
+}
+
+/// Most bytes of embedded fonts one process keeps, over every document it opens. The font
+/// database keeps each embedded font file it added for the rest of the process, so that a
+/// document opened again (or another embedding the same file) reuses its faces; a face that
+/// layout has used stays in memory anyway (`wordcraft_fonts::FaceRef` keeps it, by design). So
+/// this, not the font list, is what bounds them, and withdrawing a document's fonts gives
+/// nothing back. A file is counted once, when the database first adds a face of it: one it
+/// keeps already, or whose faces were all present (a font the host installed), costs nothing.
+/// Past the limit a document's new embedded fonts are left out and its text falls back to
+/// other fonts ([`Session::missing_fonts`] names them).
+pub const MAX_EMBEDDED_FONT_BYTES: usize = 128 << 20;
+
+/// The embedded-font bytes kept so far in this process ([`MAX_EMBEDDED_FONT_BYTES`]).
+static EMBEDDED_FONT_BYTES: Mutex<usize> = Mutex::new(0);
 
 /// Load the fonts `doc` embeds for this run, in memory only, as the engine does when it opens
 /// a file: text set in a font that isn't installed is then laid out in it. The reader has
-/// already bounded them; they don't count against [`MAX_FONTS`].
-fn load_embedded_fonts(doc: &Document) {
+/// already bounded them per document; they don't count against [`MAX_FONTS`], but against
+/// [`MAX_EMBEDDED_FONT_BYTES`]. The faces added are the session's.
+fn load_embedded_fonts(doc: &Document) -> wordcraft_fonts::DocumentFaces {
     let files: Vec<(Vec<u8>, String)> = wordcraft_docx::embedded_fonts(doc)
         .into_iter()
         .filter_map(|f| wordcraft_fonts::decode_font_file(&f.data).ok().map(|data| (data, f.name)))
         .collect();
-    if !files.is_empty() {
-        wordcraft_fonts::FontDb::global().add_document_fonts(files);
-    }
+    let mut used = EMBEDDED_FONT_BYTES.lock().unwrap_or_else(PoisonError::into_inner);
+    admit_embedded_fonts(wordcraft_fonts::FontDb::global(), files, &mut used, MAX_EMBEDDED_FONT_BYTES)
+}
+
+/// Add a document's embedded font `files` to `db`, while the bytes kept fit `limit` with the
+/// `used` ones; `used` counts the bytes kept.
+fn admit_embedded_fonts(
+    db: &wordcraft_fonts::FontDb,
+    files: Vec<(Vec<u8>, String)>,
+    used: &mut usize,
+    limit: usize,
+) -> wordcraft_fonts::DocumentFaces {
+    // Only the bytes the database newly keeps are charged: a file it keeps already, or one
+    // adding no face (a font the host installed), costs nothing and takes no room.
+    let faces = db.add_document_fonts_scoped(files, limit.saturating_sub(*used));
+    *used = used.saturating_add(faces.new_bytes());
+    faces
 }
 
 impl Session {
@@ -262,7 +384,10 @@ impl Session {
     /// [`install_font`], then lay this document out again so it uses the font. Other open
     /// sessions see the font once they [`Session::relayout`].
     pub fn install_font(&mut self, name: &str, bytes: &[u8]) -> Result<(), ViewerError> {
-        install_font(name, bytes)?;
+        // Installed over this document's own faces: the host's take the place of any of the same
+        // family and style, so they stay when the document goes; the document's other faces
+        // still go with it.
+        wordcraft_fonts::FontDb::global().installing_over(&self.fonts, || install_font(name, bytes))?;
         self.relayout();
         Ok(())
     }
@@ -312,7 +437,7 @@ fn raster_size(page: &wordcraft_layout::Page, scale: f32) -> Result<(u32, u32), 
     let side = |points: f32| ((points * scale).ceil() as u64).max(1);
     let (width, height) = (side(page.w), side(page.h.min(1e6)));
     let too_many = || ViewerError::TooManyPixels { width, height, limit: MAX_RENDER_PIXELS };
-    let max_side = u64::from(wordcraft_render::MAX_SIDE);
+    let max_side = u64::from(MAX_RASTER_SIDE);
     if width > max_side || height > max_side || width.checked_mul(height).is_none_or(|n| n > MAX_RENDER_PIXELS) {
         return Err(too_many());
     }
@@ -392,6 +517,41 @@ pub fn install_font(name: &str, bytes: &[u8]) -> Result<(), ViewerError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The repository's JetBrains Mono under `family` (the same length as its own name).
+    fn font_named(family: &str) -> Vec<u8> {
+        const ORIGINAL: &str = "JetBrains Mono";
+        assert_eq!(family.len(), ORIGINAL.len());
+        let mut data = std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts/JetBrainsMono-Regular.ttf")).unwrap();
+        let utf16 = |s: &str| s.encode_utf16().flat_map(u16::to_be_bytes).collect::<Vec<u8>>();
+        for (from, to) in [(utf16(ORIGINAL), utf16(family)), (ORIGINAL.as_bytes().to_vec(), family.as_bytes().to_vec())] {
+            let mut i = 0;
+            while let Some(at) = data[i..].windows(from.len()).position(|w| w == from) {
+                data[i + at..i + at + to.len()].copy_from_slice(&to);
+                i += at + to.len();
+            }
+        }
+        data
+    }
+
+    #[test]
+    fn an_embedded_font_that_adds_no_face_leaves_its_room_to_the_next() {
+        // The budget has room for one file. The document's first file is a font the host
+        // installed already, so it adds no face and keeps nothing: the second, new, still fits.
+        let db = wordcraft_fonts::FontDb::with_font_dirs(vec![]);
+        let (hosted, own) = (font_named("JetBrains Hst1"), font_named("JetBrains Own2"));
+        assert_eq!(hosted.len(), own.len());
+        assert!(db.add_document_fonts(vec![(hosted.clone(), "JetBrains Hst1".into())]) > 0);
+        let mut used = 0;
+        let faces = admit_embedded_fonts(&db, vec![(hosted, "JetBrains Hst1".into()), (own.clone(), "JetBrains Own2".into())], &mut used, own.len());
+        assert_eq!(faces.len(), 1, "the second file's face is added");
+        assert_eq!(used, own.len(), "only the bytes kept are charged");
+        assert_eq!(db.styles("JetBrains Own2"), ["Regular"]);
+        // Spent: a further new file is left out.
+        let more = admit_embedded_fonts(&db, vec![(font_named("JetBrains Mor3"), "JetBrains Mor3".into())], &mut used, own.len());
+        assert!(more.is_empty());
+        assert_eq!(used, own.len());
+    }
 
     #[test]
     fn font_budget_bounds_count_and_bytes() {

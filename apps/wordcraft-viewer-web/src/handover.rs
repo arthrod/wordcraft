@@ -217,6 +217,12 @@ impl Handover {
         self.doc == Doc::Open
     }
 
+    /// Whether a document is in play: being fetched or opened, open, or waiting for its
+    /// password. A host's `open()` refused before it reaches the worker then changes nothing.
+    pub fn holds_document(&self) -> bool {
+        self.doc != Doc::Absent
+    }
+
     /// The viewer is still getting its document: nothing is handed to the editor yet.
     fn locked(&self) -> bool {
         matches!(self.doc, Doc::Opening | Doc::Password)

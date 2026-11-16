@@ -39,8 +39,27 @@ import { brotliCompressSync, constants, gzipSync } from "node:zlib";
 import puppeteer from "puppeteer-core";
 import { findChrome, startServer } from "./drive.mjs";
 
-const args = {};
-for (let i = 2; i < process.argv.length; i += 2) args[process.argv[i].slice(2)] = process.argv[i + 1];
+const USAGE = "usage: node viewer.mjs --dist <dir> [--core <dir>] [--font <file.ttf>] [--out <file.json>]";
+// Strict: a misspelt option or one without its value is an error (exit 2), not a run against
+// the defaults that looks like a pass.
+function parseArgs(argv) {
+  const parsed = {};
+  for (let i = 0; i < argv.length; i += 2) {
+    const name = argv[i].startsWith("--") ? argv[i].slice(2) : "";
+    const value = argv[i + 1];
+    let why = null;
+    if (!["dist", "core", "font", "out"].includes(name)) why = `unknown argument ${JSON.stringify(argv[i])}`;
+    else if (value === undefined || value.startsWith("--")) why = `--${name} needs a value`;
+    else if (name in parsed) why = `--${name} given twice`;
+    if (why) {
+      console.error(`viewer.mjs: ${why}\n${USAGE}`);
+      process.exit(2);
+    }
+    parsed[name] = value;
+  }
+  return parsed;
+}
+const args = parseArgs(process.argv.slice(2));
 const dist = resolve(args.dist ?? "../../../dist/web");
 // The editor's files: its glue, loader and module, and its wasm-bindgen snippets (eframe's).
 const EDITOR = /\/wordcraft-web(_bg\.wasm|\.js|_loader\.js)$|\/snippets\/eframe-/;
@@ -273,9 +292,16 @@ try {
   printSizes("AC4 first load", report.firstLoad);
 
   // ---- AC3: the edit action ----
+  // The editor's wasm is held until the viewer has been seen in place, so what is checked is
+  // the state while the editor loads, not whichever state a quick or slow machine reaches first.
+  await first.page.setRequestInterception(true);
+  const heldEditor = [];
+  first.page.on("request", (r) => (/\/wordcraft-web_bg\.wasm$/.test(new URL(r.url()).pathname) ? heldEditor.push(r) : r.continue()));
   await first.page.click("#wordcraft_viewer_edit");
+  for (let waited = 0; heldEditor.length === 0 && waited < 60000; waited += 50) await new Promise((r) => setTimeout(r, 50));
   const loadingSeen = await first.page.evaluate(() => [document.documentElement.getAttribute("data-wordcraft-phase"), !!document.querySelector("#wordcraft_viewer canvas[data-scale]")]);
-  check("AC3 viewer stays while the editor loads", loadingSeen[0] !== "editing" && loadingSeen[1], JSON.stringify(loadingSeen));
+  check("AC3 viewer stays while the editor loads", heldEditor.length > 0 && loadingSeen[0] === "loading-editor" && loadingSeen[1], JSON.stringify({ held: heldEditor.length, loadingSeen }));
+  for (const r of heldEditor.splice(0)) await r.continue();
   await waitAttr(first.page, "data-wordcraft-phase", "editing");
   await idle(first.page);
   const editStep = first.log.requests.slice(firstLoad.length);
@@ -421,6 +447,61 @@ try {
     await big.page.close();
   }
 
+  // ---- a body with no Content-Length: read a chunk at a time, and stopped past the limit ----
+  {
+    const LIMIT = 64 * 1024 * 1024;
+    // Chunked, no Content-Length, 256 MiB if the page keeps reading. Each chunk waits for the
+    // socket to take the last one, so `sent` is what the page let the server send.
+    let sent = 0;
+    let endlessDone;
+    const endlessOver = new Promise((r) => (endlessDone = r));
+    fixtures.set("/__fixture/endless.docx", async (res) => {
+      let closed = false;
+      res.on("close", () => (closed = true));
+      res.writeHead(200, { "Content-Type": "application/octet-stream" });
+      const chunk = Buffer.alloc(1024 * 1024, 0x50);
+      while (!closed && sent < 256 * 1024 * 1024) {
+        sent += chunk.length;
+        if (!res.write(chunk)) await new Promise((r) => (res.once("drain", r), res.once("close", r)));
+      }
+      if (!closed) res.end();
+      endlessDone();
+    });
+    const endless = await open(browser, base, "/?doc=/__fixture/endless.docx");
+    await waitAttr(endless.page, "data-wordcraft-error", "document-failed", 120000).catch(() => {});
+    await Promise.race([endlessOver, new Promise((r) => setTimeout(r, 10000))]);
+    const over = await endless.page.evaluate(() => ({
+      error: document.documentElement.getAttribute("data-wordcraft-error"),
+      notice: document.querySelector("#wordcraft_viewer_notice")?.hidden === false ? document.querySelector("#wordcraft_viewer_notice").innerText : null,
+    }));
+    const sentMiB = Math.round(sent / 1024 / 1024);
+    check("a chunked body past the limit with no Content-Length: refused as too large", over.error === "document-failed" && /too large/i.test(over.notice ?? ""), JSON.stringify(over));
+    check("a chunked body past the limit with no Content-Length: the read stopped early", sent < LIMIT + 32 * 1024 * 1024, `the server sent ${sentMiB} MiB of 256`);
+    check("a chunked body past the limit: no uncaught errors", endless.log.uncaught.length === 0, endless.log.uncaught.join(" | "));
+    await endless.page.close();
+
+    // Under the limit, chunked the same way with no Content-Length: read whole and shown.
+    const sample = readFileSync(join(dist, "samples/welcome.docx"));
+    fixtures.set("/__fixture/chunked.docx", async (res) => {
+      res.writeHead(200, { "Content-Type": "application/octet-stream" });
+      for (let at = 0; at < sample.length; at += 4096) {
+        res.write(sample.subarray(at, at + 4096));
+        await new Promise((r) => setTimeout(r, 2));
+      }
+      res.end();
+    });
+    const chunked = await open(browser, base, "/?doc=/__fixture/chunked.docx");
+    await chunked.page.waitForFunction(() => document.querySelector("#wordcraft_viewer canvas[data-scale]") || document.documentElement.hasAttribute("data-wordcraft-error"), { timeout: 30000 }).catch(() => {});
+    const under = await chunked.page.evaluate(() => ({
+      error: document.documentElement.getAttribute("data-wordcraft-error"),
+      painted: document.querySelectorAll("#wordcraft_viewer canvas[data-scale]").length,
+      pages: window.wordcraftViewer?.pageCount?.() ?? 0,
+    }));
+    check("a chunked body under the limit with no Content-Length: opened and shown", under.error === null && under.painted > 0 && under.pages > 0, JSON.stringify(under));
+    check("a chunked body under the limit: no uncaught errors", chunked.log.uncaught.length === 0, chunked.log.uncaught.join(" | "));
+    await chunked.page.close();
+  }
+
   // ---- the viewer fails for good: the editor is still offered and fetches the document ----
   {
     const editVisible = (p) => p.evaluate(() => (document.querySelector("#wordcraft_viewer_edit")?.getClientRects().length ?? 0) > 0);
@@ -489,6 +570,93 @@ try {
       }, locked);
       check("open() while the editor takes over is refused", during.startsWith("rejected:"), during);
       await busy.page.close();
+      // An empty open() right behind a protected one: only the empty one is refused. The
+      // protected one still asks for its password, and editing stays locked meanwhile.
+      const behind = await open(browser, base, "/");
+      await waitAttr(behind.page, "data-wordcraft-painted", "true");
+      const start = behind.log.requests.length;
+      const answers = await behind.page.evaluate(async (bytes) => {
+        const viewer = window.wordcraftViewer;
+        const first = viewer.open(new Uint8Array(bytes)).then(() => "resolved", (e) => `rejected: ${e.message}`);
+        const empty = await viewer.open(new Uint8Array(0)).then(() => "resolved", (e) => `rejected: ${e.message}`);
+        viewer.edit();
+        return { empty, first: await first };
+      }, locked);
+      await behind.page.waitForFunction(() => (document.querySelector("#wordcraft_viewer_password")?.getClientRects().length ?? 0) > 0, { timeout: 20000 }).catch(() => {});
+      await new Promise((r) => setTimeout(r, 1000));
+      const after = {
+        ...answers,
+        phase: await attr(behind.page, "data-wordcraft-phase"),
+        error: await attr(behind.page, "data-wordcraft-error"),
+        form: await behind.page.evaluate(() => (document.querySelector("#wordcraft_viewer_password")?.getClientRects().length ?? 0) > 0),
+        editor: behind.log.requests.slice(start).some((p) => EDITOR.test(p)),
+      };
+      check(
+        "password: an empty open() behind a protected one is refused alone, and no editor is handed the protected bytes",
+        /empty/i.test(after.empty) && /password|protected/i.test(after.first) && after.phase === "viewing" && after.error === "password-required" && after.form && !after.editor,
+        JSON.stringify(after),
+      );
+      await behind.page.close();
+      // A protected replacement asks for its password; an unreadable one replaces it before
+      // the reader answers; the worker refuses that and the document shown before comes back.
+      // The page then shows that document only: no password form, no notice about the
+      // protected one, and the old form sends nothing for the restored document.
+      const back = await open(browser, base, "/", { hooks: true });
+      await waitAttr(back.page, "data-wordcraft-painted", "true");
+      const asked = await back.page.evaluate((bytes) => window.wordcraftViewer.open(new Uint8Array(bytes)).then(() => "resolved", (e) => `rejected: ${e.message}`), locked);
+      await back.page.waitForFunction(() => (document.querySelector("#wordcraft_viewer_password")?.getClientRects().length ?? 0) > 0, { timeout: 20000 }).catch(() => {});
+      await back.page.evaluate(() => {
+        document.querySelector("#wordcraft_viewer_password_input").value = "stale";
+      });
+      const unread = await back.page.evaluate(() =>
+        window.wordcraftViewer.open(new TextEncoder().encode("this is not a Word document")).then(() => "resolved", (e) => `rejected: ${e.message}`),
+      );
+      await back.page.waitForFunction(() => document.querySelectorAll("#wordcraft_viewer canvas[data-scale]").length > 0, { timeout: 20000 }).catch(() => {});
+      const restored = await back.page.evaluate(() => ({
+        form: (document.querySelector("#wordcraft_viewer_password")?.getClientRects().length ?? 0) > 0,
+        notice: document.querySelector("#wordcraft_viewer_notice")?.hidden === false ? document.querySelector("#wordcraft_viewer_notice").innerText : null,
+        error: document.documentElement.getAttribute("data-wordcraft-error"),
+        painted: document.querySelectorAll("#wordcraft_viewer canvas[data-scale]").length,
+        posted: window.__posted.length,
+      }));
+      check(
+        "password then unreadable replacement: the restored document shows without the password form or its notice",
+        /password|protected/i.test(asked) && unread.startsWith("rejected:") && !restored.form && restored.error === null && restored.painted > 0 && !/password|protected/i.test(restored.notice ?? ""),
+        JSON.stringify({ asked, unread, ...restored }),
+      );
+      // The reader presses Enter in the form they had: nothing is sent to the worker.
+      await back.page.evaluate(() => document.querySelector("#wordcraft_viewer_password").requestSubmit());
+      await new Promise((r) => setTimeout(r, 1500));
+      const stale = await back.page.evaluate(() => ({
+        posted: window.__posted.length,
+        error: document.documentElement.getAttribute("data-wordcraft-error"),
+        edit: (document.querySelector("#wordcraft_viewer_edit")?.getClientRects().length ?? 0) > 0,
+      }));
+      check("password then unreadable replacement: the old form sends nothing for the restored document", stale.posted === restored.posted && stale.error === null && stale.edit, JSON.stringify({ before: restored.posted, ...stale }));
+      check("password then unreadable replacement: no uncaught errors", back.log.uncaught.length === 0, back.log.uncaught.join(" | "));
+      await back.page.close();
+      // The password form is up when an empty open() is refused: that call rejects saying
+      // why, and the page goes on stating the protected document's own state (its notice,
+      // its error flag, its form).
+      const asking = await open(browser, base, "/");
+      await waitAttr(asking.page, "data-wordcraft-painted", "true");
+      await asking.page.evaluate((bytes) => window.wordcraftViewer.open(new Uint8Array(bytes)).catch(() => {}), locked);
+      await asking.page.waitForFunction(() => (document.querySelector("#wordcraft_viewer_password")?.getClientRects().length ?? 0) > 0, { timeout: 20000 }).catch(() => {});
+      const emptied = await asking.page.evaluate(async () => {
+        const got = await window.wordcraftViewer.open(new Uint8Array(0)).then(() => "resolved", (e) => `rejected: ${e.message}`);
+        return {
+          got,
+          notice: document.querySelector("#wordcraft_viewer_notice")?.hidden === false ? document.querySelector("#wordcraft_viewer_notice").innerText : null,
+          error: document.documentElement.getAttribute("data-wordcraft-error"),
+          form: (document.querySelector("#wordcraft_viewer_password")?.getClientRects().length ?? 0) > 0,
+        };
+      });
+      check(
+        "password asked, then an empty open(): rejected saying so, the protected document's notice and flag unchanged",
+        /empty/i.test(emptied.got) && /protected|password/i.test(emptied.notice ?? "") && !/empty/i.test(emptied.notice ?? "") && emptied.error === "password-required" && emptied.form,
+        JSON.stringify(emptied),
+      );
+      await asking.page.close();
     }
 
     const prot = await open(browser, base, "/");
@@ -602,7 +770,113 @@ try {
       check("font then open: the page shows the new document", after.count === got.opened && after.pages === got.opened, detail);
       check("font then open: no uncaught errors", race.log.uncaught.length === 0, race.log.uncaught.join(" | "));
       await race.page.close();
+
+      // installFont() still waiting on the worker when the editor takes over: the viewer's worker
+      // is stopped, and the promise settles (rejects) instead of waiting for ever.
+      const handed = await open(browser, base, "/", { hooks: true });
+      await waitAttr(handed.page, "data-wordcraft-painted", "true");
+      await handed.page.evaluate(async () => {
+        const font = new Uint8Array(await (await fetch("/__fixture/font.ttf")).arrayBuffer());
+        window.__hold = true; // the worker's answer to installFont never arrives
+        window.__installed = window.wordcraftViewer.installFont("Fixture Font", font).then(() => "resolved", (e) => `rejected: ${e.message}`);
+      });
+      await handed.page.click("#wordcraft_viewer_edit");
+      await waitAttr(handed.page, "data-wordcraft-phase", "editing", 120000).catch(() => {});
+      const settled = await handed.page.evaluate(() => Promise.race([window.__installed, new Promise((r) => setTimeout(() => r("pending"), 3000))]));
+      check("installFont() pending when the editor takes over: it rejects, not waits for ever", (await attr(handed.page, "data-wordcraft-phase")) === "editing" && settled.startsWith("rejected:"), settled);
+      check("installFont() pending at the hand-over: no uncaught errors", handed.log.uncaught.length === 0, handed.log.uncaught.join(" | "));
+      await handed.page.close();
     }
+  }
+
+  // ---- a document address that redirects: same-origin hops are followed, another site's never ----
+  // Served without the deployed policy, whose `connect-src 'self'` would stop the cross-site hop
+  // by itself: a host page without it must still never fetch from another site. The other site
+  // is a second server (another port is another origin) that would serve the sample to anyone.
+  {
+    const sample = readFileSync(join(dist, "samples/welcome.docx"));
+    const away = await startServer(dist, dist);
+    let awayHits = 0;
+    away.server.removeAllListeners("request");
+    away.server.on("request", (req, res) => {
+      awayHits++;
+      res.writeHead(200, { "Content-Type": "application/octet-stream", "Access-Control-Allow-Origin": "*" }).end(sample);
+    });
+    const plain = await startServer(dist, dist);
+    const [serveStatic] = plain.server.listeners("request");
+    plain.server.removeAllListeners("request");
+    plain.server.on("request", (req, res) => {
+      const path = new URL(req.url ?? "/", "http://localhost").pathname;
+      if (path === "/__fixture/away.docx") res.writeHead(302, { Location: `http://127.0.0.1:${away.port}/welcome.docx` }).end();
+      else if (path === "/__fixture/moved.docx") res.writeHead(302, { Location: "/samples/welcome.docx" }).end();
+      else serveStatic(req, res);
+    });
+    try {
+      const plainBase = `http://127.0.0.1:${plain.port}`;
+      const moved = await open(browser, plainBase, "/?doc=__fixture/moved.docx");
+      await moved.page.waitForFunction(() => document.querySelector("#wordcraft_viewer canvas[data-scale]") || document.documentElement.hasAttribute("data-wordcraft-error"), { timeout: 30000 }).catch(() => {});
+      check("a same-origin redirect is followed and its document shown", (await attr(moved.page, "data-wordcraft-error")) === null && (await moved.page.evaluate(() => document.querySelectorAll("#wordcraft_viewer canvas[data-scale]").length)) > 0);
+      await moved.page.close();
+      const off = await open(browser, plainBase, "/?doc=__fixture/away.docx");
+      await off.page.waitForFunction(() => document.querySelector("#wordcraft_viewer canvas[data-scale]") || document.documentElement.hasAttribute("data-wordcraft-error"), { timeout: 30000 }).catch(() => {});
+      const state = {
+        error: await attr(off.page, "data-wordcraft-error"),
+        painted: await off.page.evaluate(() => document.querySelectorAll("#wordcraft_viewer canvas[data-scale]").length),
+        awayHits,
+      };
+      check("a redirect to another site is not followed: nothing is fetched from it and nothing is shown", state.error === "document-failed" && state.painted === 0 && awayHits === 0, JSON.stringify(state));
+      check("a redirect to another site: no uncaught errors", off.log.uncaught.length === 0, off.log.uncaught.join(" | "));
+      await off.page.close();
+    } finally {
+      plain.server.close();
+      away.server.close();
+    }
+  }
+
+  // ---- a replacement the worker cannot read: the document shown stays, and Edit hands it over ----
+  {
+    const kept = await open(browser, base, "/");
+    await waitAttr(kept.page, "data-wordcraft-painted", "true");
+    const shown = await kept.page.evaluate(() => window.wordcraftViewer.pageCount());
+    const refusedOpen = await kept.page.evaluate(() =>
+      window.wordcraftViewer.open(new TextEncoder().encode("this is not a Word document")).then(() => "resolved", (e) => `rejected: ${e.message}`),
+    );
+    await kept.page.waitForFunction(() => document.querySelectorAll("#wordcraft_viewer canvas[data-scale]").length > 0, { timeout: 20000 }).catch(() => {});
+    const state = {
+      refusedOpen,
+      error: await attr(kept.page, "data-wordcraft-error"),
+      painted: await kept.page.evaluate(() => document.querySelectorAll("#wordcraft_viewer canvas[data-scale]").length),
+      pages: await kept.page.evaluate(() => window.wordcraftViewer.pageCount()),
+      edit: await kept.page.evaluate(() => (document.querySelector("#wordcraft_viewer_edit")?.getClientRects().length ?? 0) > 0),
+    };
+    check("unreadable replacement: open() rejects, the shown document stays painted, unflagged, with Edit", refusedOpen.startsWith("rejected:") && state.error === null && state.painted > 0 && state.pages === shown && state.edit, JSON.stringify(state));
+    await kept.page.click("#wordcraft_viewer_edit");
+    await waitAttr(kept.page, "data-wordcraft-phase", "editing", 120000).catch(() => {});
+    const handed = await kept.page.evaluate(() => Promise.resolve(window.wordcraft?.getMarkdown?.()).catch(() => null));
+    check("unreadable replacement: Edit hands the editor the document shown", typeof handed === "string" && handed.includes(SAMPLE_TEXT), `${await attr(kept.page, "data-wordcraft-phase")} ${JSON.stringify(String(handed).slice(0, 60))}`);
+    check("unreadable replacement: no uncaught errors", kept.log.uncaught.length === 0, kept.log.uncaught.join(" | "));
+    await kept.page.close();
+  }
+
+  // ---- the host's buffer after open(): changed or transferred, the editor still gets the
+  // document the reader sees ----
+  for (const what of ["changed", "transferred"]) {
+    const kept = await open(browser, base, "/");
+    await waitAttr(kept.page, "data-wordcraft-painted", "true");
+    const opened = await kept.page.evaluate(async (what) => {
+      const bytes = new Uint8Array(await (await fetch("samples/welcome.docx")).arrayBuffer());
+      const got = await window.wordcraftViewer.open(bytes).then((a) => a.pageCount, (e) => `rejected: ${e.message}`);
+      if (what === "changed") bytes.fill(0);
+      else structuredClone(bytes.buffer, { transfer: [bytes.buffer] });
+      return { got, left: bytes.length };
+    }, what);
+    await kept.page.click("#wordcraft_viewer_edit");
+    await waitAttr(kept.page, "data-wordcraft-phase", "editing", 120000).catch(() => {});
+    const handed = await kept.page.evaluate(() => Promise.resolve(window.wordcraft?.getMarkdown?.()).catch(() => null));
+    const state = { opened, phase: await attr(kept.page, "data-wordcraft-phase"), notice: await attr(kept.page, "data-wordcraft-notice") };
+    check(`host buffer ${what} after open(): the editor gets the document the viewer showed`, typeof handed === "string" && handed.includes(SAMPLE_TEXT), JSON.stringify(state));
+    check(`host buffer ${what} after open(): no uncaught errors`, kept.log.uncaught.length === 0, kept.log.uncaught.join(" | "));
+    await kept.page.close();
   }
 
   // ---- open() against the startup download, another open(), and the worker's replies ----
@@ -682,6 +956,30 @@ try {
       /^rejected: .*too large/i.test(tooBig.got) && tooBig.error === null && tooBig.status === tooBig.before && tooBig.status.length > 0 && tooBig.count === 6 && tooBig.edit && /too large/i.test(tooBig.notice ?? ""),
       JSON.stringify(tooBig),
     );
+    // And the page never copies bytes it is going to refuse for their size: the limit bounds
+    // what the page allocates, so the length is judged before any copy (a Uint8Array and an
+    // ArrayBuffer alike).
+    const uncopied = await slow.page.evaluate(async () => {
+      const LIMIT = 64 * 1024 * 1024;
+      const real = Uint8Array.prototype.slice;
+      let copied = 0;
+      Uint8Array.prototype.slice = function (...a) {
+        if (this.length > LIMIT) copied += this.length;
+        return real.apply(this, a);
+      };
+      try {
+        const view = await window.wordcraftViewer.open(new Uint8Array(LIMIT + 1)).then(() => "resolved", (e) => `rejected: ${e.message}`);
+        const buffer = await window.wordcraftViewer.open(new ArrayBuffer(LIMIT + 1)).then(() => "resolved", (e) => `rejected: ${e.message}`);
+        return { view, buffer, copied };
+      } finally {
+        Uint8Array.prototype.slice = real;
+      }
+    });
+    check(
+      "open() of a document too large: refused without copying the host's bytes",
+      /too large/i.test(uncopied.view) && /too large/i.test(uncopied.buffer) && uncopied.copied === 0,
+      JSON.stringify(uncopied),
+    );
     check("open() races: no uncaught errors", slow.log.uncaught.length === 0, slow.log.uncaught.join(" | "));
     await slow.page.close();
 
@@ -754,6 +1052,63 @@ try {
     check("start() then open() in one task: the host's document is opened once", once.opened === 6 && once.count === 6 && once.viewOpens === 1, JSON.stringify(once));
     check("start() then open() in one task: no uncaught errors", sameTask.log.uncaught.length === 0, sameTask.log.uncaught.join(" | "));
     await sameTask.page.close();
+
+    // start({document}) then open() of another: the page's copy of the startup document is let
+    // go once the other one is shown (only the document in play is kept). The copy is the
+    // `slice` start() makes of the host's bytes, watched through a WeakRef after a collection.
+    const replaced = await open(browser, base, "/", {
+      hooks: true,
+      init: [
+        (doc) => {
+          const real = Uint8Array.prototype.slice;
+          Uint8Array.prototype.slice = function (...a) {
+            const copy = real.apply(this, a);
+            if (window.__starting && !window.__startCopy && copy.length === doc.length) window.__startCopy = new WeakRef(copy);
+            return copy;
+          };
+          addEventListener("TrunkApplicationStarted", () => {
+            window.__starting = true;
+            window.wasmBindings.start({ document: new Uint8Array(doc), installGlobal: true });
+            window.__starting = false;
+          });
+        },
+        six,
+      ],
+    });
+    await replaced.page.waitForFunction(() => window.wordcraftViewer && document.querySelectorAll("#wordcraft_viewer canvas[data-scale]").length > 0, { timeout: 30000 }).catch(() => {});
+    const swapped = await replaced.page.evaluate((doc) => window.wordcraftViewer.open(new Uint8Array(doc)).then((a) => a.pageCount, (e) => `rejected: ${e.message}`), long);
+    await new Promise((r) => setTimeout(r, 1500));
+    const cdp = await replaced.page.createCDPSession();
+    await cdp.send("HeapProfiler.collectGarbage");
+    await cdp.send("HeapProfiler.collectGarbage");
+    const startCopy = await replaced.page.evaluate(() => (window.__startCopy ? (window.__startCopy.deref() ? "kept" : "released") : "never made"));
+    check("start({document}) then open() of another: the startup copy is let go", swapped === 41 && startCopy === "released", JSON.stringify({ swapped, startCopy }));
+    check("start({document}) then open() of another: no uncaught errors", replaced.log.uncaught.length === 0, replaced.log.uncaught.join(" | "));
+    await replaced.page.close();
+
+    // A startup document past the size limit: refused for its size, and not copied first.
+    const bigStart = await open(browser, base, "/", {
+      init: [
+        () => {
+          const LIMIT = 64 * 1024 * 1024;
+          const real = Uint8Array.prototype.slice;
+          window.__copied = 0;
+          Uint8Array.prototype.slice = function (...a) {
+            if (this.length > LIMIT) window.__copied += this.length;
+            return real.apply(this, a);
+          };
+          addEventListener("TrunkApplicationStarted", () => window.wasmBindings.start({ document: new Uint8Array(LIMIT + 1), installGlobal: true }));
+        },
+      ],
+    });
+    await bigStart.page.waitForFunction(() => document.documentElement.hasAttribute("data-wordcraft-error"), { timeout: 30000 }).catch(() => {});
+    const bigState = await bigStart.page.evaluate(() => ({
+      error: document.documentElement.getAttribute("data-wordcraft-error"),
+      notice: document.querySelector("#wordcraft_viewer_notice")?.hidden === false ? document.querySelector("#wordcraft_viewer_notice").innerText : null,
+      copied: window.__copied,
+    }));
+    check("start({document}) too large: refused for its size without copying the host's bytes", bigState.error === "document-failed" && /too large/i.test(bigState.notice ?? "") && bigState.copied === 0, JSON.stringify(bigState));
+    await bigStart.page.close();
 
     // A page whose canvas cannot be made is not asked of the worker in a loop.
     const noCanvas = await open(browser, base, "/", {

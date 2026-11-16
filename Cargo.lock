@@ -7613,6 +7613,7 @@ dependencies = [
  "web-sys",
  "wordcraft-doc",
  "wordcraft-docx",
+ "wordcraft-engine",
  "wordcraft-fonts",
  "wordcraft-layout",
  "wordcraft-pdf",
@@ -7645,6 +7646,7 @@ dependencies = [
 name = "wordcraft-worker-viewer"
 version = "0.18.1"
 dependencies = [
+ "craft-zip",
  "getrandom 0.3.4",
  "js-sys",
  "serde_json",
@@ -7652,6 +7654,7 @@ dependencies = [
  "web-sys",
  "wordcraft-doc",
  "wordcraft-docx",
+ "wordcraft-fonts",
  "wordcraft-viewer",
  "wordcraft-worker-proto",
 ]

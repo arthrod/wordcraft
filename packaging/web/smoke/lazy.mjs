@@ -142,12 +142,11 @@ async function drop(page, name, bytes) {
 const download = (page, suffix) =>
   until(`a download ending ${suffix}`, () => page.evaluate((s) => globalThis.__DOWNLOADS.find((d) => d.name.endsWith(s)) ?? null, suffix));
 
-function sizes(siteDir, log) {
+function sizes(log) {
   return log
-    .filter((r) => r.status === 200)
+    .filter((r) => r.status === 200 && r.served)
     .map((r) => {
-      const file = join(siteDir, r.path);
-      const raw = existsSync(file) && statSync(file).isFile() ? readFileSync(file) : Buffer.alloc(0);
+      const raw = existsSync(r.served) && statSync(r.served).isFile() ? readFileSync(r.served) : Buffer.alloc(0);
       return { path: r.path, raw: raw.length, gzip: gzipSync(raw, { level: 9 }).length };
     });
 }
@@ -171,7 +170,7 @@ const flows = {
       try {
         await sleep(8_000);
         const workers = s.asked("wordcraft-worker-");
-        const list = sizes(siteDir, s.log);
+        const list = sizes(s.log);
         out.pages[query || "(blank)"] = {
           workerRequests: workers,
           requests: list,

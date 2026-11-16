@@ -71,11 +71,21 @@ impl ViewerWorker {
     }
 
     /// `viewOpen`: read the package and lay it out. The document held before stays in place
-    /// when the new one can't be opened.
+    /// when the new one can't be opened; when it can, the fonts the one before embedded go with
+    /// it.
     fn open(&mut self, payload: &[u8]) -> Outcome {
+        self.open_answering(payload, opened_reply)
+    }
+
+    /// [`ViewerWorker::open`], with the reply made by `answer`. Whatever fails before the new
+    /// document takes the old one's place, the open or the reply, leaves the fonts as they were
+    /// (the [`wordcraft_viewer::Replacement`] is dropped unkept).
+    fn open_answering(&mut self, payload: &[u8], answer: impl FnOnce(&Session) -> Outcome) -> Outcome {
         let req = proto::decode_view_open_request(payload).map_err(proto_error)?;
-        let session = wordcraft_viewer::open(&req.docx, req.password.as_deref()).map_err(viewer_error)?;
-        let opened = opened_reply(&session)?;
+        let mut replacing = wordcraft_viewer::Replacement::begin(self.session.as_ref());
+        let session = replacing.open(&req.docx, req.password.as_deref()).map_err(viewer_error)?;
+        let opened = answer(&session)?;
+        replacing.keep();
         self.session = Some(session);
         Ok(opened)
     }
@@ -217,9 +227,9 @@ fn serve() {
 /// array, a non-string header, a payload that is not bytes) must never throw out of
 /// `onmessage` and go unanswered.
 ///
-/// The payload is copied only after its length is checked against the request kind's
-/// [`proto::request_payload_limit`]: an oversized one comes back as `Some((env, got, limit))`
-/// with no copy, and `serve` answers `TooLarge`.
+/// The payload is copied, once, into this module only after its length is checked against the
+/// request kind's [`proto::request_payload_limit`]: an oversized one comes back as
+/// `Some((env, got, limit))` with no copy, and `serve` answers `TooLarge`.
 #[cfg(target_arch = "wasm32")]
 fn unpack(data: &wasm_bindgen::JsValue) -> (Vec<u8>, Vec<u8>, Option<(Envelope, usize, usize)>) {
     use wasm_bindgen::JsCast as _;
@@ -236,11 +246,14 @@ fn unpack(data: &wasm_bindgen::JsValue) -> (Vec<u8>, Vec<u8>, Option<(Envelope, 
         _ => String::new(),
     };
     let header = if header_str.len() > proto::MAX_PAYLOAD_BYTES { Vec::new() } else { header_str.into_bytes() };
-    let payload = arr.get(1);
-    if !payload.is_instance_of::<js_sys::ArrayBuffer>() && !payload.is_instance_of::<js_sys::Uint8Array>() {
-        return (header, Vec::new(), None);
-    }
-    let view = js_sys::Uint8Array::new(&payload);
+    // A `Uint8Array` (what the page posts) is used as it is: `new Uint8Array(typedArray)` would
+    // copy every byte (ECMA-262 InitializeTypedArrayFromTypedArray clones the buffer), before the
+    // length check. An `ArrayBuffer` gets a view, which copies nothing.
+    let view = match arr.get(1).dyn_into::<js_sys::Uint8Array>() {
+        Ok(view) => view,
+        Err(other) if other.is_instance_of::<js_sys::ArrayBuffer>() => js_sys::Uint8Array::new(&other),
+        Err(_) => return (header, Vec::new(), None),
+    };
     let got = view.length() as usize;
     let Some(env) = proto::decode_envelope(&header).ok().filter(|e| e.kind.is_request()) else {
         return (header, Vec::new(), None);
@@ -357,6 +370,246 @@ mod tests {
         let (env, payload) = open(&mut worker, b"not a package", None, 4);
         assert_eq!(error_code(&env, &payload), ErrorCode::Unreadable);
         assert_eq!(render(&mut worker, 0, 1.0, 5).0.kind, Kind::ViewPage);
+    }
+
+    /// The repository's JetBrains Mono under `family` (the same length as its own name), so the
+    /// family is one no system and no other test has.
+    fn font_named(family: &str) -> Vec<u8> {
+        const ORIGINAL: &str = "JetBrains Mono";
+        assert_eq!(family.len(), ORIGINAL.len());
+        let mut data = std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts/JetBrainsMono-Regular.ttf")).unwrap();
+        let utf16 = |s: &str| s.encode_utf16().flat_map(u16::to_be_bytes).collect::<Vec<u8>>();
+        for (from, to) in [(utf16(ORIGINAL), utf16(family)), (ORIGINAL.as_bytes().to_vec(), family.as_bytes().to_vec())] {
+            let mut i = 0;
+            while let Some(at) = data[i..].windows(from.len()).position(|w| w == from) {
+                data[i + at..i + at + to.len()].copy_from_slice(&to);
+                i += at + to.len();
+            }
+        }
+        data
+    }
+
+    /// A `.docx` whose text is set in `family`, embedding `font` for it (a plain `.ttf`, the
+    /// all-zero key) or not.
+    fn docx_in(family: &str, font: Option<&[u8]>) -> Vec<u8> {
+        const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+        const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        const PR: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
+        let rels = |items: &[(&str, &str)]| {
+            let list: String = items.iter().map(|(t, g)| format!(r#"<Relationship Id="rId{t}" Type="{R}/{t}" Target="{g}"/>"#)).collect();
+            format!(r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="{PR}">{list}</Relationships>"#)
+        };
+        let mut files: Vec<(String, Vec<u8>)> = vec![
+            (
+                "[Content_Types].xml".into(),
+                br#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="ttf" ContentType="application/x-font-ttf"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/fontTable.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"/></Types>"#.to_vec(),
+            ),
+            ("_rels/.rels".into(), rels(&[("officeDocument", "word/document.xml")]).into_bytes()),
+            ("word/_rels/document.xml.rels".into(), rels(&[("fontTable", "fontTable.xml")]).into_bytes()),
+            (
+                "word/document.xml".into(),
+                format!(r#"<w:document xmlns:w="{W}"><w:body><w:p><w:r><w:rPr><w:rFonts w:ascii="{family}" w:hAnsi="{family}"/></w:rPr><w:t>Set in {family}</w:t></w:r></w:p></w:body></w:document>"#).into_bytes(),
+            ),
+        ];
+        let mut table = format!(r#"<w:fonts xmlns:w="{W}" xmlns:r="{R}"><w:font w:name="{family}">"#);
+        if let Some(font) = font {
+            table.push_str(r#"<w:embedRegular r:id="rIdfont" w:fontKey="{00000000-0000-0000-0000-000000000000}" w:subsetted="0"/>"#);
+            files.push(("word/_rels/fontTable.xml.rels".into(), rels(&[("font", "fonts/font1.ttf")]).into_bytes()));
+            files.push(("word/fonts/font1.ttf".into(), font.to_vec()));
+        }
+        table.push_str("</w:font></w:fonts>");
+        files.push(("word/fontTable.xml".into(), table.into_bytes()));
+        let mut zip = craft_zip::Writer::new();
+        for (name, bytes) in files {
+            zip.add(&name, &bytes, craft_zip::Compression::Deflated).unwrap();
+        }
+        zip.finish().unwrap()
+    }
+
+    fn missing(worker: &mut ViewerWorker, id: u32) -> Vec<String> {
+        let (rh, rp) = worker.handle_message(&header(Kind::ViewMissingFonts, id), b"{}");
+        assert_eq!(proto::decode_envelope(&rh).unwrap().kind, Kind::ViewFonts, "{}", String::from_utf8_lossy(&rp));
+        serde_json::from_slice::<proto::ViewFontsReply>(&rp).unwrap().missing
+    }
+
+    #[test]
+    fn a_documents_embedded_fonts_do_not_outlive_it() {
+        const FAMILY: &str = "JetBrains Wkr1";
+        let embedding = docx_in(FAMILY, Some(&font_named(FAMILY)));
+        let naming = docx_in(FAMILY, None);
+        let mut worker = ViewerWorker::new();
+        assert_eq!(open(&mut worker, &embedding, None, 1).0.kind, Kind::ViewOpened);
+        assert_eq!(missing(&mut worker, 2), Vec::<String>::new(), "it embeds the font it uses");
+        // A replacement that cannot be opened leaves the document shown with its fonts.
+        assert_eq!(open(&mut worker, b"not a package", None, 3).0.kind, Kind::Error);
+        assert_eq!(missing(&mut worker, 4), Vec::<String>::new(), "the shown document keeps its font");
+        // The next document only names the family: the first one's font is gone with it.
+        assert_eq!(open(&mut worker, &naming, None, 5).0.kind, Kind::ViewOpened);
+        assert_eq!(missing(&mut worker, 6), vec![FAMILY.to_string()], "another document's embedded font does not answer for this one");
+        // Opened again, the first document brings its font again.
+        assert_eq!(open(&mut worker, &embedding, None, 7).0.kind, Kind::ViewOpened);
+        assert_eq!(missing(&mut worker, 8), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_font_the_host_installs_stays_when_the_document_that_embedded_it_goes() {
+        const FAMILY: &str = "JetBrains Wkr2";
+        let font = font_named(FAMILY);
+        let mut worker = ViewerWorker::new();
+        assert_eq!(open(&mut worker, &docx_in(FAMILY, Some(&font)), None, 1).0.kind, Kind::ViewOpened);
+        // The host installs the same font by that name: already there, so nothing new is added.
+        let payload = proto::encode_view_install_font_request(&proto::ViewInstallFontRequest { name: FAMILY.into(), bytes: font.clone() }).unwrap();
+        let (rh, rp) = worker.handle_message(&header(Kind::ViewInstallFont, 2), &payload);
+        assert_eq!(proto::decode_envelope(&rh).unwrap().kind, Kind::ViewOpened, "{}", String::from_utf8_lossy(&rp));
+        assert_eq!(open(&mut worker, &docx_in(FAMILY, None), None, 3).0.kind, Kind::ViewOpened);
+        assert_eq!(missing(&mut worker, 4), Vec::<String>::new(), "the host's font is still installed");
+    }
+
+    #[test]
+    fn a_document_kept_because_its_replacement_could_not_be_answered_keeps_its_fonts() {
+        const FAMILY: &str = "JetBrains Wkr4";
+        const OTHER: &str = "JetBrains Wkr5";
+        let mut worker = ViewerWorker::new();
+        assert_eq!(open(&mut worker, &docx_in(FAMILY, Some(&font_named(FAMILY))), None, 1).0.kind, Kind::ViewOpened);
+        // The replacement opens, but its reply cannot be made: the worker keeps the first.
+        let payload =
+            proto::encode_view_open_request(&proto::ViewOpenRequest { password: None, docx: docx_in(OTHER, Some(&font_named(OTHER))) }).unwrap();
+        let refused = worker.open_answering(&payload, |_| Err((ErrorCode::Internal, "refused by the test".into())));
+        assert!(refused.is_err());
+        // Laid out again (a font arrives), it is still set in its own font.
+        let payload = proto::encode_view_install_font_request(&proto::ViewInstallFontRequest {
+            name: "JetBrains Wkr6".into(),
+            bytes: font_named("JetBrains Wkr6"),
+        })
+        .unwrap();
+        let (rh, rp) = worker.handle_message(&header(Kind::ViewInstallFont, 2), &payload);
+        assert_eq!(proto::decode_envelope(&rh).unwrap().kind, Kind::ViewOpened, "{}", String::from_utf8_lossy(&rp));
+        assert_eq!(missing(&mut worker, 2), Vec::<String>::new(), "the document kept still has its embedded font");
+        // And the replacement's font did not stay behind it.
+        assert_eq!(open(&mut worker, &docx_in(OTHER, None), None, 3).0.kind, Kind::ViewOpened);
+        assert_eq!(missing(&mut worker, 4), vec![OTHER.to_string()], "the refused replacement's font is gone with it");
+    }
+
+    #[test]
+    fn a_font_the_host_installs_does_not_keep_the_documents_own_faces_of_that_family() {
+        // The document embeds the family's Regular; the host installs its Bold under that name.
+        // Once another document takes its place, the Regular it embedded goes with it: only
+        // the host's Bold is left of the family.
+        const FAMILY: &str = "JetBrains Wkr7";
+        let mut worker = ViewerWorker::new();
+        assert_eq!(open(&mut worker, &docx_in(FAMILY, Some(&font_named(FAMILY))), None, 1).0.kind, Kind::ViewOpened);
+        let bold = std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts/SourceSans3-Bold.ttf")).unwrap();
+        let payload = proto::encode_view_install_font_request(&proto::ViewInstallFontRequest { name: FAMILY.into(), bytes: bold }).unwrap();
+        let (rh, rp) = worker.handle_message(&header(Kind::ViewInstallFont, 2), &payload);
+        assert_eq!(proto::decode_envelope(&rh).unwrap().kind, Kind::ViewOpened, "{}", String::from_utf8_lossy(&rp));
+        assert_eq!(wordcraft_fonts::FontDb::global().styles(FAMILY), ["Regular", "Bold"]);
+        assert_eq!(open(&mut worker, &docx_in(FAMILY, None), None, 3).0.kind, Kind::ViewOpened);
+        assert_eq!(wordcraft_fonts::FontDb::global().styles(FAMILY), ["Bold"], "the document's own face left with it");
+    }
+
+    #[test]
+    fn opening_documents_again_does_not_spend_the_embedded_font_budget() {
+        const FAMILY: &str = "JetBrains Wkr8";
+        const HOSTED: &str = "JetBrains Wkr9";
+        const LAST: &str = "JetBrains WkrA";
+        let font = font_named(FAMILY);
+        // More opens than the budget would take if each paid for the font again.
+        let opens = u32::try_from(wordcraft_viewer::MAX_EMBEDDED_FONT_BYTES / font.len() + 2).unwrap();
+        let mut worker = ViewerWorker::new();
+        let embedding = docx_in(FAMILY, Some(&font));
+        for id in 0..opens {
+            assert_eq!(open(&mut worker, &embedding, None, id).0.kind, Kind::ViewOpened);
+        }
+        assert_eq!(missing(&mut worker, 0), Vec::<String>::new(), "the same document keeps its font however often it is opened");
+        // Documents embedding a font the host installed first: the embedded copy is never
+        // added, so it costs nothing either.
+        let payload =
+            proto::encode_view_install_font_request(&proto::ViewInstallFontRequest { name: HOSTED.into(), bytes: font_named(HOSTED) }).unwrap();
+        let (rh, rp) = worker.handle_message(&header(Kind::ViewInstallFont, 0), &payload);
+        assert_eq!(proto::decode_envelope(&rh).unwrap().kind, Kind::ViewOpened, "{}", String::from_utf8_lossy(&rp));
+        let hosted = docx_in(HOSTED, Some(&font_named(HOSTED)));
+        for id in 0..opens {
+            assert_eq!(open(&mut worker, &hosted, None, id).0.kind, Kind::ViewOpened);
+        }
+        // So a document with a font of its own still gets it.
+        assert_eq!(open(&mut worker, &docx_in(LAST, Some(&font_named(LAST))), None, 0).0.kind, Kind::ViewOpened);
+        assert_eq!(missing(&mut worker, 0), Vec::<String>::new(), "a new document's own font is still loaded");
+    }
+
+    /// `font`'s bytes with four more after them: another file of the same family and style.
+    fn other_bytes(font: &[u8]) -> Vec<u8> {
+        let mut data = font.to_vec();
+        data.extend_from_slice(&[0; 4]);
+        data
+    }
+
+    #[test]
+    fn a_replacement_kept_before_anything_opened_keeps_the_shown_documents_fonts() {
+        const FAMILY: &str = "JetBrains WkrB";
+        let shown = wordcraft_viewer::open(&docx_in(FAMILY, Some(&font_named(FAMILY))), None).unwrap();
+        assert_eq!(wordcraft_fonts::FontDb::global().styles(FAMILY), ["Regular"]);
+        wordcraft_viewer::Replacement::begin(Some(&shown)).keep();
+        assert_eq!(wordcraft_fonts::FontDb::global().styles(FAMILY), ["Regular"], "nothing took its place: its font stays");
+        // Kept after an open that failed: the same.
+        let mut replacing = wordcraft_viewer::Replacement::begin(Some(&shown));
+        assert!(replacing.open(b"not a package", None).is_err());
+        replacing.keep();
+        assert_eq!(wordcraft_fonts::FontDb::global().styles(FAMILY), ["Regular"]);
+        assert_eq!(shown.missing_fonts(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_second_replacement_is_laid_out_with_its_own_fonts_not_the_firsts() {
+        const FAMILY: &str = "JetBrains WkrC";
+        let font = font_named(FAMILY);
+        let mut replacing = wordcraft_viewer::Replacement::begin(None);
+        let first = replacing.open(&docx_in(FAMILY, Some(&font)), None).unwrap();
+        let second = replacing.open(&docx_in(FAMILY, Some(&other_bytes(&font))), None).unwrap();
+        // The second embeds the same family and style in other bytes: its own face is added,
+        // not skipped as the first's, so it is the second's still once the first has gone.
+        assert_eq!(wordcraft_fonts::FontDb::global().styles(FAMILY), ["Regular"]);
+        replacing.keep();
+        drop(first);
+        assert_eq!(wordcraft_fonts::FontDb::global().styles(FAMILY), ["Regular"], "the shown document's own face");
+        assert_eq!(second.missing_fonts(), Vec::<String>::new());
+        // One that cannot be opened after another did leaves the one opened in place.
+        let mut replacing = wordcraft_viewer::Replacement::begin(Some(&second));
+        let third = replacing.open(&docx_in(FAMILY, Some(&font)), None).unwrap();
+        assert!(replacing.open(b"not a package", None).is_err());
+        replacing.keep();
+        drop(second);
+        assert_eq!(wordcraft_fonts::FontDb::global().styles(FAMILY), ["Regular"], "the replacement opened before the failure is kept");
+        assert_eq!(third.missing_fonts(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_documents_fonts_leave_with_the_last_session_showing_it() {
+        // A server opens a document for each request and drops it after the answer, with no
+        // replacement; two requests for the same document may be open at once.
+        const FAMILY: &str = "JetBrains WkrD";
+        let docx = docx_in(FAMILY, Some(&font_named(FAMILY)));
+        let first = wordcraft_viewer::open(&docx, None).unwrap();
+        let second = wordcraft_viewer::open(&docx, None).unwrap();
+        assert_eq!(wordcraft_fonts::FontDb::global().styles(FAMILY), ["Regular"]);
+        drop(first);
+        assert_eq!(wordcraft_fonts::FontDb::global().styles(FAMILY), ["Regular"], "the other session still shows it");
+        drop(second);
+        assert!(wordcraft_fonts::FontDb::global().styles(FAMILY).is_empty(), "gone with the last session showing it");
+        // A worker dropped with its document: the same.
+        let mut worker = ViewerWorker::new();
+        assert_eq!(open(&mut worker, &docx, None, 1).0.kind, Kind::ViewOpened);
+        assert_eq!(wordcraft_fonts::FontDb::global().styles(FAMILY), ["Regular"]);
+        drop(worker);
+        assert!(wordcraft_fonts::FontDb::global().styles(FAMILY).is_empty());
+    }
+
+    #[test]
+    fn the_protocol_bounds_are_the_cores() {
+        // The page module sizes its requests by the protocol's copies, without linking the core.
+        assert_eq!(proto::MAX_VIEW_SIDE, wordcraft_viewer::MAX_RASTER_SIDE);
+        assert_eq!(proto::MAX_VIEW_SCALE, wordcraft_viewer::MAX_SCALE);
+        assert_eq!(proto::MAX_VIEW_PIXELS, wordcraft_viewer::MAX_RENDER_PIXELS);
+        assert_eq!(proto::MAX_VIEW_DOC_BYTES, wordcraft_viewer::MAX_DOCUMENT_BYTES);
     }
 
     #[test]

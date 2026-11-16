@@ -325,8 +325,11 @@ fn a_document_can_be_opened_without_installing_its_embedded_fonts() {
     assert_eq!(session.missing_fonts(), vec![LEFT_OUT.to_string()]);
     assert!(!wordcraft_fonts::FontDb::global().has_family(LEFT_OUT));
     assert_eq!(open_in(LEFT_OUT).missing_fonts(), vec![LEFT_OUT.to_string()]);
-    // `open` still loads them, as before.
+    // `open` still loads them, for as long as the session lives.
     const LOADED: &str = "Viewer Embedded Loaded Zq";
-    assert_eq!(open(&document_embedding(LOADED, face), None).unwrap().missing_fonts(), Vec::<String>::new());
+    let loaded = open(&document_embedding(LOADED, face), None).unwrap();
+    assert_eq!(loaded.missing_fonts(), Vec::<String>::new());
     assert!(wordcraft_fonts::FontDb::global().has_family(LOADED));
+    drop(loaded);
+    assert!(!wordcraft_fonts::FontDb::global().has_family(LOADED), "a closed session's fonts are released");
 }

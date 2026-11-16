@@ -211,6 +211,98 @@ pub(crate) fn pdf_report(doc: &Document, opts: &ExportOptions) -> StrictReport {
     strict_report(doc, &lay, &pdf.display_options(), None, StrictOutput::Pdf)
 }
 
+/// The refusal a strict PDF export of `doc` meets ([`export_pdf`]'s message), or `None` when
+/// nothing is missing: for a host that writes the PDF elsewhere (the web app's PDF worker) and
+/// must refuse exactly as the engine does. `doc` is the document as printed (`output_fields`).
+pub fn pdf_refusal(doc: &Document, opts: &ExportOptions) -> Option<String> {
+    let report = pdf_report(doc, opts);
+    (!report.passed()).then(|| report.refusal())
+}
+
+/// Most faces [`pdf_faces`] lists. The font database bounds faces per file and font files, not
+/// faces (a document may embed many collections), so this bounds the list a hostile document
+/// can make a host hold; a longer list is cut and says so ([`PdfFaces::cut`]).
+pub const MAX_PDF_FACES: usize = 4096;
+
+/// The faces a PDF export draws text in ([`pdf_faces`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PdfFaces {
+    /// `(typographic family, style)`, each once, in the order first drawn.
+    pub faces: Vec<(String, String)>,
+    /// The PDF draws text in more faces than the list holds: some are left out, so the list
+    /// cannot show that a face is unused. A strict host refuses what it cannot check.
+    pub cut: bool,
+}
+
+/// The faces a PDF export of `doc` draws text in, as `(typographic family, style)`, each once in
+/// the order first drawn: the faces its fonts ask for and the fallback faces drawn instead, over
+/// the display list the export draws (body, headers, footers, notes, text boxes, tables, charts,
+/// diagrams, equations), the text of metafile pictures (the page picture too), which the export
+/// draws as text, and the watermark. For a host that writes the PDF elsewhere with copies of its faces (the web app's PDF worker) and
+/// must know which copies this document needs. Lays the document out, so a host asks only when
+/// it has to choose. `doc` is the document as printed (`output_fields`). At most
+/// [`MAX_PDF_FACES`], else [`PdfFaces::cut`].
+pub fn pdf_faces(doc: &Document, opts: &ExportOptions) -> PdfFaces {
+    pdf_faces_within(doc, opts, MAX_PDF_FACES)
+}
+
+/// [`pdf_faces`] holding at most `limit` faces: past it the list is cut and says so.
+pub fn pdf_faces_within(doc: &Document, opts: &ExportOptions, limit: usize) -> PdfFaces {
+    use wordcraft_layout::display::{Draw, page_display};
+    let pdf = pdf_options(opts);
+    let lay = wordcraft_layout::layout(doc, &mut LayoutCache::new(), &pdf.layout_options());
+    let display = pdf.display_options();
+    let mut seen = std::collections::HashSet::new();
+    let mut out = PdfFaces::default();
+    let mut add = |face: &wordcraft_fonts::FaceRef| {
+        if seen.contains(&face.id()) {
+            return;
+        }
+        if out.faces.len() >= limit {
+            out.cut = true;
+            return;
+        }
+        seen.insert(face.id());
+        let f = face.get();
+        out.faces.push((f.family.clone(), f.style.clone()));
+    };
+    // Each picture is read once: its text draws in the same faces wherever it is placed.
+    let mut pictures = std::collections::HashSet::new();
+    let mut picture_faces = |media: &str| -> Vec<wordcraft_fonts::FaceRef> {
+        if !pictures.insert(media.to_string()) {
+            return Vec::new();
+        }
+        doc.media.get(media).map(|bytes| wordcraft_layout::metafile_text_faces(bytes)).unwrap_or_default()
+    };
+    for page in &lay.pages {
+        // A stack, not recursion: nesting depth comes from the document.
+        let mut stack = page_display(doc, page, &display);
+        while let Some(d) = stack.pop() {
+            match d {
+                Draw::Glyphs { face, .. } => add(&face),
+                Draw::Image { media, .. } => picture_faces(&media).iter().for_each(&mut add),
+                Draw::Figure { draws: items, .. } | Draw::Turned { items, .. } | Draw::Rotated { items, .. } | Draw::Clip { items, .. } => {
+                    stack.extend(items.into_iter().rev());
+                }
+                _ => {}
+            }
+        }
+    }
+    // The page picture is drawn behind every page, outside the display list.
+    if !lay.pages.is_empty()
+        && let Some(pic) = &doc.settings.page_picture
+    {
+        picture_faces(&pic.media).iter().for_each(&mut add);
+    }
+    if !lay.pages.is_empty()
+        && let Some(wm) = &doc.settings.watermark
+        && let Some((face, _, _)) = wordcraft_layout::watermark_run(wm, wordcraft_pdf::WATERMARK_MAX_CHARS)
+    {
+        add(&face);
+    }
+    out
+}
+
 /// The PDF of `doc`; with `opts.strict`, only if nothing is missing, laid out once for the check
 /// and the export.
 pub(crate) fn export_pdf(doc: &Document, opts: &ExportOptions) -> Result<Vec<u8>, String> {

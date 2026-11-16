@@ -221,9 +221,9 @@ fn serve() {
 /// which `handle_message` answers with a typed `error`: a malformed message must never throw
 /// out of `onmessage` and go unanswered.
 ///
-/// The payload is copied only after its length is checked against the request kind's
-/// [`proto::request_payload_limit`]: an oversized one comes back as `Some((env, got, limit))`
-/// with no copy, and `serve` answers `TooLarge`. A header or payload the handler never reads
+/// The payload is copied, once, into this module only after its length is checked against the
+/// request kind's [`proto::request_payload_limit`]: an oversized one comes back as
+/// `Some((env, got, limit))` with no copy, and `serve` answers `TooLarge`. A header or payload the handler never reads
 /// (an undecodable header, a reply kind sent as a request) is not copied at all.
 #[cfg(target_arch = "wasm32")]
 fn unpack(data: &wasm_bindgen::JsValue) -> (Vec<u8>, Vec<u8>, Option<(Envelope, usize, usize)>) {
@@ -243,11 +243,14 @@ fn unpack(data: &wasm_bindgen::JsValue) -> (Vec<u8>, Vec<u8>, Option<(Envelope, 
     // `decode_envelope` applies `MAX_PAYLOAD_BYTES` itself; an over-limit header gets the same
     // `BadRequest` an empty one does, without paying for the copy first.
     let header = if header_str.len() > proto::MAX_PAYLOAD_BYTES { Vec::new() } else { header_str.into_bytes() };
-    let payload = arr.get(1);
-    if !payload.is_instance_of::<js_sys::ArrayBuffer>() && !payload.is_instance_of::<js_sys::Uint8Array>() {
-        return (header, Vec::new(), None);
-    }
-    let view = js_sys::Uint8Array::new(&payload);
+    // A `Uint8Array` (what the page posts) is used as it is: `new Uint8Array(typedArray)` would
+    // copy every byte (ECMA-262 InitializeTypedArrayFromTypedArray clones the buffer), before the
+    // length check. An `ArrayBuffer` gets a view, which copies nothing.
+    let view = match arr.get(1).dyn_into::<js_sys::Uint8Array>() {
+        Ok(view) => view,
+        Err(other) if other.is_instance_of::<js_sys::ArrayBuffer>() => js_sys::Uint8Array::new(&other),
+        Err(_) => return (header, Vec::new(), None),
+    };
     let got = view.length() as usize;
     let Some(env) = proto::decode_envelope(&header).ok().filter(|e| e.kind.is_request()) else {
         return (header, Vec::new(), None);

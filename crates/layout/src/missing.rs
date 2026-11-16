@@ -328,6 +328,14 @@ impl Found {
     }
 }
 
+/// The faces the text of a metafile picture (`bytes`) is drawn in, one per text run, as the PDF
+/// export draws it: each run in the face its own font name resolves to ([`metafile_text_run`]),
+/// a run it would not draw left out. Empty for a picture that is not a metafile or can't be
+/// read. For a host that must know every face a PDF draws text in.
+pub fn metafile_text_faces(bytes: &[u8]) -> Vec<wordcraft_fonts::FaceRef> {
+    meta_runs(bytes).into_iter().map(|r| r.face).collect()
+}
+
 /// The text runs of a metafile picture that the exporters draw (a run whose layout fails is not).
 fn meta_runs(bytes: &[u8]) -> Vec<MetaRun> {
     if !craft_metafile::is_metafile(bytes) {

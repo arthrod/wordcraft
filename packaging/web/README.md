@@ -173,6 +173,10 @@ location /wordcraft/ {
     location ~* /wordcraft-worker-.*\.(wasm|js)$ { add_header Cache-Control "no-cache"; }
     # The editor's names are un-hashed too (fetched on an edit action): revalidate, never pin.
     location ~* /wordcraft-web(\.js|_loader\.js|_bg\.wasm)$ { add_header Cache-Control "no-cache"; }
+    # wasm-bindgen snippets keep their name when their content changes: revalidate, never pin.
+    location ~* /snippets/ { add_header Cache-Control "no-cache"; }
+    # nginx tries regex locations in the order written and takes the first match, so this
+    # catch-all for the content-hashed page module must stay after the no-cache rules above.
     location ~* \.(wasm|js)$ { add_header Cache-Control "public, max-age=31536000, immutable"; }
     location ~* index\.html$ { add_header Cache-Control "no-cache"; }
 }
