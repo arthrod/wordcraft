@@ -642,6 +642,8 @@ fn open_document(page: &Rc<Page>, bytes: js_sys::Uint8Array, password: Option<St
         state.generation
     };
     drop(stale);
+    // Until it opens, no edit action: the editor would be handed bytes the viewer has not read.
+    dispatch(page, Event::DocumentOpening);
     let sink_page = page.clone();
     let sent = page
         .state
@@ -1219,6 +1221,10 @@ fn build_api(page: &Rc<Page>) -> js_sys::Object {
         };
         if p.state.borrow().worker.is_none() {
             return js_sys::Promise::reject(&js_error("the viewer is not running"));
+        }
+        // An edit action was taken: the editor is handed the document open now, not this one.
+        if !p.state.borrow().handover.opens_allowed() {
+            return js_sys::Promise::reject(&js_error("the editor is taking over the page"));
         }
         let page = p.clone();
         js_sys::Promise::new(&mut |resolve, reject| {

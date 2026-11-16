@@ -152,6 +152,8 @@ fn every_event_in_every_phase_leaves_a_valid_machine() {
         Event::HandOverFailed,
         Event::EditorTimedOut,
         Event::DocumentOpened,
+        Event::PasswordAsked,
+        Event::DocumentOpening,
     ];
     const STEPS: u32 = 5;
     for mode in [Mode::ViewOnly, Mode::ViewerFirst, Mode::EditorFirst] {
@@ -170,7 +172,7 @@ fn every_event_in_every_phase_leaves_a_valid_machine() {
                     n /= events.len();
                     match event {
                         Event::DocumentOpened => open = true,
-                        Event::PasswordAsked => open = false,
+                        Event::PasswordAsked | Event::DocumentOpening => open = false,
                         _ => {}
                     }
                     let step = h.on(event);
@@ -380,4 +382,52 @@ fn a_late_editor_waits_for_the_document_the_viewer_is_opening() {
     assert_eq!(h.on(Event::DocumentOpened), vec![Action::HideNotice, Action::ShowLoading, Action::HandOver]);
     assert_eq!(h.phase(), Phase::HandingOver);
     assert_eq!(h.on(Event::DocumentOpened), Vec::new(), "handed over once");
+}
+
+#[test]
+fn a_new_document_withdraws_the_edit_action_until_it_opens() {
+    // A host's `open(protected)` while another document shows: Edit pressed before the worker
+    // answers must not hand the editor the new bytes without their password.
+    let (mut h, _) = opened(Mode::ViewerFirst, true);
+    assert_eq!(h.on(Event::DocumentOpening), Vec::new());
+    assert!(!h.edit_offered());
+    assert_eq!(h.on(Event::EditRequested), Vec::new());
+    assert_eq!(h.phase(), Phase::Viewing);
+    h.on(Event::PasswordAsked);
+    assert!(!h.edit_offered());
+    h.on(Event::DocumentOpened);
+    assert!(h.edit_offered());
+}
+
+#[test]
+fn no_document_is_opened_while_the_editor_takes_over() {
+    let (mut h, _) = opened(Mode::ViewerFirst, true);
+    assert!(h.opens_allowed());
+    h.on(Event::EditRequested);
+    assert!(!h.opens_allowed(), "loading the editor");
+    h.on(Event::EditorReady);
+    assert!(!h.opens_allowed(), "handing over");
+    h.on(Event::DocumentAccepted);
+    h.on(Event::EditorPainted);
+    assert!(!h.opens_allowed(), "the viewer is gone");
+    // Left with the viewer, it opens documents again; a late editor waits for one that opens.
+    let (mut late, _) = opened(Mode::ViewerFirst, true);
+    late.on(Event::EditRequested);
+    late.on(Event::EditorTimedOut);
+    assert!(late.opens_allowed());
+    late.on(Event::DocumentOpening);
+    assert_eq!(late.on(Event::EditorReady), Vec::new());
+    assert_eq!(late.on(Event::DocumentOpened), vec![Action::HideNotice, Action::ShowLoading, Action::HandOver]);
+}
+
+#[test]
+fn an_editor_ready_while_a_document_opens_waits_for_it() {
+    // Not reached through the page, which opens nothing while the editor loads; the machine
+    // still never hands over a document that is not open.
+    let (mut h, _) = opened(Mode::ViewerFirst, true);
+    h.on(Event::EditRequested);
+    h.on(Event::PasswordAsked);
+    assert_eq!(h.on(Event::EditorReady), Vec::new());
+    assert_eq!(h.on(Event::DocumentOpened), vec![Action::HandOver]);
+    assert_eq!(h.phase(), Phase::HandingOver);
 }

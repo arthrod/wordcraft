@@ -368,6 +368,35 @@ try {
     await maker.page.close();
     check("password fixture: the editor wrote an encrypted package", locked.length > 0 && locked[0] === 0xd0 && locked[1] === 0xcf, `${locked.length} bytes`);
 
+    // Edit pressed before the worker answers that the new document needs a password: refused,
+    // so the editor is never handed the protected bytes without it.
+    {
+      const race = await open(browser, base, "/");
+      await waitAttr(race.page, "data-wordcraft-painted", "true");
+      const before = race.log.requests.length;
+      await race.page.evaluate((bytes) => {
+        window.wordcraftViewer.open(new Uint8Array(bytes)).catch(() => {});
+        window.wordcraftViewer.edit();
+      }, locked);
+      await race.page.waitForFunction(() => (document.querySelector("#wordcraft_viewer_password")?.getClientRects().length ?? 0) > 0, { timeout: 20000 }).catch(() => {});
+      await new Promise((r) => setTimeout(r, 1000));
+      const state = await race.page.evaluate(() => ({
+        phase: document.documentElement.getAttribute("data-wordcraft-phase"),
+        form: (document.querySelector("#wordcraft_viewer_password")?.getClientRects().length ?? 0) > 0,
+      }));
+      check("password: Edit before the worker answers loads no editor", state.phase === "viewing" && state.form && !race.log.requests.slice(before).some((p) => EDITOR.test(p)), JSON.stringify(state));
+      await race.page.close();
+      // And once an edit action is taken, no other document is opened under it.
+      const busy = await open(browser, base, "/");
+      await waitAttr(busy.page, "data-wordcraft-painted", "true");
+      const during = await busy.page.evaluate(async (bytes) => {
+        window.wordcraftViewer.edit();
+        return window.wordcraftViewer.open(new Uint8Array(bytes)).then(() => "resolved", (e) => `rejected: ${e.message}`);
+      }, locked);
+      check("open() while the editor takes over is refused", during.startsWith("rejected:"), during);
+      await busy.page.close();
+    }
+
     const prot = await open(browser, base, "/");
     await waitAttr(prot.page, "data-wordcraft-painted", "true");
     const opened = await prot.page.evaluate(async (bytes) => {
