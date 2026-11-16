@@ -93,6 +93,9 @@ pub(crate) fn spans_for(story: StoryRef, path: &Path) -> impl Iterator<Item = Sp
 }
 
 #[cfg(test)]
+mod layout_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
