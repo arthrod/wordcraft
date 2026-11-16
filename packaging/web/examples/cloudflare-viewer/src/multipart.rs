@@ -227,10 +227,19 @@ fn disposition(headers: &str) -> Option<(String, Option<String>)> {
     Some((name?, file_name))
 }
 
-/// The last path component of a browser-supplied file name, when it is short and printable.
+/// The last path component of a browser-supplied file name, when it is short and printable: no
+/// control character and no bidirectional formatting character, which would show the name's
+/// characters in another order than they are.
 fn shown_file_name(raw: &str) -> Option<String> {
     let base = raw.rsplit(['/', '\\']).next().unwrap_or(raw).trim();
-    (!base.is_empty() && base.chars().count() <= 120 && !base.chars().any(char::is_control)).then(|| base.to_string())
+    (!base.is_empty() && base.chars().count() <= 120 && !base.chars().any(|c| c.is_control() || is_bidi_control(c))).then(|| base.to_string())
+}
+
+/// The bidirectional formatting characters (Unicode Standard Annex #9, table 4): embeddings and
+/// overrides (U+202A..U+202E), isolates (U+2066..U+2069) and the implicit marks (U+200E, U+200F,
+/// U+061C).
+fn is_bidi_control(c: char) -> bool {
+    matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' | '\u{061C}')
 }
 
 #[cfg(test)]
@@ -333,5 +342,22 @@ mod tests {
         assert_eq!(parse(&body, "b").unwrap().file_name, None);
         let body = form("b", &[("file", Some("C:\\Users\\x\\report.docx"), b"1")]);
         assert_eq!(parse(&body, "b").unwrap().file_name.as_deref(), Some("report.docx"));
+    }
+
+    /// A name that would show its characters in another order ("Trojan Source"): every bidi
+    /// embedding, override, isolate and mark falls back to the generic label, as a control
+    /// character does. Right-to-left letters themselves are kept.
+    #[test]
+    fn file_names_with_bidi_controls_are_not_shown() {
+        for c in [
+            '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}', '\u{200E}', '\u{200F}',
+            '\u{061C}',
+        ] {
+            let name = format!("invoice{c}xcod.exe.docx");
+            let body = form("b", &[("file", Some(&name), b"1")]);
+            assert_eq!(parse(&body, "b").unwrap().file_name, None, "U+{:04X}", u32::from(c));
+        }
+        let body = form("b", &[("file", Some("\u{5D3}\u{5D5}\u{5D7}.docx"), b"1")]);
+        assert_eq!(parse(&body, "b").unwrap().file_name.as_deref(), Some("\u{5D3}\u{5D5}\u{5D7}.docx"));
     }
 }
