@@ -103,6 +103,9 @@ struct State {
     /// The bytes and password of the document the worker last opened. The worker keeps it when
     /// it refuses the next one, so the page shows it again and the editor is handed it.
     shown: Option<(js_sys::Uint8Array, Option<String>)>,
+    /// `opens` when the password form was shown: the form sends a password only for the
+    /// document it asked about, never for one that replaced it or was put back.
+    password_for: Option<u32>,
 }
 
 struct Page {
@@ -318,6 +321,7 @@ fn launch(options: &JsValue, auto: bool) -> Result<JsValue, JsValue> {
             editor_seen: false,
             open_waiters: Vec::new(),
             shown: None,
+            password_for: None,
         }),
     });
     let api = build_api(&page);
@@ -615,6 +619,7 @@ fn restore_shown(page: &Rc<Page>, text: &str) -> bool {
     if let Some(html) = html(page) {
         let _ = html.remove_attribute("data-wordcraft-error");
     }
+    dismiss_password(page);
     show_page_count(page);
     notify(page, text);
     dispatch(page, Event::DocumentOpened);
@@ -768,6 +773,8 @@ fn open_document(page: &Rc<Page>, bytes: js_sys::Uint8Array, password: Option<St
         state.generation
     };
     drop(stale);
+    // A password asked for an earlier document is no longer asked.
+    dismiss_password(page);
     // Until it opens, no edit action: the editor would be handed bytes the viewer has not read.
     dispatch(page, Event::DocumentOpening);
     let sink_page = page.clone();
@@ -838,7 +845,20 @@ fn ask_password(page: &Rc<Page>, code: &str, text: &str) {
     page.password.message.set_inner_text("Password:");
     page.password.input.set_value("");
     page.password.form.set_hidden(false);
+    let mut state = page.state.borrow_mut();
+    state.password_for = Some(state.opens);
+    drop(state);
     let _ = page.password.input.focus();
+}
+
+/// The password form goes, with the notice that asked for it, and sends nothing more.
+fn dismiss_password(page: &Page) {
+    page.state.borrow_mut().password_for = None;
+    if !page.password.form.hidden() {
+        page.password.form.set_hidden(true);
+        page.password.input.set_value("");
+        page.notice.set_hidden(true);
+    }
 }
 
 /// Not now: the form goes, the notice says the document is protected, and editing stays
@@ -852,7 +872,16 @@ fn cancel_password(page: &Page) {
 
 fn submit_password(page: &Rc<Page>) {
     let given = page.password.input.value();
-    let bytes = page.state.borrow().docx.clone();
+    let bytes = {
+        let state = page.state.borrow();
+        (state.password_for == Some(state.opens)).then(|| state.docx.clone())
+    };
+    // Shown for another document than the one in `docx` now: it sends nothing.
+    let Some(bytes) = bytes else {
+        page.password.form.set_hidden(true);
+        page.password.input.set_value("");
+        return;
+    };
     let Some(bytes) = bytes.filter(|_| !given.is_empty()) else { return };
     page.password.form.set_hidden(true);
     page.notice.set_hidden(true);
@@ -874,11 +903,7 @@ fn apply_opened(page: &Rc<Page>, opened: proto::ViewOpenedReply) {
     if let Some(html) = html(page) {
         let _ = html.remove_attribute("data-wordcraft-error");
     }
-    if !page.password.form.hidden() {
-        page.password.form.set_hidden(true);
-        page.password.input.set_value("");
-        page.notice.set_hidden(true);
-    }
+    dismiss_password(page);
     if !matches!(page.state.borrow().handover.phase(), Phase::LoadingEditor | Phase::HandingOver) {
         show_page_count(page);
     }

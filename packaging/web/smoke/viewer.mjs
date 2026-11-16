@@ -542,6 +542,44 @@ try {
         JSON.stringify(after),
       );
       await behind.page.close();
+      // A protected replacement asks for its password; an unreadable one replaces it before
+      // the reader answers; the worker refuses that and the document shown before comes back.
+      // The page then shows that document only: no password form, no notice about the
+      // protected one, and the old form sends nothing for the restored document.
+      const back = await open(browser, base, "/", { hooks: true });
+      await waitAttr(back.page, "data-wordcraft-painted", "true");
+      const asked = await back.page.evaluate((bytes) => window.wordcraftViewer.open(new Uint8Array(bytes)).then(() => "resolved", (e) => `rejected: ${e.message}`), locked);
+      await back.page.waitForFunction(() => (document.querySelector("#wordcraft_viewer_password")?.getClientRects().length ?? 0) > 0, { timeout: 20000 }).catch(() => {});
+      await back.page.evaluate(() => {
+        document.querySelector("#wordcraft_viewer_password_input").value = "stale";
+      });
+      const unread = await back.page.evaluate(() =>
+        window.wordcraftViewer.open(new TextEncoder().encode("this is not a Word document")).then(() => "resolved", (e) => `rejected: ${e.message}`),
+      );
+      await back.page.waitForFunction(() => document.querySelectorAll("#wordcraft_viewer canvas[data-scale]").length > 0, { timeout: 20000 }).catch(() => {});
+      const restored = await back.page.evaluate(() => ({
+        form: (document.querySelector("#wordcraft_viewer_password")?.getClientRects().length ?? 0) > 0,
+        notice: document.querySelector("#wordcraft_viewer_notice")?.hidden === false ? document.querySelector("#wordcraft_viewer_notice").innerText : null,
+        error: document.documentElement.getAttribute("data-wordcraft-error"),
+        painted: document.querySelectorAll("#wordcraft_viewer canvas[data-scale]").length,
+        posted: window.__posted.length,
+      }));
+      check(
+        "password then unreadable replacement: the restored document shows without the password form or its notice",
+        /password|protected/i.test(asked) && unread.startsWith("rejected:") && !restored.form && restored.error === null && restored.painted > 0 && !/password|protected/i.test(restored.notice ?? ""),
+        JSON.stringify({ asked, unread, ...restored }),
+      );
+      // The reader presses Enter in the form they had: nothing is sent to the worker.
+      await back.page.evaluate(() => document.querySelector("#wordcraft_viewer_password").requestSubmit());
+      await new Promise((r) => setTimeout(r, 1500));
+      const stale = await back.page.evaluate(() => ({
+        posted: window.__posted.length,
+        error: document.documentElement.getAttribute("data-wordcraft-error"),
+        edit: (document.querySelector("#wordcraft_viewer_edit")?.getClientRects().length ?? 0) > 0,
+      }));
+      check("password then unreadable replacement: the old form sends nothing for the restored document", stale.posted === restored.posted && stale.error === null && stale.edit, JSON.stringify({ before: restored.posted, ...stale }));
+      check("password then unreadable replacement: no uncaught errors", back.log.uncaught.length === 0, back.log.uncaught.join(" | "));
+      await back.page.close();
     }
 
     const prot = await open(browser, base, "/");
