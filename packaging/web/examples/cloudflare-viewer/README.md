@@ -108,11 +108,11 @@ What a reader downloads to see page 1 of the sample: the viewer page, **777 B**,
 visit downloads its page module (~90 KB gzip), the view-only worker (~2.78 MB gzip) and the
 document.
 
-Worker bundle (`worker-build --release`, `opt-level = "z"`, fat LTO, `wasm-opt -Oz`): **6,158,298
-B** of wasm raw, **2,926,848 B** gzip (`gzip -6`), plus 23,473 B of generated glue. Cloudflare dropped the
+Worker bundle (`worker-build --release`, `opt-level = "z"`, fat LTO, `wasm-opt -Oz`): **6,165,894
+B** of wasm raw, **2,929,343 B** gzip (`gzip -6`), plus 23,482 B of generated glue. Cloudflare dropped the
 compressed size limits (3 MB Free, 10 MB Paid) on 2026-09-04; a Worker is now checked only against
 64 MiB uncompressed, on every plan, so this fits with room to spare. It would also have fit
-under the old Free limit, by about 73 KB.
+under the old Free limit, by about 71 KB.
 
 **CPU.** Drawing a page takes far more than the Free plan's 10 ms of CPU per request (the older
 example measured 36 ms warm and 151 ms cold for one page), so this Worker needs the Paid plan.
