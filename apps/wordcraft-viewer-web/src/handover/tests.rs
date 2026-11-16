@@ -173,3 +173,77 @@ fn every_event_in_every_phase_leaves_a_valid_machine() {
         }
     }
 }
+
+#[test]
+fn an_editor_that_never_starts_times_out_into_the_viewer() {
+    let (mut h, _) = started(Mode::ViewerFirst, true);
+    h.on(Event::EditRequested);
+    assert_eq!(h.on(Event::EditorTimedOut), vec![Action::HideLoading, Action::ShowNotice(Reason::TimedOut)]);
+    assert_eq!(h.phase(), Phase::ViewerOnly(Reason::TimedOut));
+    // An editor that turns up afterwards, or another deadline, changes nothing.
+    for late in [Event::EditorReady, Event::EditorTimedOut, Event::StartFailed, Event::EditRequested] {
+        assert_eq!(h.on(late), Vec::new(), "{late:?}");
+    }
+    assert!(!h.edit_offered());
+}
+
+#[test]
+fn editor_first_times_out_into_a_started_viewer() {
+    let (mut h, _) = started(Mode::EditorFirst, true);
+    assert_eq!(h.on(Event::EditorTimedOut), vec![Action::HideLoading, Action::StartViewer, Action::ShowNotice(Reason::TimedOut)]);
+}
+
+#[test]
+fn the_deadline_only_applies_while_the_editor_loads() {
+    let (mut h, _) = started(Mode::ViewerFirst, true);
+    assert_eq!(h.on(Event::EditorTimedOut), Vec::new(), "nothing is loading yet");
+    assert_eq!(h.phase(), Phase::Viewing);
+    h.on(Event::EditRequested);
+    h.on(Event::EditorReady);
+    assert_eq!(h.on(Event::EditorTimedOut), Vec::new(), "the editor is up: the hand-over has its own failures");
+    assert_eq!(h.phase(), Phase::HandingOver);
+}
+
+#[test]
+fn the_wait_is_bounded_whatever_the_host_passes() {
+    assert_eq!(editor_wait_ms(None), EDITOR_WAIT_MS);
+    for junk in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert_eq!(editor_wait_ms(Some(junk)), EDITOR_WAIT_MS, "{junk}");
+    }
+    assert_eq!(editor_wait_ms(Some(-5.0)), EDITOR_WAIT_MS_MIN);
+    assert_eq!(editor_wait_ms(Some(0.0)), EDITOR_WAIT_MS_MIN);
+    assert_eq!(editor_wait_ms(Some(2_500.4)), 2_500);
+    assert_eq!(editor_wait_ms(Some(1e300)), EDITOR_WAIT_MS_MAX);
+    assert!(!editor_wait_over(0.0, 3_000));
+    assert!(!editor_wait_over(2_999.0, 3_000));
+    assert!(editor_wait_over(3_000.0, 3_000));
+    assert!(!editor_wait_over(-1e9, 3_000), "a clock that jumps back does not end the wait");
+    assert!(!editor_wait_over(f64::NAN, 3_000));
+}
+
+#[test]
+fn a_hosted_page_belongs_to_the_editor() {
+    let (mut h, actions) = Handover::hosted();
+    assert_eq!(actions, vec![Action::ShowLoading, Action::LoadEditor], "fetched at once, with no WebGL probe");
+    assert_eq!(h.phase(), Phase::LoadingEditor);
+    assert!(!h.edit_offered());
+    assert_eq!(h.on(Event::EditorReady), vec![Action::HandOver]);
+    assert_eq!(h.on(Event::DocumentAccepted), vec![Action::AwaitPaint]);
+    assert_eq!(h.on(Event::EditorPainted), vec![Action::HideLoading, Action::RemoveViewer]);
+    assert_eq!(h.phase(), Phase::Editing);
+}
+
+#[test]
+fn a_hosted_page_that_fails_never_starts_the_viewer() {
+    for (event, reason) in
+        [(Event::ScriptFailed, Reason::LoadFailed), (Event::StartFailed, Reason::StartFailed), (Event::EditorTimedOut, Reason::TimedOut)]
+    {
+        let (mut h, _) = Handover::hosted();
+        assert_eq!(h.on(event), vec![Action::HideLoading, Action::ShowNotice(reason)], "{event:?}");
+        assert_eq!(h.phase(), Phase::ViewerOnly(reason));
+        assert_eq!(h.on(Event::EditRequested), Vec::new());
+    }
+    let (mut h, _) = Handover::hosted();
+    h.on(Event::EditorReady);
+    assert_eq!(h.on(Event::HandOverFailed), vec![Action::HideLoading, Action::ShowNotice(Reason::HandOverFailed)]);
+}

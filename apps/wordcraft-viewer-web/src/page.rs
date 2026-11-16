@@ -25,7 +25,7 @@ use wasm_bindgen::closure::Closure;
 use wordcraft_worker_proto as proto;
 
 use crate::cache::{Arrival, PageCache, PageKey};
-use crate::handover::{Action, Event, Handover, Phase, Reason};
+use crate::handover::{self, Action, Event, Handover, Phase, Reason};
 use crate::mode::Mode;
 use crate::pages::{self, Sheet};
 use crate::worker::{self, ViewerWorker};
@@ -88,6 +88,8 @@ struct State {
     /// The viewer's DOM is gone (the editor took over).
     removed: bool,
     editor_poll: Option<i32>,
+    /// `Date.now()` when the page started waiting for the editor's page API.
+    editor_wait_started: f64,
     /// `resolve`/`reject` of `open()` calls waiting for the worker's answer.
     open_waiters: Vec<(js_sys::Function, js_sys::Function)>,
 }
@@ -101,9 +103,21 @@ struct Page {
     status: web_sys::HtmlElement,
     edit: web_sys::HtmlElement,
     notice: web_sys::HtmlElement,
+    password: PasswordAsk,
     scroller: web_sys::HtmlElement,
     sheet: web_sys::HtmlElement,
+    /// How long to wait for the editor's page API ([`handover::editor_wait_ms`]).
+    editor_wait_ms: u32,
     state: RefCell<State>,
+}
+
+/// The in-page ask for a protected document's password: a form under the notice line, hidden
+/// until the viewer worker answers that the document needs one. (Not `window.prompt`, which
+/// blocks the page and anything driving it.)
+struct PasswordAsk {
+    form: web_sys::HtmlElement,
+    message: web_sys::HtmlElement,
+    input: web_sys::HtmlInputElement,
 }
 
 thread_local! {
@@ -135,8 +149,10 @@ pub(crate) fn start_default_if_present() {
 /// element or an element id; default `#wordcraft_viewer`), `mode` (`"view"`, `"viewer-first"`
 /// or `"edit"`), `document` (a `Uint8Array` or `ArrayBuffer` holding a `.docx`), `url` (a
 /// same-origin `.docx`), `password`, `assetBase` (where this module's sibling files are
-/// served from) and `installGlobal` (also publish the API at `window.wordcraftViewer`). A page
-/// has one viewer: a second call resolves to the first one's API.
+/// served from), `installGlobal` (also publish the API at `window.wordcraftViewer`) and
+/// `editorWaitMs` (how long to wait for the editor after an edit action before saying it did
+/// not start; also read from the container's `data-editor-wait-ms`). A page has one viewer: a
+/// second call resolves to the first one's API.
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn start(options: JsValue) -> js_sys::Promise {
     match launch(&options, false) {
@@ -232,13 +248,20 @@ fn launch(options: &JsValue, auto: bool) -> Result<JsValue, JsValue> {
     };
     let password = str_prop(options, "password")?;
     let install_global = auto || prop(options, "installGlobal").as_bool().unwrap_or(false);
+    let editor_wait_ms = handover::editor_wait_ms(
+        // The attribute is read by JavaScript's `parseFloat`, which keeps Rust's float parser
+        // (about 17 KB) out of the page module; `editor_wait_ms` drops a NaN.
+        prop(options, "editorWaitMs").as_f64().or_else(|| root.get_attribute("data-editor-wait-ms").map(|v| js_sys::Number::parse_float(&v))),
+    );
 
-    // The editor draws with WebGL. A browser without it is told so before anything of the
-    // editor is fetched.
-    let can_edit = mode != Mode::ViewOnly && has_webgl(&document);
-    let (handover, first) = Handover::start(mode, can_edit);
+    // An editor-first page with the editor's host bridge (`?host=`) is the editor's page: see
+    // `Handover::hosted`. Otherwise a browser without WebGL, which the editor draws with, is
+    // told so before anything of the editor is fetched.
+    let hosted = mode == Mode::EditorFirst && query.as_ref().is_some_and(|q| q.has("host"));
+    let (handover, first) = if hosted { Handover::hosted() } else { Handover::start(mode, mode != Mode::ViewOnly && has_webgl(&document)) };
 
-    let (status, edit, notice, scroller, sheet) = build_dom(&document, &root).ok_or_else(|| js_error("could not build the viewer's elements"))?;
+    let Built { status, edit, notice, password: password_ask, scroller, sheet } =
+        build_dom(&document, &root).ok_or_else(|| js_error("could not build the viewer's elements"))?;
     let _ = root.set_attribute("data-mode", mode.name());
     let page = Rc::new(Page {
         window,
@@ -249,8 +272,10 @@ fn launch(options: &JsValue, auto: bool) -> Result<JsValue, JsValue> {
         status,
         edit,
         notice,
+        password: password_ask,
         scroller,
         sheet,
+        editor_wait_ms,
         state: RefCell::new(State {
             handover,
             worker: None,
@@ -268,6 +293,7 @@ fn launch(options: &JsValue, auto: bool) -> Result<JsValue, JsValue> {
             painted_once: false,
             removed: false,
             editor_poll: None,
+            editor_wait_started: 0.0,
             open_waiters: Vec::new(),
         }),
     });
@@ -299,10 +325,17 @@ fn element(document: &web_sys::Document, tag: &str, css: &str) -> Option<web_sys
     Some(el)
 }
 
-type Built = (web_sys::HtmlElement, web_sys::HtmlElement, web_sys::HtmlElement, web_sys::HtmlElement, web_sys::HtmlElement);
+struct Built {
+    status: web_sys::HtmlElement,
+    edit: web_sys::HtmlElement,
+    notice: web_sys::HtmlElement,
+    password: PasswordAsk,
+    scroller: web_sys::HtmlElement,
+    sheet: web_sys::HtmlElement,
+}
 
-/// The viewer's elements under `root`: a bar (name, status, Edit), a notice line, and the
-/// scrolling sheet the page canvases sit in.
+/// The viewer's elements under `root`: a bar (name, status, Edit), a notice line, the password
+/// form (hidden), and the scrolling sheet the page canvases sit in.
 fn build_dom(document: &web_sys::Document, root: &web_sys::HtmlElement) -> Option<Built> {
     root.style().set_css_text(
         "position:absolute;inset:0;display:flex;flex-direction:column;background:#e6e6e6;color:#334155;z-index:400;font-family:system-ui,-apple-system,sans-serif;",
@@ -332,6 +365,7 @@ fn build_dom(document: &web_sys::Document, root: &web_sys::HtmlElement) -> Optio
     notice.set_id("wordcraft_viewer_notice");
     let _ = notice.set_attribute("role", "alert");
     notice.set_hidden(true);
+    let password = build_password_ask(document)?;
     let scroller = element(document, "div", "flex:1;overflow:auto;position:relative;outline:none;")?;
     scroller.set_tab_index(0);
     let _ = scroller.set_attribute("role", "document");
@@ -341,10 +375,41 @@ fn build_dom(document: &web_sys::Document, root: &web_sys::HtmlElement) -> Optio
         bar.append_child(child).ok()?;
     }
     scroller.append_child(&sheet).ok()?;
-    for child in [&bar, &notice, &scroller] {
+    for child in [&bar, &notice, &password.form, &scroller] {
         root.append_child(child).ok()?;
     }
-    Some((status, edit, notice, scroller, sheet))
+    Some(Built { status, edit, notice, password, scroller, sheet })
+}
+
+fn build_password_ask(document: &web_sys::Document) -> Option<PasswordAsk> {
+    let form = element(
+        document,
+        "form",
+        // No `display` here: an inline `display` would override the `hidden` attribute.
+        "flex:none;background:#fff;border-bottom:1px solid #d4d4d8;padding:8px 14px;font-size:13px;",
+    )?;
+    form.set_id("wordcraft_viewer_password");
+    let _ = form.set_attribute("aria-label", "Password");
+    form.set_hidden(true);
+    let label = element(document, "label", "margin-right:8px;")?;
+    let message = element(document, "span", "margin-right:8px;")?;
+    let input: web_sys::HtmlInputElement =
+        element(document, "input", "font:inherit;padding:3px 6px;border:1px solid #94a3b8;border-radius:4px;min-width:14em;")?.dyn_into().ok()?;
+    input.set_type("password");
+    input.set_id("wordcraft_viewer_password_input");
+    input.set_autocomplete("current-password");
+    let open = element(
+        document,
+        "button",
+        "font:inherit;font-weight:600;color:#fff;background:#2b47b5;border:0;border-radius:4px;padding:4px 14px;cursor:pointer;",
+    )?;
+    let _ = open.set_attribute("type", "submit");
+    open.set_inner_text("Open");
+    label.append_child(&message).ok()?;
+    label.append_child(&input).ok()?;
+    form.append_child(&label).ok()?;
+    form.append_child(&open).ok()?;
+    Some(PasswordAsk { form, message, input })
 }
 
 fn listen(target: &web_sys::EventTarget, kind: &str, handler: impl FnMut(web_sys::Event) + 'static) {
@@ -355,6 +420,11 @@ fn listen(target: &web_sys::EventTarget, kind: &str, handler: impl FnMut(web_sys
 }
 
 fn wire_listeners(page: &Rc<Page>) {
+    let p = page.clone();
+    listen(&page.password.form, "submit", move |event| {
+        event.prevent_default();
+        submit_password(&p);
+    });
     let p = page.clone();
     listen(&page.scroller, "scroll", move |_| schedule_refresh(&p));
     let p = page.clone();
@@ -437,6 +507,7 @@ fn show_notice(page: &Page, reason: Reason) {
         }
         Reason::StartFailed => ("start-failed", "The editor could not start in this browser. The document stays open for reading."),
         Reason::HandOverFailed => ("hand-over-failed", "The editor could not open this document. It stays open here for reading."),
+        Reason::TimedOut => ("timed-out", "The editor took too long to start. The document stays open for reading; reload the page to try again."),
     };
     page.notice.set_inner_text(text);
     page.notice.set_hidden(false);
@@ -551,15 +622,18 @@ fn open_document(page: &Rc<Page>, bytes: js_sys::Uint8Array, password: Option<St
     let stale = forget_pages(page);
     let generation = {
         let mut state = page.state.borrow_mut();
-        state.docx = Some(bytes.clone());
-        state.password = password.clone();
+        state.docx = Some(bytes);
+        state.password = password;
         state.generation
     };
     drop(stale);
     let sink_page = page.clone();
-    let sent = page.state.borrow().worker.as_ref().map(|w| {
-        w.request(proto::Kind::ViewOpen, frame, Box::new(move |env, payload| on_opened(&sink_page, generation, bytes, password, env, payload)))
-    });
+    let sent = page
+        .state
+        .borrow()
+        .worker
+        .as_ref()
+        .map(|w| w.request(proto::Kind::ViewOpen, frame, Box::new(move |env, payload| on_opened(&sink_page, generation, env, payload))));
     if !matches!(sent, Some(Ok(_))) {
         show_error(page, "viewer-failed", "The document viewer could not start in this browser.");
     }
@@ -578,14 +652,7 @@ fn forget_pages(page: &Page) -> Vec<PageCanvas> {
     canvases
 }
 
-fn on_opened(
-    page: &Rc<Page>,
-    generation: u32,
-    bytes: js_sys::Uint8Array,
-    password: Option<String>,
-    env: &proto::Envelope,
-    payload: &js_sys::Uint8Array,
-) {
+fn on_opened(page: &Rc<Page>, generation: u32, env: &proto::Envelope, payload: &js_sys::Uint8Array) {
     if page.state.borrow().generation != generation {
         return;
     }
@@ -597,23 +664,32 @@ fn on_opened(
     }
     let reply = worker::error_reply(payload);
     match reply.code {
-        proto::ErrorCode::PasswordRequired | proto::ErrorCode::WrongPassword => {
-            let ask = if reply.code == proto::ErrorCode::WrongPassword {
-                "That password does not open this document. Password:"
-            } else {
-                "This document is protected. Password:"
-            };
-            match page.window.prompt_with_message(ask) {
-                Ok(Some(given)) if !given.is_empty() => open_document(page, bytes, Some(given)),
-                _ => {
-                    let _ = password;
-                    show_error(page, "password-required", "This document is protected with a password.");
-                }
-            }
-        }
+        proto::ErrorCode::PasswordRequired => ask_password(page, "password-required", "This document is protected with a password."),
+        proto::ErrorCode::WrongPassword => ask_password(page, "wrong-password", "That password does not open this document."),
         proto::ErrorCode::TooLarge => show_error(page, "document-failed", "The document is too large for this viewer."),
         _ => show_error(page, "document-failed", "This file is not a Word document this viewer can read."),
     }
+}
+
+/// The document needs a password: say so in the notice line (as any error, which also answers
+/// waiting `open()` calls) and show the password form. The bytes stay in `state.docx`, so the
+/// form only has to send the password.
+fn ask_password(page: &Page, code: &str, text: &str) {
+    show_error(page, code, text);
+    page.password.message.set_inner_text("Password:");
+    page.password.input.set_value("");
+    page.password.form.set_hidden(false);
+    let _ = page.password.input.focus();
+}
+
+fn submit_password(page: &Rc<Page>) {
+    let given = page.password.input.value();
+    let bytes = page.state.borrow().docx.clone();
+    let Some(bytes) = bytes.filter(|_| !given.is_empty()) else { return };
+    page.password.form.set_hidden(true);
+    page.notice.set_hidden(true);
+    page.status.set_inner_text("Opening the document\u{2026}");
+    open_document(page, bytes, Some(given));
 }
 
 /// The worker holds a document (newly opened, or laid out again after a font arrived): take
@@ -629,6 +705,11 @@ fn apply_opened(page: &Rc<Page>, opened: proto::ViewOpenedReply) {
     let _ = page.scroller.set_attribute("aria-label", &format!("Document, {} pages", opened.page_count));
     if let Some(html) = html(page) {
         let _ = html.remove_attribute("data-wordcraft-error");
+    }
+    if !page.password.form.hidden() {
+        page.password.form.set_hidden(true);
+        page.password.input.set_value("");
+        page.notice.set_hidden(true);
     }
     if !matches!(page.state.borrow().handover.phase(), Phase::LoadingEditor | Phase::HandingOver) {
         show_page_count(page);
@@ -909,6 +990,10 @@ fn load_editor(page: &Rc<Page>) {
         return dispatch(page, Event::ScriptFailed);
     }
 
+    // Until the editor publishes its page API, or the wait runs out: an editor that never
+    // reports anything (a stalled download, a module that hangs) ends in the notice, not in a
+    // poll that runs for as long as the page is open.
+    page.state.borrow_mut().editor_wait_started = js_sys::Date::now();
     let p = page.clone();
     let poll = Closure::<dyn FnMut()>::new(move || {
         if !editor_loading(&p) {
@@ -916,6 +1001,9 @@ fn load_editor(page: &Rc<Page>) {
         } else if editor_load_fn(&p).is_some() {
             stop_editor_poll(&p);
             dispatch(&p, Event::EditorReady);
+        } else if handover::editor_wait_over(js_sys::Date::now() - p.state.borrow().editor_wait_started, p.editor_wait_ms) {
+            stop_editor_poll(&p);
+            dispatch(&p, Event::EditorTimedOut);
         }
     });
     let id = page.window.set_interval_with_callback_and_timeout_and_arguments_0(poll.as_ref().unchecked_ref(), EDITOR_POLL_MS).ok();

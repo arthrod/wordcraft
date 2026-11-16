@@ -4,6 +4,33 @@
 
 use crate::mode::Mode;
 
+/// How long the page waits, from the edit action, for the editor to publish its page API
+/// before it gives up and says so. The editor is the largest download of the app (about 5 MB
+/// over Brotli), so the default leaves a slow connection time to finish; a host can set its own
+/// (`editorWaitMs`), within [`EDITOR_WAIT_MS_MIN`]..=[`EDITOR_WAIT_MS_MAX`].
+pub const EDITOR_WAIT_MS: u32 = 120_000;
+pub const EDITOR_WAIT_MS_MIN: u32 = 1_000;
+pub const EDITOR_WAIT_MS_MAX: u32 = 600_000;
+
+/// The wait to use for a host's `editorWaitMs` (a JavaScript number, or a `data-` attribute
+/// read as one): the default when absent or not a finite number, otherwise clamped.
+pub fn editor_wait_ms(given: Option<f64>) -> u32 {
+    match given {
+        Some(ms) if ms.is_finite() => {
+            // Clamped as a float first, so the cast never saturates or wraps.
+            ms.round().clamp(f64::from(EDITOR_WAIT_MS_MIN), f64::from(EDITOR_WAIT_MS_MAX)) as u32
+        }
+        _ => EDITOR_WAIT_MS,
+    }
+}
+
+/// Whether the editor has had its time: `elapsed_ms` since the edit action (a difference of
+/// `Date.now()` readings, so it can be negative or NaN if the clock jumps; neither ends the
+/// wait early, and a NaN cannot keep it open forever because the next reading is a number).
+pub fn editor_wait_over(elapsed_ms: f64, wait_ms: u32) -> bool {
+    elapsed_ms >= f64::from(wait_ms)
+}
+
 /// Where the page is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
@@ -32,6 +59,8 @@ pub enum Reason {
     StartFailed,
     /// The editor started and did not accept the document.
     HandOverFailed,
+    /// The editor did not publish its page API within the wait ([`editor_wait_ms`]).
+    TimedOut,
 }
 
 /// What happened on the page.
@@ -53,6 +82,8 @@ pub enum Event {
     StartFailed,
     /// The editor refused the document.
     HandOverFailed,
+    /// The wait for the editor's page API ran out.
+    EditorTimedOut,
 }
 
 /// What the page does next.
@@ -86,12 +117,14 @@ pub struct Handover {
     viewer_started: bool,
     /// In [`Phase::HandingOver`]: the editor has the document and only painting is awaited.
     accepted: bool,
+    /// The editor runs for a host bridge ([`Handover::hosted`]): the viewer is never started.
+    hosted: bool,
 }
 
 impl Handover {
     /// The machine for a page in `mode`, and what the page does first.
     pub fn start(mode: Mode, can_edit: bool) -> (Handover, Vec<Action>) {
-        let mut machine = Handover { mode, can_edit, phase: Phase::Viewing, viewer_started: false, accepted: false };
+        let mut machine = Handover { mode, can_edit, phase: Phase::Viewing, viewer_started: false, accepted: false, hosted: false };
         let actions = match (mode, can_edit) {
             (Mode::EditorFirst, true) => {
                 machine.phase = Phase::LoadingEditor;
@@ -109,6 +142,17 @@ impl Handover {
             }
         };
         (machine, actions)
+    }
+
+    /// The machine for an editor-first page that a host drives through the editor's own bridge
+    /// (`?host=`): the page is the editor's, as it was before the viewer existed. The editor is
+    /// fetched without a WebGL probe, because the editor itself tells the host when it cannot
+    /// start (`wordcraft:failed`), and a failure leaves the notice but never starts the viewer:
+    /// the viewer would open the sample, and a hosted page opens only what the host sends.
+    pub fn hosted() -> (Handover, Vec<Action>) {
+        let machine =
+            Handover { mode: Mode::EditorFirst, can_edit: true, phase: Phase::LoadingEditor, viewer_started: false, accepted: false, hosted: true };
+        (machine, vec![Action::ShowLoading, Action::LoadEditor])
     }
 
     pub fn phase(&self) -> Phase {
@@ -147,6 +191,7 @@ impl Handover {
                 vec![Action::HideLoading, Action::RemoveViewer]
             }
             (Phase::LoadingEditor, Event::ScriptFailed) => self.fail(Reason::LoadFailed),
+            (Phase::LoadingEditor, Event::EditorTimedOut) => self.fail(Reason::TimedOut),
             (Phase::LoadingEditor | Phase::HandingOver, Event::StartFailed) => self.fail(Reason::StartFailed),
             (Phase::HandingOver, Event::HandOverFailed) if !self.accepted => self.fail(Reason::HandOverFailed),
             _ => Vec::new(),
@@ -157,7 +202,7 @@ impl Handover {
     fn fail(&mut self, reason: Reason) -> Vec<Action> {
         self.phase = Phase::ViewerOnly(reason);
         let mut actions = vec![Action::HideLoading];
-        if !self.viewer_started {
+        if !self.viewer_started && !self.hosted {
             self.viewer_started = true;
             actions.push(Action::StartViewer);
         }
