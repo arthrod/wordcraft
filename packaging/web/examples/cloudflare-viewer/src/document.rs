@@ -118,15 +118,6 @@ fn check_inflated_size(package: &[u8]) -> Result<(), OpenError> {
     Ok(())
 }
 
-/// The size in pixels the core draws a page of `size` points at `scale`: its own arithmetic
-/// (single precision, rounded up, at least one pixel), so the `width`/`height` attributes on an
-/// `<img>` match the PNG.
-pub fn raster_size(size: PageSize, scale: f32) -> (u32, u32) {
-    // A float-to-integer cast saturates and sends NaN to 0.
-    let side = |points: f32| ((points * scale).ceil() as u32).max(1);
-    (side(size.width), side(size.height.min(1e6)))
-}
-
 /// `scale`, or a smaller one that keeps a page of `size` points under [`MAX_PAGE_PIXELS`]: a
 /// poster is drawn smaller rather than refused.
 pub fn fit_scale(size: PageSize, scale: f32) -> f32 {
@@ -137,6 +128,13 @@ pub fn fit_scale(size: PageSize, scale: f32) -> f32 {
     // One pixel of rounding up on each side, so stay a little under the cap.
     let fit = ((MAX_PAGE_PIXELS as f64 * 0.98) / area).sqrt();
     if f64::from(scale) <= fit { scale } else { (fit as f32).max(f32::MIN_POSITIVE) }
+}
+
+/// The size in pixels [`page_png`] draws page `index` (0-based) at `scale` (fitted), or why it
+/// won't, without drawing anything.
+pub fn page_raster(session: &Session, index: u32, scale: f32) -> Result<(u32, u32), OpenError> {
+    let size = session.page_size(index).map_err(from_viewer)?;
+    session.raster_size(index, fit_scale(size, scale)).map_err(|e| OpenError::Unrenderable(e.to_string()))
 }
 
 /// Page `index` (0-based) at `scale` (fitted), as PNG bytes with its width and height.
@@ -171,6 +169,11 @@ pub(crate) mod tests {
     /// A small real package: the paragraphs as a `.docx`, through the same zip writer and
     /// content types a `.docx` has. Built by hand so the tests need no writer crate.
     pub(crate) fn docx(paragraphs: &[&str]) -> Vec<u8> {
+        docx_sized(paragraphs, "12240", "15840")
+    }
+
+    /// [`docx`] on pages of `w`×`h` twentieths of a point (`w:pgSz`), taken as written.
+    pub(crate) fn docx_sized(paragraphs: &[&str], w: &str, h: &str) -> Vec<u8> {
         let body: String = paragraphs.iter().map(|p| format!("<w:p><w:r><w:t xml:space=\"preserve\">{p}</w:t></w:r></w:p>")).collect();
         let parts: [(&str, String); 3] = [
             (
@@ -184,7 +187,7 @@ pub(crate) mod tests {
             (
                 "word/document.xml",
                 format!(
-                    r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body></w:document>"#
+                    r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body}<w:sectPr><w:pgSz w:w="{w}" w:h="{h}"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body></w:document>"#
                 ),
             ),
         ];
@@ -331,18 +334,33 @@ pub(crate) mod tests {
         assert_eq!(open_document(&plain, Some("whatever")).map(|s| s.page_count()).ok(), Some(1));
     }
 
+    /// The viewer page sizes its image as the core does, refusals included: a page the core
+    /// won't draw (a side past the rasteriser's 16,000 pixels, which fitting to the pixel cap
+    /// doesn't prevent for a long thin page) gets the image's own status, not an `<img>` with a
+    /// size the image never has.
     #[test]
-    fn sizes_match_the_core_and_posters_are_fitted() {
+    fn the_viewer_page_sizes_its_image_as_the_core_does() {
+        fonts();
+        // 200 × 1 inch, the reader's largest width: 28,000 × 140 pixels at 2.0.
+        let s = open_document(&docx_sized(&["x"], "288000", "1440"), None).unwrap();
+        let drawn = page_png(&s, 0, 2.0);
+        assert!(matches!(drawn, Err(OpenError::Unrenderable(_))), "{drawn:?}");
+        let sized = page_raster(&s, 0, 2.0);
+        assert_eq!(sized.as_ref().err().map(OpenError::status), Some(422), "{sized:?}");
+        // At 1.0 it fits, and both agree on the size.
+        let (_, w, h) = page_png(&s, 0, 1.0).unwrap();
+        assert_eq!(page_raster(&s, 0, 1.0), Ok((w, h)));
+    }
+
+    #[test]
+    fn posters_are_fitted() {
         let letter = PageSize { width: 612.0, height: 792.0 };
-        assert_eq!(raster_size(letter, 1.0), (612, 792));
-        assert_eq!(raster_size(letter, 1.25), (765, 990));
-        assert_eq!(raster_size(PageSize { width: 595.3, height: 841.9 }, 1.0), (596, 842));
         assert_eq!(fit_scale(letter, 2.0), 2.0);
         // A 2 × 3 m poster: drawn under the pixel cap, not refused.
         let poster = PageSize { width: 5669.0, height: 8504.0 };
         let s = fit_scale(poster, 1.0);
-        let (w, h) = raster_size(poster, s);
-        assert!(s > 0.0 && s < 1.0 && u64::from(w) * u64::from(h) <= MAX_PAGE_PIXELS, "{s} {w}×{h}");
+        let (w, h) = ((poster.width * s).ceil() as u64, (poster.height * s).ceil() as u64);
+        assert!(s > 0.0 && s < 1.0 && w * h <= MAX_PAGE_PIXELS, "{s} {w}×{h}");
         // Junk page sizes give a positive, finite scale, never NaN.
         for size in [PageSize { width: 0.0, height: 0.0 }, PageSize { width: f32::NAN, height: 1.0 }, PageSize { width: f32::INFINITY, height: 1.0 }]
         {
@@ -376,7 +394,7 @@ pub(crate) mod tests {
             let (png, w, h) = page_png(&s, index, scale).unwrap();
             let core = s.render(index, scale).unwrap();
             assert_eq!((w, h), (core.width, core.height));
-            assert_eq!((w, h), raster_size(s.page_size(index).unwrap(), scale));
+            assert_eq!(page_raster(&s, index, scale), Ok((w, h)));
             let decoded = crate::png_out::tests::decode_rgba(&png);
             assert_eq!(decoded.0, (w, h));
             assert_same_page(&decoded.1, &core, &format!("page {index} at {scale}"));

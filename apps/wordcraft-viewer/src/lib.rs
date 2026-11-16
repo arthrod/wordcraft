@@ -224,6 +224,13 @@ impl Session {
         Ok(PageSize { width: p.w, height: p.h })
     }
 
+    /// The size in pixels [`Session::render`] draws page `page` (0-based) at `scale`, or the
+    /// error it would refuse with, without drawing anything: for a host that sizes an image
+    /// before asking for its pixels.
+    pub fn raster_size(&self, page: u32, scale: f32) -> Result<(u32, u32), ViewerError> {
+        raster_size(self.page(page)?, scale)
+    }
+
     /// Page `page` (0-based) drawn at `scale` pixels per point.
     pub fn render(&self, page: u32, scale: f32) -> Result<PageImage, ViewerError> {
         let p = self.page(page)?;

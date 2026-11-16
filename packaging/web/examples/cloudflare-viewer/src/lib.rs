@@ -113,11 +113,15 @@ async fn view_page(env: &Env, url: &Url) -> worker::Result<Response> {
         Ok(s) => s,
         Err(resp) => return Ok(resp),
     };
-    let (_, size) = match page_of(&session, &query) {
+    let (index, _) = match page_of(&session, &query) {
         Ok(found) => found,
         Err(resp) => return resp,
     };
-    let (width, height) = document::raster_size(size, document::fit_scale(size, query.scale));
+    // The core's own size, or its refusal: the status the image would answer with.
+    let (width, height) = match document::page_raster(&session, index, query.scale) {
+        Ok(px) => px,
+        Err(e) => return error_response(e.status(), "The page can't be drawn", &e.to_string()),
+    };
     html_response(200, caching, html::viewer_page(doc, query.page, session.page_count(), width, height, query.scale))
 }
 
