@@ -467,7 +467,7 @@ fn save(s: &mut Session, v: &Value) -> CmdResult {
         // A Markdown save gives the file a new own text, so the unsaved `md_latest` snapshots on
         // the undo/redo stacks no longer stand for it. A save in any other format (a .docx) keeps
         // them: Undo still finds the exact Markdown a step's document came from.
-        if true {
+        if markdown_save {
             s.clear_md_latest_history();
         }
     }
