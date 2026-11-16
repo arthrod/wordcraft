@@ -207,9 +207,13 @@ fn bytes_of(val: &JsValue) -> Option<js_sys::Uint8Array> {
 /// must be the page's own: a host that changes, transfers or detaches its buffer after `open()`
 /// would otherwise hand the editor other bytes than the ones the reader sees. The one long-lived
 /// copy on the page (the frame sent to the worker is transferred away).
+/// Past [`proto::MAX_VIEW_DOC_BYTES`] the host's bytes are not copied: the viewer refuses them,
+/// and that limit is there to bound what the page allocates. (A startup document that large is
+/// still kept for the editor, which opens it itself: as the host's own buffer, not a copy.)
 fn document_of(val: &JsValue) -> Option<js_sys::Uint8Array> {
     bytes_of(val).map(|bytes| match bytes.length() {
         0 => js_sys::Uint8Array::new_with_length(0),
+        n if n as usize > proto::MAX_VIEW_DOC_BYTES => bytes,
         n => bytes.slice(0, n),
     })
 }

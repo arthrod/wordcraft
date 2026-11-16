@@ -901,6 +901,30 @@ try {
       /^rejected: .*too large/i.test(tooBig.got) && tooBig.error === null && tooBig.status === tooBig.before && tooBig.status.length > 0 && tooBig.count === 6 && tooBig.edit && /too large/i.test(tooBig.notice ?? ""),
       JSON.stringify(tooBig),
     );
+    // And the page never copies bytes it is going to refuse for their size: the limit bounds
+    // what the page allocates, so the length is judged before any copy (a Uint8Array and an
+    // ArrayBuffer alike).
+    const uncopied = await slow.page.evaluate(async () => {
+      const LIMIT = 64 * 1024 * 1024;
+      const real = Uint8Array.prototype.slice;
+      let copied = 0;
+      Uint8Array.prototype.slice = function (...a) {
+        if (this.length > LIMIT) copied += this.length;
+        return real.apply(this, a);
+      };
+      try {
+        const view = await window.wordcraftViewer.open(new Uint8Array(LIMIT + 1)).then(() => "resolved", (e) => `rejected: ${e.message}`);
+        const buffer = await window.wordcraftViewer.open(new ArrayBuffer(LIMIT + 1)).then(() => "resolved", (e) => `rejected: ${e.message}`);
+        return { view, buffer, copied };
+      } finally {
+        Uint8Array.prototype.slice = real;
+      }
+    });
+    check(
+      "open() of a document too large: refused without copying the host's bytes",
+      /too large/i.test(uncopied.view) && /too large/i.test(uncopied.buffer) && uncopied.copied === 0,
+      JSON.stringify(uncopied),
+    );
     check("open() races: no uncaught errors", slow.log.uncaught.length === 0, slow.log.uncaught.join(" | "));
     await slow.page.close();
 
@@ -973,6 +997,30 @@ try {
     check("start() then open() in one task: the host's document is opened once", once.opened === 6 && once.count === 6 && once.viewOpens === 1, JSON.stringify(once));
     check("start() then open() in one task: no uncaught errors", sameTask.log.uncaught.length === 0, sameTask.log.uncaught.join(" | "));
     await sameTask.page.close();
+
+    // A startup document past the size limit: refused for its size, and not copied first.
+    const bigStart = await open(browser, base, "/", {
+      init: [
+        () => {
+          const LIMIT = 64 * 1024 * 1024;
+          const real = Uint8Array.prototype.slice;
+          window.__copied = 0;
+          Uint8Array.prototype.slice = function (...a) {
+            if (this.length > LIMIT) window.__copied += this.length;
+            return real.apply(this, a);
+          };
+          addEventListener("TrunkApplicationStarted", () => window.wasmBindings.start({ document: new Uint8Array(LIMIT + 1), installGlobal: true }));
+        },
+      ],
+    });
+    await bigStart.page.waitForFunction(() => document.documentElement.hasAttribute("data-wordcraft-error"), { timeout: 30000 }).catch(() => {});
+    const bigState = await bigStart.page.evaluate(() => ({
+      error: document.documentElement.getAttribute("data-wordcraft-error"),
+      notice: document.querySelector("#wordcraft_viewer_notice")?.hidden === false ? document.querySelector("#wordcraft_viewer_notice").innerText : null,
+      copied: window.__copied,
+    }));
+    check("start({document}) too large: refused for its size without copying the host's bytes", bigState.error === "document-failed" && /too large/i.test(bigState.notice ?? "") && bigState.copied === 0, JSON.stringify(bigState));
+    await bigStart.page.close();
 
     // A page whose canvas cannot be made is not asked of the worker in a loop.
     const noCanvas = await open(browser, base, "/", {
