@@ -1,0 +1,325 @@
+//! A tiny server-rendered WordCraft viewer: a Cloudflare Worker (`workers-rs`) that opens a
+//! `.docx` with the view-only core (`wordcraft-viewer`) and sends the reader a small HTML page
+//! and PNG images of the pages. No wasm and no script reach the browser.
+//!
+//! Routes (the Worker runs first only for these; everything else is the static site):
+//! - `GET /view?doc=samples/welcome.docx&page=1[&scale=1]`: the viewer page for a document of
+//!   this deployment, read through the `ASSETS` binding.
+//! - `GET /view/page.png?doc=...&page=N[&scale=S]`: one page as `image/png`.
+//! - `GET /view`: the upload form. `POST /view` (multipart): the uploaded document's pages,
+//!   inline as `data:` PNGs, never stored or logged.
+//!
+//! The pure logic (parameters, HTML, form data, opening and drawing, the font manifest) lives in
+//! the modules below and is what the host tests call; this file is the thin layer over `worker`.
+
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
+
+mod document;
+mod fonts;
+mod html;
+mod limits;
+mod multipart;
+mod params;
+mod png_out;
+
+use std::cell::RefCell;
+use std::collections::BTreeSet;
+use std::rc::Rc;
+
+use futures_util::StreamExt;
+use worker::{ByteStream, Context, Env, Headers, Method, Request, Response, Url, event};
+
+use crate::document::OpenError;
+use crate::limits::{ASSET_CACHE_CONTROL, DEFAULT_SCALE, MAX_BODY_BYTES, MAX_INLINE_PAGES, MAX_MANIFEST_BYTES, MAX_RESPONSE_BYTES};
+use crate::params::{DocPath, ParamError, ViewQuery};
+
+const HTML_TYPE: &str = "text/html; charset=utf-8";
+
+/// How long a response may be kept.
+#[derive(Clone, Copy)]
+enum Caching {
+    /// Made from a deployed document, or the same for everyone: [`ASSET_CACHE_CONTROL`].
+    Asset,
+    /// Made from an upload, or an error: `no-store`.
+    NoStore,
+}
+
+fn response(status: u16, content_type: &str, caching: Caching, body: Vec<u8>) -> worker::Result<Response> {
+    let headers = Headers::new();
+    headers.set("Content-Type", content_type)?;
+    headers.set(
+        "Cache-Control",
+        match caching {
+            Caching::Asset => ASSET_CACHE_CONTROL,
+            Caching::NoStore => "no-store",
+        },
+    )?;
+    headers.set("X-Content-Type-Options", "nosniff")?;
+    headers.set("Referrer-Policy", "no-referrer")?;
+    if content_type == HTML_TYPE {
+        headers.set("Content-Security-Policy", html::CONTENT_SECURITY_POLICY)?;
+    }
+    Ok(Response::from_bytes(body)?.with_status(status).with_headers(headers))
+}
+
+fn html_response(status: u16, caching: Caching, html: String) -> worker::Result<Response> {
+    response(status, HTML_TYPE, caching, html.into_bytes())
+}
+
+fn error_response(status: u16, title: &str, detail: &str) -> worker::Result<Response> {
+    html_response(status, Caching::NoStore, html::error_page(status, title, detail))
+}
+
+fn method_not_allowed(allow: &str) -> worker::Result<Response> {
+    let mut resp = error_response(405, "Method not allowed", &format!("This address answers {allow}."))?;
+    resp.headers_mut().set("Allow", allow)?;
+    Ok(resp)
+}
+
+#[event(fetch)]
+async fn fetch(mut req: Request, env: Env, _ctx: Context) -> worker::Result<Response> {
+    let url = req.url()?;
+    match url.path() {
+        "/view" => match req.method() {
+            Method::Get | Method::Head => view_page(&env, &url).await,
+            Method::Post => upload(&mut req, &env, &url).await,
+            _ => method_not_allowed("GET, HEAD, POST"),
+        },
+        "/view/page.png" => match req.method() {
+            Method::Get | Method::Head => page_image(&env, &url).await,
+            _ => method_not_allowed("GET, HEAD"),
+        },
+        path if path.starts_with("/view/") => error_response(404, "Not found", "There is nothing at this address."),
+        // Only the routes above run the Worker first (`wrangler.toml`); anything else that
+        // reaches it is the static site's.
+        _ => env.assets("ASSETS")?.fetch_request(req).await,
+    }
+}
+
+/// A query refused: 400, saying which parameter and why.
+fn bad_query(e: ParamError) -> worker::Result<Response> {
+    error_response(400, "Bad request", &e.to_string())
+}
+
+/// `GET /view`: the viewer page for `doc`, or the upload form when there is no `doc`.
+async fn view_page(env: &Env, url: &Url) -> worker::Result<Response> {
+    let query = match params::parse_view_query(url.query(), DEFAULT_SCALE) {
+        Ok(q) => q,
+        Err(e) => return bad_query(e),
+    };
+    let Some(doc) = &query.doc else {
+        return html_response(200, Caching::Asset, html::upload_form(None, false));
+    };
+    let session = match asset_session(env, url, doc).await? {
+        Ok(s) => s,
+        Err(resp) => return Ok(resp),
+    };
+    let (_, size) = match page_of(&session, &query) {
+        Ok(found) => found,
+        Err(resp) => return resp,
+    };
+    let (width, height) = document::raster_size(size, document::fit_scale(size, query.scale));
+    html_response(200, Caching::Asset, html::viewer_page(doc, query.page, session.page_count(), width, height, query.scale))
+}
+
+/// `GET /view/page.png`: one page of `doc` as a PNG.
+async fn page_image(env: &Env, url: &Url) -> worker::Result<Response> {
+    let query = match params::parse_view_query(url.query(), DEFAULT_SCALE) {
+        Ok(q) => q,
+        Err(e) => return bad_query(e),
+    };
+    let Some(doc) = &query.doc else {
+        return error_response(400, "Bad request", "The doc parameter is required.");
+    };
+    let session = match asset_session(env, url, doc).await? {
+        Ok(s) => s,
+        Err(resp) => return Ok(resp),
+    };
+    let (index, _) = match page_of(&session, &query) {
+        Ok(found) => found,
+        Err(resp) => return resp,
+    };
+    match document::page_png(&session, index, query.scale) {
+        Ok((png, _, _)) => response(200, "image/png", Caching::Asset, png),
+        Err(e) => error_response(e.status(), "The page can't be drawn", &e.to_string()),
+    }
+}
+
+/// The 0-based index and size of the query's page, or a 404 past the end.
+fn page_of(session: &wordcraft_viewer::Session, query: &ViewQuery) -> Result<(u32, wordcraft_viewer::PageSize), worker::Result<Response>> {
+    let pages = session.page_count();
+    let index = query.page.saturating_sub(1);
+    match session.page_size(index) {
+        Ok(size) => Ok((index, size)),
+        Err(_) => Err(error_response(404, "No such page", &format!("The document has {pages} page{}.", if pages == 1 { "" } else { "s" }))),
+    }
+}
+
+/// Open the deployed document `doc`, with any font packs it asks for. The inner `Err` is the
+/// response to send instead (404 for a missing document, 4xx for one that can't be opened).
+async fn asset_session(env: &Env, url: &Url, doc: &DocPath) -> worker::Result<Result<wordcraft_viewer::Session, Response>> {
+    let bytes = match fetch_asset(env, url, doc.as_str(), MAX_BODY_BYTES).await? {
+        Fetched::Bytes(b) => b,
+        Fetched::Missing => return Ok(Err(error_response(404, "No such document", "This site has no document by that name.")?)),
+        Fetched::TooLarge => {
+            return Ok(Err(error_response(413, "Document too large", &OpenError::TooLarge { bytes: MAX_BODY_BYTES + 1 }.to_string())?));
+        }
+    };
+    match document::open_document(&bytes, None) {
+        Ok(mut session) => {
+            install_wanted_packs(env, url, &mut session).await;
+            Ok(Ok(session))
+        }
+        Err(OpenError::PasswordRequired) => Ok(Err(error_response(
+            422,
+            "Protected document",
+            "This document is protected with a password. Upload it at /view to open it with its password.",
+        )?)),
+        Err(e) => Ok(Err(error_response(e.status(), "The document can't be opened", &e.to_string())?)),
+    }
+}
+
+enum Fetched {
+    Bytes(Vec<u8>),
+    Missing,
+    TooLarge,
+}
+
+/// Read the deployed file at `path` (relative to the site root) through `ASSETS`, at most `cap`
+/// bytes. Only paths the Worker built (a validated `doc`, a manifest entry) reach here.
+async fn fetch_asset(env: &Env, base: &Url, path: &str, cap: usize) -> worker::Result<Fetched> {
+    let target = base.join(&format!("/{path}"))?;
+    let assets = env.assets("ASSETS")?;
+    let mut resp = assets.fetch_request(Request::new(target.as_str(), Method::Get)?).await?;
+    if resp.status_code() != 200 {
+        return Ok(Fetched::Missing);
+    }
+    match read_capped(resp.stream()?, cap).await {
+        Ok(bytes) => Ok(Fetched::Bytes(bytes)),
+        Err(Capped::TooLarge) => Ok(Fetched::TooLarge),
+        Err(Capped::Broken) => Ok(Fetched::Missing),
+    }
+}
+
+enum Capped {
+    TooLarge,
+    Broken,
+}
+
+/// A body read chunk by chunk, refused as soon as it passes `cap`: a lying or missing
+/// Content-Length can't grow the buffer past it.
+async fn read_capped(mut stream: ByteStream, cap: usize) -> Result<Vec<u8>, Capped> {
+    let mut out = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| Capped::Broken)?;
+        if out.len().saturating_add(chunk.len()) > cap {
+            return Err(Capped::TooLarge);
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
+}
+
+/// `POST /view`: render an uploaded document's pages inline. Nothing about the upload is
+/// stored, logged or echoed (its file name is shown back, escaped; the password never).
+async fn upload(req: &mut Request, env: &Env, url: &Url) -> worker::Result<Response> {
+    let form_error = |status: u16, notice: &str, ask_password: bool| -> worker::Result<Response> {
+        html_response(status, Caching::NoStore, html::upload_form(Some(notice), ask_password))
+    };
+    let too_large = OpenError::TooLarge { bytes: MAX_BODY_BYTES + 1 }.to_string();
+    if let Some(len) = req.headers().get("Content-Length")?
+        && len.trim().parse::<u64>().is_ok_and(|n| n > MAX_BODY_BYTES as u64)
+    {
+        return form_error(413, &too_large, false);
+    }
+    let content_type = req.headers().get("Content-Type")?.unwrap_or_default();
+    let boundary = match multipart::boundary(&content_type) {
+        Ok(b) => b,
+        Err(e) => return form_error(if e == multipart::FormError::NotMultipart { 415 } else { 400 }, &e.to_string(), false),
+    };
+    let body = match read_capped(req.stream()?, MAX_BODY_BYTES).await {
+        Ok(b) => b,
+        Err(Capped::TooLarge) => return form_error(413, &too_large, false),
+        Err(Capped::Broken) => return form_error(400, "The upload was interrupted.", false),
+    };
+    let form = match multipart::parse(&body, &boundary) {
+        Ok(f) => f,
+        Err(e) => return form_error(400, &e.to_string(), false),
+    };
+    let mut session = match document::open_document(form.file, form.password.as_deref()) {
+        Ok(s) => s,
+        Err(e @ (OpenError::PasswordRequired | OpenError::WrongPassword)) => {
+            return form_error(e.status(), &format!("{e} Choose the file again and enter its password."), true);
+        }
+        Err(e) => return form_error(e.status(), &e.to_string(), false),
+    };
+    install_wanted_packs(env, url, &mut session).await;
+
+    let total = session.page_count();
+    let mut images: Vec<(usize, Vec<u8>, u32, u32)> = Vec::new();
+    // Room for the page around the images, with the longest note it can carry.
+    let frame = html::upload_result(form.file_name.as_deref(), &[], total, Some(&html::left_out_note(total, 0, true))).len();
+    let mut budget = MAX_RESPONSE_BYTES.saturating_sub(frame);
+    let mut stopped_for_size = false;
+    for index in 0..total.min(MAX_INLINE_PAGES) {
+        let Ok(page) = u32::try_from(index) else { break };
+        let (png, w, h) = match document::page_png(&session, page, DEFAULT_SCALE) {
+            Ok(drawn) => drawn,
+            Err(e) => return form_error(e.status(), &e.to_string(), false),
+        };
+        let cost = html::inline_page_cost(png.len());
+        if cost > budget {
+            stopped_for_size = true;
+            break;
+        }
+        budget -= cost;
+        images.push((index.saturating_add(1), png, w, h));
+    }
+    let shown = images.len();
+    let left_out = (shown < total).then(|| html::left_out_note(total, shown, stopped_for_size));
+    let pages: Vec<html::InlinePage<'_>> =
+        images.iter().map(|(number, png, width, height)| html::InlinePage { number: *number, width: *width, height: *height, png }).collect();
+    html_response(200, Caching::NoStore, html::upload_result(form.file_name.as_deref(), &pages, total, left_out.as_deref()))
+}
+
+thread_local! {
+    /// `fonts/manifest.json`, read once per isolate (`None` until then).
+    static MANIFEST: RefCell<Option<Rc<Vec<fonts::Face>>>> = const { RefCell::new(None) };
+    /// Pack files already tried in this isolate, whatever the outcome: never fetched twice.
+    static TRIED: RefCell<BTreeSet<String>> = const { RefCell::new(BTreeSet::new()) };
+}
+
+/// Install the font packs laying `session` out asked for, then lay it out again. Best effort:
+/// a pack that can't be read leaves the text in a substitute face, as before.
+async fn install_wanted_packs(env: &Env, base: &Url, session: &mut wordcraft_viewer::Session) {
+    let wanted = wordcraft_fonts::FontDb::global().take_wanted_packs();
+    if wanted.is_empty() {
+        return;
+    }
+    let Some(faces) = manifest(env, base).await else { return };
+    let picks = TRIED.with(|t| fonts::files_for(&faces, &wanted, &t.borrow()));
+    let mut installed = false;
+    for i in picks {
+        let Some(face) = faces.get(i) else { continue };
+        TRIED.with(|t| t.borrow_mut().insert(face.file.clone()));
+        let Ok(Fetched::Bytes(packed)) = fetch_asset(env, base, &format!("fonts/{}", face.file), wordcraft_fonts::MAX_FONT_FILE_BYTES).await else {
+            continue;
+        };
+        let Ok(ttf) = wordcraft_fonts::decode_pack_bytes(&packed, face.bytes) else { continue };
+        installed |= wordcraft_fonts::FontDb::global().install_pack_font(&face.file, &ttf).is_ok();
+    }
+    if installed {
+        session.relayout();
+    }
+}
+
+/// The parsed manifest, fetched on first use. A failed fetch is retried on a later request.
+async fn manifest(env: &Env, base: &Url) -> Option<Rc<Vec<fonts::Face>>> {
+    if let Some(m) = MANIFEST.with(|m| m.borrow().clone()) {
+        return Some(m);
+    }
+    let Ok(Fetched::Bytes(json)) = fetch_asset(env, base, "fonts/manifest.json", MAX_MANIFEST_BYTES).await else { return None };
+    let faces = Rc::new(fonts::parse_manifest(&json).ok()?);
+    MANIFEST.with(|m| *m.borrow_mut() = Some(faces.clone()));
+    Some(faces)
+}
