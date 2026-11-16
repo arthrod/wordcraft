@@ -14,7 +14,7 @@ craft-wordmodel = { workspace = true }
 wordcraft-doc = { workspace = true }
 wordcraft-model-bridge = { workspace = true }
 craft-xml = { workspace = true }
-serde = { workspace = true }
+# The Fit One Page budget is kept as JSON inside its custom XML part (`fit.rs`).
 serde_json = { workspace = true }
 
 [dev-dependencies]
