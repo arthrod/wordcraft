@@ -292,29 +292,23 @@ fn load_embedded_fonts(doc: &Document) -> wordcraft_fonts::DocumentFaces {
         .into_iter()
         .filter_map(|f| wordcraft_fonts::decode_font_file(&f.data).ok().map(|data| (data, f.name)))
         .collect();
-    let db = wordcraft_fonts::FontDb::global();
     let mut used = EMBEDDED_FONT_BYTES.lock().unwrap_or_else(PoisonError::into_inner);
-    // A file the database keeps already costs nothing more; a new one is let in while it fits
-    // what is left, and charged below only if the database adds a face of it.
-    let mut room = MAX_EMBEDDED_FONT_BYTES.saturating_sub(*used);
-    let files: Vec<_> = files.into_iter().filter(|(data, name)| db.keeps_document_file(data, name) || take_room(&mut room, data.len())).collect();
-    if files.is_empty() {
-        return wordcraft_fonts::DocumentFaces::default();
-    }
-    let faces = db.add_document_fonts_scoped(files);
-    *used = used.saturating_add(faces.new_bytes());
-    faces
+    admit_embedded_fonts(wordcraft_fonts::FontDb::global(), files, &mut used, MAX_EMBEDDED_FONT_BYTES)
 }
 
-/// Take `len` out of `room` if it fits.
-fn take_room(room: &mut usize, len: usize) -> bool {
-    match room.checked_sub(len) {
-        Some(left) => {
-            *room = left;
-            true
-        }
-        None => false,
-    }
+/// Add a document's embedded font `files` to `db`, while the bytes kept fit `limit` with the
+/// `used` ones; `used` counts the bytes kept.
+fn admit_embedded_fonts(
+    db: &wordcraft_fonts::FontDb,
+    files: Vec<(Vec<u8>, String)>,
+    used: &mut usize,
+    limit: usize,
+) -> wordcraft_fonts::DocumentFaces {
+    // Only the bytes the database newly keeps are charged: a file it keeps already, or one
+    // adding no face (a font the host installed), costs nothing and takes no room.
+    let faces = db.add_document_fonts_scoped(files, limit.saturating_sub(*used));
+    *used = used.saturating_add(faces.new_bytes());
+    faces
 }
 
 impl Session {
@@ -494,14 +488,39 @@ pub fn install_font(name: &str, bytes: &[u8]) -> Result<(), ViewerError> {
 mod tests {
     use super::*;
 
+    /// The repository's JetBrains Mono under `family` (the same length as its own name).
+    fn font_named(family: &str) -> Vec<u8> {
+        const ORIGINAL: &str = "JetBrains Mono";
+        assert_eq!(family.len(), ORIGINAL.len());
+        let mut data = std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts/JetBrainsMono-Regular.ttf")).unwrap();
+        let utf16 = |s: &str| s.encode_utf16().flat_map(u16::to_be_bytes).collect::<Vec<u8>>();
+        for (from, to) in [(utf16(ORIGINAL), utf16(family)), (ORIGINAL.as_bytes().to_vec(), family.as_bytes().to_vec())] {
+            let mut i = 0;
+            while let Some(at) = data[i..].windows(from.len()).position(|w| w == from) {
+                data[i + at..i + at + to.len()].copy_from_slice(&to);
+                i += at + to.len();
+            }
+        }
+        data
+    }
+
     #[test]
-    fn embedded_fonts_stop_loading_at_the_process_budget() {
-        let mut room = 10;
-        let fits: Vec<bool> = [4, 5, 3, 1].into_iter().map(|n| take_room(&mut room, n)).collect();
-        assert_eq!(fits, [true, true, false, true], "the third would pass it; what is left still takes a file that fits");
-        assert_eq!(room, 0);
-        assert!(!take_room(&mut room, 1), "spent");
-        assert!(take_room(&mut room, 0));
+    fn an_embedded_font_that_adds_no_face_leaves_its_room_to_the_next() {
+        // The budget has room for one file. The document's first file is a font the host
+        // installed already, so it adds no face and keeps nothing: the second, new, still fits.
+        let db = wordcraft_fonts::FontDb::with_font_dirs(vec![]);
+        let (hosted, own) = (font_named("JetBrains Hst1"), font_named("JetBrains Own2"));
+        assert_eq!(hosted.len(), own.len());
+        assert!(db.add_document_fonts(vec![(hosted.clone(), "JetBrains Hst1".into())]) > 0);
+        let mut used = 0;
+        let faces = admit_embedded_fonts(&db, vec![(hosted, "JetBrains Hst1".into()), (own.clone(), "JetBrains Own2".into())], &mut used, own.len());
+        assert_eq!(faces.len(), 1, "the second file's face is added");
+        assert_eq!(used, own.len(), "only the bytes kept are charged");
+        assert_eq!(db.styles("JetBrains Own2"), ["Regular"]);
+        // Spent: a further new file is left out.
+        let more = admit_embedded_fonts(&db, vec![(font_named("JetBrains Mor3"), "JetBrains Mor3".into())], &mut used, own.len());
+        assert!(more.is_empty());
+        assert_eq!(used, own.len());
     }
 
     #[test]

@@ -4,7 +4,9 @@
 //! same faces instead of new ones. Used by the view-only core, which shows one document at a
 //! time; the editor's documents keep [`FontDb::add_document_fonts`].
 
-use std::collections::HashSet;
+use std::collections::hash_map::RandomState;
+use std::collections::{HashMap, HashSet};
+use std::hash::BuildHasher;
 use std::sync::{Arc, PoisonError};
 
 use super::names::{MAX_FAMILY_NAME, MAX_FILE_FACES};
@@ -35,13 +37,43 @@ impl DocumentFaces {
     }
 }
 
-/// A font file one document embedded, kept with the faces made for it so that a document
-/// embedding it again gets the same faces ([`FontDb::add_document_fonts_scoped`]).
-pub(super) struct KeptFile {
-    data: Arc<Vec<u8>>,
+/// The font files documents embedded, kept for the life of the database so that a document
+/// opened again reuses its faces ([`FontDb::add_document_fonts_scoped`]). Found by the name a
+/// file was given, its length and a hash of its bytes; the bytes are compared only with a file
+/// that matches all three. The hash has per-process random keys, so two kept files under one
+/// key take a 64-bit collision no document can aim at: a file is hashed once and compared with
+/// at most the one file it is.
+#[derive(Default)]
+pub(super) struct DocumentFiles {
+    hasher: RandomState,
+    files: HashMap<FileKey, Vec<KeptFile>>,
+}
+
+/// What a kept font file is found by ([`DocumentFiles`]).
+#[derive(PartialEq, Eq, Hash)]
+struct FileKey {
     /// The name it was given to go by ([`given_name`]).
     name: Option<String>,
+    len: usize,
+    hash: u64,
+}
+
+/// A font file one document embedded, kept with the faces made for it so that a document
+/// embedding it again gets the same faces ([`FontDb::add_document_fonts_scoped`]).
+struct KeptFile {
+    data: Arc<Vec<u8>>,
     faces: Vec<Arc<FontFace>>,
+}
+
+impl DocumentFiles {
+    fn key(&self, data: &[u8], name: Option<String>) -> FileKey {
+        FileKey { name, len: data.len(), hash: self.hasher.hash_one(data) }
+    }
+
+    /// The kept file `data` is, found under `key` (its own).
+    fn find(&self, key: &FileKey, data: &[u8]) -> Option<&KeptFile> {
+        self.files.get(key)?.iter().find(|k| k.data.as_slice() == data)
+    }
 }
 
 /// The name a font file is given to go by, as [`FontDb::add_document_fonts`] takes it: trimmed,
@@ -94,34 +126,43 @@ impl FontDb {
     /// A file the database already keeps from an earlier document (the same bytes under the same
     /// name) brings back the faces made for it then: opening a document again, or another that
     /// embeds the same font, makes no new faces and keeps no new bytes. A file whose faces were
-    /// all already present is not kept. [`DocumentFaces::new_bytes`] counts the bytes this call
-    /// newly kept, which stay for the life of the process: the caller bounds them.
-    pub fn add_document_fonts_scoped(&self, files: Vec<(Vec<u8>, String)>) -> DocumentFaces {
+    /// all already present is not kept and costs nothing. A new file is kept while its bytes fit
+    /// what is left of `room`, in the order given; one past it is left out (not even read).
+    /// [`DocumentFaces::new_bytes`] counts the bytes this call newly kept, which stay for the
+    /// life of the process: `room` is the caller's bound on them.
+    pub fn add_document_fonts_scoped(&self, files: Vec<(Vec<u8>, String)>, room: usize) -> DocumentFaces {
         let mut kept = self.document_files.lock().unwrap_or_else(PoisonError::into_inner);
         let mut known = Vec::new();
         let mut fresh = Vec::new();
         for (data, name) in files {
-            let name = given_name(&name);
-            match kept.iter().find(|k| k.name == name && *k.data == data) {
+            let key = kept.key(&data, given_name(&name));
+            match kept.find(&key, &data) {
                 Some(k) => known.extend(k.faces.iter().cloned()),
+                None if data.len() > room => {}
                 None => {
                     let data = Arc::new(data);
-                    let faces = file_faces(&data, name.as_deref());
-                    fresh.push(KeptFile { data, name, faces });
+                    let faces = file_faces(&data, key.name.as_deref());
+                    fresh.push((key, KeptFile { data, faces }));
                 }
             }
         }
         let mut list = self.faces.write().unwrap_or_else(PoisonError::into_inner);
         let mut present: HashSet<_> = list.iter().map(|g| key(g)).collect();
         let mut added: Vec<Arc<FontFace>> = known.into_iter().filter(|f| present.insert(key(f))).collect();
-        let mut new_bytes = 0usize;
-        for file in fresh {
-            let from_file: Vec<_> = file.faces.iter().filter(|f| present.insert(key(f))).cloned().collect();
-            if !from_file.is_empty() {
-                new_bytes = new_bytes.saturating_add(file.data.len());
-                added.extend(from_file);
-                kept.push(file);
-            }
+        let (mut room, mut new_bytes) = (room, 0usize);
+        for (file_key, file) in fresh {
+            let mut own = HashSet::new();
+            let from_file: Vec<_> = file.faces.iter().filter(|f| !present.contains(&key(f)) && own.insert(key(f))).cloned().collect();
+            // A file adding no face keeps nothing and costs nothing; one adding faces is kept
+            // while it fits.
+            let Some(left) = room.checked_sub(file.data.len()).filter(|_| !from_file.is_empty()) else {
+                continue;
+            };
+            room = left;
+            new_bytes = new_bytes.saturating_add(file.data.len());
+            present.extend(own);
+            added.extend(from_file);
+            kept.files.entry(file_key).or_default().push(file);
         }
         list.extend(added.iter().cloned());
         drop(list);
@@ -130,13 +171,6 @@ impl FontDb {
             self.forget_choices();
         }
         DocumentFaces { faces: added, new_bytes }
-    }
-
-    /// Whether `data` under `name` is a font file the database keeps from an earlier document
-    /// ([`FontDb::add_document_fonts_scoped`]), so adding it again keeps no new bytes.
-    pub fn keeps_document_file(&self, data: &[u8], name: &str) -> bool {
-        let name = given_name(name);
-        self.document_files.lock().unwrap_or_else(PoisonError::into_inner).iter().any(|k| k.name == name && k.data.as_slice() == data)
     }
 
     /// Take a document's faces out of the font list: lookups no longer find them, and fallback

@@ -68,7 +68,7 @@ pub struct FontDb {
     /// [`user::MAX_USER_FONTS`], or answer to [`FontDb::remove_user_font`].
     pub(crate) packs: RwLock<crate::packs::PackFonts>,
     /// The font files documents embedded, kept for the life of the database ([`document`]).
-    document_files: Mutex<Vec<document::KeptFile>>,
+    document_files: Mutex<document::DocumentFiles>,
     /// Bumped whenever user fonts are added or removed ([`FontDb::generation`]).
     generation: AtomicU64,
     /// The folders the system font scan reads (the platform's font folders for [`FontDb::global`]).
@@ -149,7 +149,7 @@ impl FontDb {
             catalog: RwLock::new(Vec::new()),
             user: RwLock::new(user::UserFonts::default()),
             packs: RwLock::new(crate::packs::PackFonts::default()),
-            document_files: Mutex::new(Vec::new()),
+            document_files: Mutex::new(document::DocumentFiles::default()),
             generation: AtomicU64::new(0),
             font_dirs,
             #[cfg(not(target_arch = "wasm32"))]
