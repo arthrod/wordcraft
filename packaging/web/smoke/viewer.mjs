@@ -998,6 +998,39 @@ try {
     check("start() then open() in one task: no uncaught errors", sameTask.log.uncaught.length === 0, sameTask.log.uncaught.join(" | "));
     await sameTask.page.close();
 
+    // start({document}) then open() of another: the page's copy of the startup document is let
+    // go once the other one is shown (only the document in play is kept). The copy is the
+    // `slice` start() makes of the host's bytes, watched through a WeakRef after a collection.
+    const replaced = await open(browser, base, "/", {
+      hooks: true,
+      init: [
+        (doc) => {
+          const real = Uint8Array.prototype.slice;
+          Uint8Array.prototype.slice = function (...a) {
+            const copy = real.apply(this, a);
+            if (window.__starting && !window.__startCopy && copy.length === doc.length) window.__startCopy = new WeakRef(copy);
+            return copy;
+          };
+          addEventListener("TrunkApplicationStarted", () => {
+            window.__starting = true;
+            window.wasmBindings.start({ document: new Uint8Array(doc), installGlobal: true });
+            window.__starting = false;
+          });
+        },
+        six,
+      ],
+    });
+    await replaced.page.waitForFunction(() => window.wordcraftViewer && document.querySelectorAll("#wordcraft_viewer canvas[data-scale]").length > 0, { timeout: 30000 }).catch(() => {});
+    const swapped = await replaced.page.evaluate((doc) => window.wordcraftViewer.open(new Uint8Array(doc)).then((a) => a.pageCount, (e) => `rejected: ${e.message}`), long);
+    await new Promise((r) => setTimeout(r, 1500));
+    const cdp = await replaced.page.createCDPSession();
+    await cdp.send("HeapProfiler.collectGarbage");
+    await cdp.send("HeapProfiler.collectGarbage");
+    const startCopy = await replaced.page.evaluate(() => (window.__startCopy ? (window.__startCopy.deref() ? "kept" : "released") : "never made"));
+    check("start({document}) then open() of another: the startup copy is let go", swapped === 41 && startCopy === "released", JSON.stringify({ swapped, startCopy }));
+    check("start({document}) then open() of another: no uncaught errors", replaced.log.uncaught.length === 0, replaced.log.uncaught.join(" | "));
+    await replaced.page.close();
+
     // A startup document past the size limit: refused for its size, and not copied first.
     const bigStart = await open(browser, base, "/", {
       init: [

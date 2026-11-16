@@ -57,8 +57,8 @@ const PASSWORD_TOO_LONG: &str = "That password is too long.";
 const EMPTY: &str = "The document is empty.";
 /// Pixels kept in painted pages outside the window, in bytes of RGBA.
 const CACHE_BUDGET_BYTES: u64 = 192 << 20;
-/// Where the document comes from. Kept after the viewer reads it: if the viewer fails, the
-/// editor fetches it again.
+/// Where the document comes from. Kept until a document is held (`State::hold`): if the viewer
+/// fails before, the editor fetches it again.
 #[derive(Clone)]
 enum Source {
     /// Nothing was given: the viewer shows the built-in sample, the editor what it shows by
@@ -106,6 +106,16 @@ struct State {
     /// `opens` when the password form was shown: the form sends a password only for the
     /// document it asked about, never for one that replaced it or was put back.
     password_for: Option<u32>,
+}
+
+impl State {
+    /// `bytes` are the document in play now: kept for the hand-over, and what was given at the
+    /// start is let go (it is read only while no document is held, so it would otherwise stay,
+    /// a second long-lived copy, for the life of the page).
+    fn hold(&mut self, bytes: js_sys::Uint8Array) {
+        self.docx = Some(bytes);
+        self.source = Source::Unset;
+    }
 }
 
 struct Page {
@@ -617,7 +627,7 @@ fn restore_shown(page: &Rc<Page>, text: &str) -> bool {
     let Some((bytes, password)) = page.state.borrow().shown.clone() else { return false };
     {
         let mut state = page.state.borrow_mut();
-        state.docx = Some(bytes);
+        state.hold(bytes);
         state.password = password;
     }
     if let Some(html) = html(page) {
@@ -706,7 +716,7 @@ async fn document_bytes(page: &Rc<Page>, for_viewer: bool, opens: u32) -> Result
         return Ok(None);
     }
     let bytes = bytes?;
-    state.docx = Some(bytes.clone());
+    state.hold(bytes.clone());
     Ok(Some(bytes))
 }
 
@@ -750,7 +760,7 @@ fn open_document(page: &Rc<Page>, bytes: js_sys::Uint8Array, password: Option<St
         let stale = forget_pages(page);
         {
             let mut state = page.state.borrow_mut();
-            state.docx = Some(bytes);
+            state.hold(bytes);
             state.opens = state.opens.wrapping_add(1);
         }
         drop(stale);
@@ -771,7 +781,7 @@ fn open_document(page: &Rc<Page>, bytes: js_sys::Uint8Array, password: Option<St
     let stale = forget_pages(page);
     let generation = {
         let mut state = page.state.borrow_mut();
-        state.docx = Some(bytes);
+        state.hold(bytes);
         state.password = password;
         state.opens = state.opens.wrapping_add(1);
         state.generation
