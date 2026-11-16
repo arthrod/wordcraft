@@ -180,8 +180,9 @@ fn an_editor_that_never_starts_times_out_into_the_viewer() {
     h.on(Event::EditRequested);
     assert_eq!(h.on(Event::EditorTimedOut), vec![Action::HideLoading, Action::ShowNotice(Reason::TimedOut)]);
     assert_eq!(h.phase(), Phase::ViewerOnly(Reason::TimedOut));
-    // An editor that turns up afterwards, or another deadline, changes nothing.
-    for late in [Event::EditorReady, Event::EditorTimedOut, Event::StartFailed, Event::EditRequested] {
+    // Another deadline, a late failure or an edit action changes nothing. (An editor that does
+    // turn up afterwards takes over: `an_editor_that_arrives_after_the_wait_takes_over`.)
+    for late in [Event::EditorTimedOut, Event::StartFailed, Event::EditRequested] {
         assert_eq!(h.on(late), Vec::new(), "{late:?}");
     }
     assert!(!h.edit_offered());
@@ -214,11 +215,6 @@ fn the_wait_is_bounded_whatever_the_host_passes() {
     assert_eq!(editor_wait_ms(Some(0.0)), EDITOR_WAIT_MS_MIN);
     assert_eq!(editor_wait_ms(Some(2_500.4)), 2_500);
     assert_eq!(editor_wait_ms(Some(1e300)), EDITOR_WAIT_MS_MAX);
-    assert!(!editor_wait_over(0.0, 3_000));
-    assert!(!editor_wait_over(2_999.0, 3_000));
-    assert!(editor_wait_over(3_000.0, 3_000));
-    assert!(!editor_wait_over(-1e9, 3_000), "a clock that jumps back does not end the wait");
-    assert!(!editor_wait_over(f64::NAN, 3_000));
 }
 
 #[test]
@@ -246,4 +242,78 @@ fn a_hosted_page_that_fails_never_starts_the_viewer() {
     let (mut h, _) = Handover::hosted();
     h.on(Event::EditorReady);
     assert_eq!(h.on(Event::HandOverFailed), vec![Action::HideLoading, Action::ShowNotice(Reason::HandOverFailed)]);
+}
+
+#[test]
+fn no_edit_action_while_the_password_is_asked_for() {
+    let (mut h, _) = started(Mode::ViewerFirst, true);
+    assert_eq!(h.on(Event::PasswordAsked), Vec::new());
+    assert!(!h.edit_offered(), "the Edit control is withdrawn");
+    assert_eq!(h.on(Event::EditRequested), Vec::new(), "the Edit control, a double click, Enter/F2 and edit() all land here");
+    assert_eq!(h.phase(), Phase::Viewing);
+    // A wrong password asks again: still locked.
+    assert_eq!(h.on(Event::PasswordAsked), Vec::new());
+    assert!(!h.edit_offered());
+    assert_eq!(h.on(Event::DocumentOpened), Vec::new());
+    assert!(h.edit_offered());
+    assert_eq!(h.on(Event::EditRequested), vec![Action::ShowLoading, Action::LoadEditor]);
+}
+
+#[test]
+fn a_document_opening_unlocks_whatever_was_asked_before() {
+    let (mut h, _) = started(Mode::ViewerFirst, true);
+    h.on(Event::PasswordAsked);
+    h.on(Event::DocumentOpened);
+    h.on(Event::DocumentOpened);
+    assert!(h.edit_offered());
+    // view-only never offers it, locked or not.
+    let (mut v, _) = started(Mode::ViewOnly, true);
+    v.on(Event::DocumentOpened);
+    assert!(!v.edit_offered());
+}
+
+#[test]
+fn an_editor_that_arrives_after_the_wait_takes_over() {
+    let (mut h, _) = started(Mode::ViewerFirst, true);
+    h.on(Event::EditRequested);
+    h.on(Event::EditorTimedOut);
+    assert_eq!(h.on(Event::EditorReady), vec![Action::HideNotice, Action::ShowLoading, Action::HandOver]);
+    assert_eq!(h.phase(), Phase::HandingOver);
+    assert_eq!(h.on(Event::DocumentAccepted), vec![Action::AwaitPaint]);
+    assert_eq!(h.on(Event::EditorPainted), vec![Action::HideLoading, Action::RemoveViewer]);
+    assert_eq!(h.phase(), Phase::Editing);
+}
+
+#[test]
+fn a_late_editor_that_then_fails_says_so_again() {
+    let (mut h, _) = started(Mode::ViewerFirst, true);
+    h.on(Event::EditRequested);
+    h.on(Event::EditorTimedOut);
+    h.on(Event::EditorReady);
+    assert_eq!(h.on(Event::HandOverFailed), vec![Action::HideLoading, Action::ShowNotice(Reason::HandOverFailed)]);
+    // Its start failing after the wait is the same notice the wait gave: nothing to redo.
+    let (mut late, _) = started(Mode::ViewerFirst, true);
+    late.on(Event::EditRequested);
+    late.on(Event::EditorTimedOut);
+    assert_eq!(late.on(Event::StartFailed), Vec::new());
+    assert_eq!(late.phase(), Phase::ViewerOnly(Reason::TimedOut));
+}
+
+#[test]
+fn only_a_timed_out_load_is_taken_over_late() {
+    // The other failures have no editor that could still arrive.
+    for (setup, reason) in [(Event::ScriptFailed, Reason::LoadFailed), (Event::StartFailed, Reason::StartFailed)] {
+        let (mut h, _) = started(Mode::ViewerFirst, true);
+        h.on(Event::EditRequested);
+        h.on(setup);
+        assert_eq!(h.on(Event::EditorReady), Vec::new(), "{reason:?}");
+        assert_eq!(h.phase(), Phase::ViewerOnly(reason));
+    }
+    let (mut h, _) = started(Mode::ViewerFirst, false);
+    h.on(Event::EditRequested);
+    assert_eq!(h.on(Event::EditorReady), Vec::new(), "no WebGL: nothing was fetched");
+    // A hosted page's late editor takes over too.
+    let (mut hosted, _) = Handover::hosted();
+    hosted.on(Event::EditorTimedOut);
+    assert_eq!(hosted.on(Event::EditorReady), vec![Action::HideNotice, Action::ShowLoading, Action::HandOver]);
 }

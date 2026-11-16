@@ -50,9 +50,6 @@ const SAMPLE_FILE: &str = "samples/welcome.docx";
 const VIEWER_GLOBAL: &str = "wordcraftViewer";
 /// Pixels kept in painted pages outside the window, in bytes of RGBA.
 const CACHE_BUDGET_BYTES: u64 = 192 << 20;
-/// How often the page looks for the editor's API while the editor loads, in milliseconds.
-const EDITOR_POLL_MS: i32 = 50;
-
 /// Where the document comes from.
 enum Source {
     /// Nothing was given: the viewer shows the built-in sample, the editor what it shows by
@@ -87,9 +84,8 @@ struct State {
     painted_once: bool,
     /// The viewer's DOM is gone (the editor took over).
     removed: bool,
-    editor_poll: Option<i32>,
-    /// `Date.now()` when the page started waiting for the editor's page API.
-    editor_wait_started: f64,
+    /// The editor's page API was seen: the wait for it is over.
+    editor_seen: bool,
     /// `resolve`/`reject` of `open()` calls waiting for the worker's answer.
     open_waiters: Vec<(js_sys::Function, js_sys::Function)>,
 }
@@ -118,6 +114,7 @@ struct PasswordAsk {
     form: web_sys::HtmlElement,
     message: web_sys::HtmlElement,
     input: web_sys::HtmlInputElement,
+    cancel: web_sys::HtmlElement,
 }
 
 thread_local! {
@@ -292,8 +289,7 @@ fn launch(options: &JsValue, auto: bool) -> Result<JsValue, JsValue> {
             refresh_queued: false,
             painted_once: false,
             removed: false,
-            editor_poll: None,
-            editor_wait_started: 0.0,
+            editor_seen: false,
             open_waiters: Vec::new(),
         }),
     });
@@ -405,11 +401,20 @@ fn build_password_ask(document: &web_sys::Document) -> Option<PasswordAsk> {
     )?;
     let _ = open.set_attribute("type", "submit");
     open.set_inner_text("Open");
+    let cancel = element(
+        document,
+        "button",
+        "font:inherit;margin-left:8px;color:#2b47b5;background:transparent;border:1px solid #94a3b8;border-radius:4px;padding:3px 12px;cursor:pointer;",
+    )?;
+    let _ = cancel.set_attribute("type", "button");
+    cancel.set_id("wordcraft_viewer_password_cancel");
+    cancel.set_inner_text("Cancel");
     label.append_child(&message).ok()?;
     label.append_child(&input).ok()?;
     form.append_child(&label).ok()?;
     form.append_child(&open).ok()?;
-    Some(PasswordAsk { form, message, input })
+    form.append_child(&cancel).ok()?;
+    Some(PasswordAsk { form, message, input, cancel })
 }
 
 fn listen(target: &web_sys::EventTarget, kind: &str, handler: impl FnMut(web_sys::Event) + 'static) {
@@ -425,6 +430,8 @@ fn wire_listeners(page: &Rc<Page>) {
         event.prevent_default();
         submit_password(&p);
     });
+    let p = page.clone();
+    listen(&page.password.cancel, "click", move |_| cancel_password(&p));
     let p = page.clone();
     listen(&page.scroller, "scroll", move |_| schedule_refresh(&p));
     let p = page.clone();
@@ -463,6 +470,7 @@ fn run(page: &Rc<Page>, actions: Vec<Action>) {
             Action::HideLoading => show_page_count(page),
             Action::RemoveViewer => remove_viewer(page),
             Action::ShowNotice(reason) => show_notice(page, reason),
+            Action::HideNotice => hide_notice(page),
         }
     }
     sync_phase(page);
@@ -513,6 +521,13 @@ fn show_notice(page: &Page, reason: Reason) {
     page.notice.set_hidden(false);
     if let Some(html) = html(page) {
         let _ = html.set_attribute("data-wordcraft-notice", code);
+    }
+}
+
+fn hide_notice(page: &Page) {
+    page.notice.set_hidden(true);
+    if let Some(html) = html(page) {
+        let _ = html.remove_attribute("data-wordcraft-notice");
     }
 }
 
@@ -674,12 +689,24 @@ fn on_opened(page: &Rc<Page>, generation: u32, env: &proto::Envelope, payload: &
 /// The document needs a password: say so in the notice line (as any error, which also answers
 /// waiting `open()` calls) and show the password form. The bytes stay in `state.docx`, so the
 /// form only has to send the password.
-fn ask_password(page: &Page, code: &str, text: &str) {
+/// Until a document opens, the edit actions are withdrawn (`Event::PasswordAsked`): the
+/// editor would be handed bytes it cannot read.
+fn ask_password(page: &Rc<Page>, code: &str, text: &str) {
     show_error(page, code, text);
+    dispatch(page, Event::PasswordAsked);
     page.password.message.set_inner_text("Password:");
     page.password.input.set_value("");
     page.password.form.set_hidden(false);
     let _ = page.password.input.focus();
+}
+
+/// Not now: the form goes, the notice says the document is protected, and editing stays
+/// withdrawn (there is still no document the editor could take).
+fn cancel_password(page: &Page) {
+    page.password.form.set_hidden(true);
+    page.password.input.set_value("");
+    page.notice.set_inner_text("This document is protected with a password.");
+    page.notice.set_hidden(false);
 }
 
 fn submit_password(page: &Rc<Page>) {
@@ -714,6 +741,7 @@ fn apply_opened(page: &Rc<Page>, opened: proto::ViewOpenedReply) {
     if !matches!(page.state.borrow().handover.phase(), Phase::LoadingEditor | Phase::HandingOver) {
         show_page_count(page);
     }
+    dispatch(page, Event::DocumentOpened);
     relayout(page);
     ask_missing_fonts(page);
     let answer = js_sys::Object::new();
@@ -990,35 +1018,71 @@ fn load_editor(page: &Rc<Page>) {
         return dispatch(page, Event::ScriptFailed);
     }
 
-    // Until the editor publishes its page API, or the wait runs out: an editor that never
-    // reports anything (a stalled download, a module that hangs) ends in the notice, not in a
-    // poll that runs for as long as the page is open.
-    page.state.borrow_mut().editor_wait_started = js_sys::Date::now();
+    watch_for_editor(page);
+    // The deadline: one timer, not a poll. An editor that never publishes its API and never
+    // reports a failure (a stalled download, a module that hangs) ends in the notice; if it
+    // does arrive later, `watch_for_editor` still sees it and it takes over.
     let p = page.clone();
-    let poll = Closure::<dyn FnMut()>::new(move || {
-        if !editor_loading(&p) {
-            stop_editor_poll(&p);
-        } else if editor_load_fn(&p).is_some() {
-            stop_editor_poll(&p);
-            dispatch(&p, Event::EditorReady);
-        } else if handover::editor_wait_over(js_sys::Date::now() - p.state.borrow().editor_wait_started, p.editor_wait_ms) {
-            stop_editor_poll(&p);
+    let deadline = Closure::once_into_js(move || {
+        if !p.state.borrow().editor_seen {
             dispatch(&p, Event::EditorTimedOut);
         }
     });
-    let id = page.window.set_interval_with_callback_and_timeout_and_arguments_0(poll.as_ref().unchecked_ref(), EDITOR_POLL_MS).ok();
-    poll.forget();
-    page.state.borrow_mut().editor_poll = id;
-}
-
-fn editor_loading(page: &Page) -> bool {
-    matches!(page.state.borrow().handover.phase(), Phase::LoadingEditor | Phase::HandingOver)
-}
-
-fn stop_editor_poll(page: &Page) {
-    if let Some(id) = page.state.borrow_mut().editor_poll.take() {
-        page.window.clear_interval_with_handle(id);
+    let wait = i32::try_from(page.editor_wait_ms).unwrap_or(i32::MAX);
+    if page.window.set_timeout_with_callback_and_timeout_and_arguments_0(deadline.unchecked_ref(), wait).is_err() {
+        web_sys::console::warn_1(&"wordcraft viewer: no timer for the editor's deadline".into());
     }
+}
+
+/// Learn the moment the editor publishes `window.wordcraft`, without polling: the property is
+/// an accessor until the editor assigns it (`craft-web-api` assigns, it does not define), and
+/// the setter turns it back into a plain property holding the API. The editor attaches
+/// `loadDocx` to the object in the same task, so the page looks one task later. Costs
+/// nothing while the editor is away, however long that is.
+fn watch_for_editor(page: &Rc<Page>) {
+    if editor_load_fn(page).is_some() {
+        return editor_seen(page);
+    }
+    let key = JsValue::from_str(EDITOR_GLOBAL);
+    let p = page.clone();
+    let window_obj: js_sys::Object = page.window.clone().into();
+    let target = window_obj.clone();
+    let set_key = key.clone();
+    let setter = Closure::<dyn FnMut(JsValue)>::new(move |api: JsValue| {
+        let plain = js_sys::Object::new();
+        for (name, value) in [("value", api), ("writable", JsValue::TRUE), ("configurable", JsValue::TRUE), ("enumerable", JsValue::TRUE)] {
+            let _ = js_sys::Reflect::set(&plain, &JsValue::from_str(name), &value);
+        }
+        let _ = js_sys::Reflect::define_property(&target, &set_key, &plain);
+        let later = p.clone();
+        let next = Closure::once_into_js(move || editor_seen(&later));
+        let _ = p.window.set_timeout_with_callback(next.unchecked_ref());
+    });
+    let descriptor = js_sys::Object::new();
+    let getter = Closure::<dyn Fn() -> JsValue>::new(|| JsValue::UNDEFINED);
+    let _ = js_sys::Reflect::set(&descriptor, &JsValue::from_str("get"), getter.as_ref());
+    let _ = js_sys::Reflect::set(&descriptor, &JsValue::from_str("set"), setter.as_ref());
+    let _ = js_sys::Reflect::set(&descriptor, &JsValue::from_str("configurable"), &JsValue::TRUE);
+    if js_sys::Reflect::define_property(&window_obj, &key, &descriptor).unwrap_or(false) {
+        // The page has one viewer, and the accessor lives until the editor replaces it.
+        getter.forget();
+        setter.forget();
+    } else {
+        web_sys::console::warn_1(&"wordcraft viewer: could not watch for the editor".into());
+    }
+}
+
+/// The editor's page API is up (or published something without `loadDocx`, which the hand-over
+/// reports as its failure).
+fn editor_seen(page: &Rc<Page>) {
+    page.state.borrow_mut().editor_seen = true;
+    dispatch(page, Event::EditorReady);
+}
+
+/// The editor is still the page's business: loading, being handed the document, or late after
+/// the wait (whose failures are then this page's to report, not the console's).
+fn editor_loading(page: &Page) -> bool {
+    matches!(page.state.borrow().handover.phase(), Phase::LoadingEditor | Phase::HandingOver | Phase::ViewerOnly(Reason::TimedOut))
 }
 
 /// The editor's API object and its `loadDocx`, once the editor has published them.

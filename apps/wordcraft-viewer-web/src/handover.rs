@@ -24,13 +24,6 @@ pub fn editor_wait_ms(given: Option<f64>) -> u32 {
     }
 }
 
-/// Whether the editor has had its time: `elapsed_ms` since the edit action (a difference of
-/// `Date.now()` readings, so it can be negative or NaN if the clock jumps; neither ends the
-/// wait early, and a NaN cannot keep it open forever because the next reading is a number).
-pub fn editor_wait_over(elapsed_ms: f64, wait_ms: u32) -> bool {
-    elapsed_ms >= f64::from(wait_ms)
-}
-
 /// Where the page is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
@@ -84,6 +77,11 @@ pub enum Event {
     HandOverFailed,
     /// The wait for the editor's page API ran out.
     EditorTimedOut,
+    /// The viewer asks for the open document's password. Until a document opens, no edit
+    /// action is taken: the editor would be handed a document it cannot read.
+    PasswordAsked,
+    /// The viewer opened a document (the password, if one was asked, was right).
+    DocumentOpened,
 }
 
 /// What the page does next.
@@ -105,6 +103,8 @@ pub enum Action {
     RemoveViewer,
     /// Tell the reader the editor is unavailable, and why.
     ShowNotice(Reason),
+    /// Take the notice down: the editor arrived after all.
+    HideNotice,
 }
 
 /// The machine. [`Handover::start`] gives the first actions; [`Handover::on`] the rest.
@@ -119,12 +119,14 @@ pub struct Handover {
     accepted: bool,
     /// The editor runs for a host bridge ([`Handover::hosted`]): the viewer is never started.
     hosted: bool,
+    /// The viewer is asking for the document's password ([`Event::PasswordAsked`]).
+    locked: bool,
 }
 
 impl Handover {
     /// The machine for a page in `mode`, and what the page does first.
     pub fn start(mode: Mode, can_edit: bool) -> (Handover, Vec<Action>) {
-        let mut machine = Handover { mode, can_edit, phase: Phase::Viewing, viewer_started: false, accepted: false, hosted: false };
+        let mut machine = Handover { mode, can_edit, phase: Phase::Viewing, viewer_started: false, accepted: false, hosted: false, locked: false };
         let actions = match (mode, can_edit) {
             (Mode::EditorFirst, true) => {
                 machine.phase = Phase::LoadingEditor;
@@ -150,8 +152,15 @@ impl Handover {
     /// start (`wordcraft:failed`), and a failure leaves the notice but never starts the viewer:
     /// the viewer would open the sample, and a hosted page opens only what the host sends.
     pub fn hosted() -> (Handover, Vec<Action>) {
-        let machine =
-            Handover { mode: Mode::EditorFirst, can_edit: true, phase: Phase::LoadingEditor, viewer_started: false, accepted: false, hosted: true };
+        let machine = Handover {
+            mode: Mode::EditorFirst,
+            can_edit: true,
+            phase: Phase::LoadingEditor,
+            viewer_started: false,
+            accepted: false,
+            hosted: true,
+            locked: false,
+        };
         (machine, vec![Action::ShowLoading, Action::LoadEditor])
     }
 
@@ -161,14 +170,22 @@ impl Handover {
 
     /// Whether the page offers an edit action now.
     pub fn edit_offered(&self) -> bool {
-        self.mode != Mode::ViewOnly && self.phase == Phase::Viewing
+        self.mode != Mode::ViewOnly && self.phase == Phase::Viewing && !self.locked
     }
 
     /// Take `event`; the actions it calls for, in order. An event that makes no sense in the
     /// current phase (late, repeated, out of order) changes nothing.
     pub fn on(&mut self, event: Event) -> Vec<Action> {
         match (self.phase, event) {
-            (Phase::Viewing, Event::EditRequested) if self.mode == Mode::ViewOnly => Vec::new(),
+            (_, Event::PasswordAsked) => {
+                self.locked = true;
+                Vec::new()
+            }
+            (_, Event::DocumentOpened) => {
+                self.locked = false;
+                Vec::new()
+            }
+            (Phase::Viewing, Event::EditRequested) if self.mode == Mode::ViewOnly || self.locked => Vec::new(),
             (Phase::Viewing, Event::EditRequested) if !self.can_edit => {
                 self.phase = Phase::ViewerOnly(Reason::NoWebGl);
                 vec![Action::ShowNotice(Reason::NoWebGl)]
@@ -181,6 +198,14 @@ impl Handover {
                 self.phase = Phase::HandingOver;
                 self.accepted = false;
                 vec![Action::HandOver]
+            }
+            // The wait ran out but the download did not fail: the editor still starts when it
+            // arrives, and once its files are fetched nothing can stop it. So it takes over, as
+            // it would have on time, instead of running unseen under the viewer.
+            (Phase::ViewerOnly(Reason::TimedOut), Event::EditorReady) => {
+                self.phase = Phase::HandingOver;
+                self.accepted = false;
+                vec![Action::HideNotice, Action::ShowLoading, Action::HandOver]
             }
             (Phase::HandingOver, Event::DocumentAccepted) if !self.accepted => {
                 self.accepted = true;
