@@ -661,6 +661,27 @@ try {
       /^rejected: .*password/i.test(beside.got) && beside.error === null && beside.status === beside.before && beside.status.length > 0 && beside.count === 6 && beside.edit && /password/i.test(beside.notice ?? ""),
       JSON.stringify(beside),
     );
+    // open() of a document past the size limit while one is open: the same, and the notice
+    // says it is too large.
+    const tooBig = await slow.page.evaluate(async () => {
+      const status = () => document.querySelector("#wordcraft_viewer [role=status]")?.innerText ?? "";
+      const before = status();
+      const got = await window.wordcraftViewer.open(new Uint8Array(64 * 1024 * 1024 + 1)).then(() => "resolved", (e) => `rejected: ${e.message}`);
+      return {
+        got,
+        before,
+        status: status(),
+        error: document.documentElement.getAttribute("data-wordcraft-error"),
+        notice: document.querySelector("#wordcraft_viewer_notice")?.hidden === false ? document.querySelector("#wordcraft_viewer_notice").innerText : null,
+        count: window.wordcraftViewer.pageCount(),
+        edit: (document.querySelector("#wordcraft_viewer_edit")?.getClientRects().length ?? 0) > 0,
+      };
+    });
+    check(
+      "open() of a document too large beside an open document: rejected, the document untouched",
+      /^rejected: .*too large/i.test(tooBig.got) && tooBig.error === null && tooBig.status === tooBig.before && tooBig.status.length > 0 && tooBig.count === 6 && tooBig.edit && /too large/i.test(tooBig.notice ?? ""),
+      JSON.stringify(tooBig),
+    );
     check("open() races: no uncaught errors", slow.log.uncaught.length === 0, slow.log.uncaught.join(" | "));
     await slow.page.close();
 

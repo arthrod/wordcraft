@@ -572,10 +572,11 @@ fn document_failed(page: &Rc<Page>, code: &str, text: &str) {
     dispatch(page, Event::DocumentFailed);
 }
 
-/// Bytes refused before they were sent to the worker: a document already open stays open.
+/// Bytes refused before they were sent to the worker: a document already open stays open, as
+/// it was (no error flag, its status), and only the notice says why.
 fn refused(page: &Rc<Page>, text: &str) {
     if page.state.borrow().handover.document_open() {
-        show_error(page, "document-failed", text);
+        notify(page, text);
     } else {
         document_failed(page, "document-failed", text);
     }
