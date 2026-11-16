@@ -199,17 +199,57 @@ pub fn open(bytes: &[u8], password: Option<&str>) -> Result<Session, ViewerError
 /// subset of a family skipped as already present), and they are put back if it cannot be
 /// opened, when the caller keeps `current`.
 pub fn open_after(current: Option<&Session>, bytes: &[u8], password: Option<&str>) -> Result<Session, ViewerError> {
-    let db = wordcraft_fonts::FontDb::global();
-    if let Some(current) = current {
-        db.withdraw_document_fonts(&current.fonts);
+    let mut replacing = Replacement::begin(current);
+    let session = replacing.open(bytes, password)?;
+    replacing.keep();
+    Ok(session)
+}
+
+/// A document taking another's place, for a caller with more to do between the open and the
+/// switch (a reply to make): [`open_after`] in steps. `current`'s embedded fonts are withdrawn
+/// from [`Replacement::begin`]; unless [`Replacement::keep`] is called, dropping it puts the
+/// fonts back as they were, the new document's withdrawn and `current`'s reinstated, however
+/// the caller's work fails after the open.
+pub struct Replacement<'a> {
+    current: Option<&'a Session>,
+    opened: Option<wordcraft_fonts::DocumentFaces>,
+}
+
+impl<'a> Replacement<'a> {
+    /// Withdraw `current`'s embedded fonts (see [`open_after`]).
+    pub fn begin(current: Option<&'a Session>) -> Replacement<'a> {
+        if let Some(current) = current {
+            wordcraft_fonts::FontDb::global().withdraw_document_fonts(&current.fonts);
+        }
+        Replacement { current, opened: None }
     }
-    let opened = open(bytes, password);
-    if opened.is_err()
-        && let Some(current) = current
-    {
-        db.reinstate_document_fonts(&current.fonts);
+
+    /// [`open`] the replacement. Its fonts are withdrawn again if this is dropped unkept.
+    pub fn open(&mut self, bytes: &[u8], password: Option<&str>) -> Result<Session, ViewerError> {
+        let session = open(bytes, password)?;
+        if let Some(earlier) = self.opened.replace(session.fonts.clone()) {
+            wordcraft_fonts::FontDb::global().withdraw_document_fonts(&earlier);
+        }
+        Ok(session)
     }
-    opened
+
+    /// The replacement is in place: its fonts stay and `current`'s stay withdrawn.
+    pub fn keep(mut self) {
+        self.current = None;
+        self.opened = None;
+    }
+}
+
+impl Drop for Replacement<'_> {
+    fn drop(&mut self) {
+        let db = wordcraft_fonts::FontDb::global();
+        if let Some(opened) = self.opened.take() {
+            db.withdraw_document_fonts(&opened);
+        }
+        if let Some(current) = self.current.take() {
+            db.reinstate_document_fonts(&current.fonts);
+        }
+    }
 }
 
 /// Most bytes of embedded fonts one process loads, over every document it opens. A face that

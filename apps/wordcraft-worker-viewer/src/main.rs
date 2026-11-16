@@ -74,9 +74,18 @@ impl ViewerWorker {
     /// when the new one can't be opened; when it can, the fonts the one before embedded go with
     /// it.
     fn open(&mut self, payload: &[u8]) -> Outcome {
+        self.open_answering(payload, opened_reply)
+    }
+
+    /// [`ViewerWorker::open`], with the reply made by `answer`. Whatever fails before the new
+    /// document takes the old one's place, the open or the reply, leaves the fonts as they were
+    /// (the [`wordcraft_viewer::Replacement`] is dropped unkept).
+    fn open_answering(&mut self, payload: &[u8], answer: impl FnOnce(&Session) -> Outcome) -> Outcome {
         let req = proto::decode_view_open_request(payload).map_err(proto_error)?;
-        let session = wordcraft_viewer::open_after(self.session.as_ref(), &req.docx, req.password.as_deref()).map_err(viewer_error)?;
-        let opened = opened_reply(&session)?;
+        let mut replacing = wordcraft_viewer::Replacement::begin(self.session.as_ref());
+        let session = replacing.open(&req.docx, req.password.as_deref()).map_err(viewer_error)?;
+        let opened = answer(&session)?;
+        replacing.keep();
         self.session = Some(session);
         Ok(opened)
     }
@@ -454,6 +463,31 @@ mod tests {
         assert_eq!(proto::decode_envelope(&rh).unwrap().kind, Kind::ViewOpened, "{}", String::from_utf8_lossy(&rp));
         assert_eq!(open(&mut worker, &docx_in(FAMILY, None), None, 3).0.kind, Kind::ViewOpened);
         assert_eq!(missing(&mut worker, 4), Vec::<String>::new(), "the host's font is still installed");
+    }
+
+    #[test]
+    fn a_document_kept_because_its_replacement_could_not_be_answered_keeps_its_fonts() {
+        const FAMILY: &str = "JetBrains Wkr4";
+        const OTHER: &str = "JetBrains Wkr5";
+        let mut worker = ViewerWorker::new();
+        assert_eq!(open(&mut worker, &docx_in(FAMILY, Some(&font_named(FAMILY))), None, 1).0.kind, Kind::ViewOpened);
+        // The replacement opens, but its reply cannot be made: the worker keeps the first.
+        let payload =
+            proto::encode_view_open_request(&proto::ViewOpenRequest { password: None, docx: docx_in(OTHER, Some(&font_named(OTHER))) }).unwrap();
+        let refused = worker.open_answering(&payload, |_| Err((ErrorCode::Internal, "refused by the test".into())));
+        assert!(refused.is_err());
+        // Laid out again (a font arrives), it is still set in its own font.
+        let payload = proto::encode_view_install_font_request(&proto::ViewInstallFontRequest {
+            name: "JetBrains Wkr6".into(),
+            bytes: font_named("JetBrains Wkr6"),
+        })
+        .unwrap();
+        let (rh, rp) = worker.handle_message(&header(Kind::ViewInstallFont, 2), &payload);
+        assert_eq!(proto::decode_envelope(&rh).unwrap().kind, Kind::ViewOpened, "{}", String::from_utf8_lossy(&rp));
+        assert_eq!(missing(&mut worker, 2), Vec::<String>::new(), "the document kept still has its embedded font");
+        // And the replacement's font did not stay behind it.
+        assert_eq!(open(&mut worker, &docx_in(OTHER, None), None, 3).0.kind, Kind::ViewOpened);
+        assert_eq!(missing(&mut worker, 4), vec![OTHER.to_string()], "the refused replacement's font is gone with it");
     }
 
     #[test]
