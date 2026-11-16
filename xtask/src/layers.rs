@@ -62,6 +62,8 @@ pub const TABLE: &[(&str, Class)] = &[
     ("worker-codecs", Class::Exempt),
     ("worker-pdf", Class::Exempt),
     ("worker-viewer", Class::Exempt),
+    // The viewer-first page module: web-sys glue around the worker protocol, an app.
+    ("viewer-web", Class::Exempt),
     // The view-only module exposes its handle through wasm-bindgen, like the workers: an app.
     ("viewer", Class::Exempt),
     ("xtask", Class::Exempt),

@@ -7547,6 +7547,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "wordcraft-viewer-web"
+version = "0.18.1"
+dependencies = [
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "wordcraft-worker-proto",
+]
+
+[[package]]
 name = "wordcraft-web"
 version = "0.18.1"
 dependencies = [
