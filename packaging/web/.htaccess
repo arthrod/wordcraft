@@ -55,6 +55,13 @@ AddType text/javascript .js
   <FilesMatch "^wordcraft-worker-.*\.(wasm\.br|wasm|js)$">
     Header set Cache-Control "no-cache"
   </FilesMatch>
+  # The editor (wordcraft-web{.js,_loader.js,_bg.wasm}) has un-hashed names too since the
+  # viewer-first page (plan 10.3): the page module fetches it on an edit action, so it must be
+  # named at run time. A year-pinned editor would outlive every deploy: `no-cache`, as in
+  # _headers. (The page module, wordcraft-viewer-web-<hash>, stays immutable above.)
+  <FilesMatch "^wordcraft-web(\.js|_loader\.js|_bg\.wasm|_bg\.wasm\.br)$">
+    Header set Cache-Control "no-cache"
+  </FilesMatch>
 </IfModule>
 
 <IfModule mod_headers.c>

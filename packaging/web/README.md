@@ -7,13 +7,47 @@
 
 | File | What it is |
 |---|---|
-| `index.html` | Progressive loading shell (HTML/CSS skeleton + streaming WASM bootstrap). |
-| `wordcraft-web-<hash>.js` | `wasm-bindgen` glue (generated ES module). |
-| `wordcraft-web-<hash>_bg.wasm` | The compiled engine (~16.29 MB raw, ~6.69 MB gzip; 2026-11-14 build, capped under 25 MiB for Cloudflare). |
+| `index.html` | Progressive loading shell (HTML/CSS skeleton + the page module's bootstrap). |
+| `wordcraft-viewer-web-<hash>.js`, `wordcraft-viewer-web-<hash>_bg.wasm` | The page module, the first thing a visit runs (~0.2 MB raw, ~0.09 MB gzip; see [Viewer first](#viewer-first-what-a-visit-loads)). Content-hashed. |
+| `wordcraft-worker-viewer{.js,_loader.js,_bg.wasm}` | The view-only worker that lays out and paints pages for reading (~6.84 MB raw, ~3.12 MB gzip). |
+| `wordcraft-web.js`, `wordcraft-web_loader.js`, `wordcraft-web_bg.wasm` | The editor: `wasm-bindgen` glue, its loader and the compiled engine (~18.39 MB raw, ~7.29 MB gzip; 2026-11-16 build, capped under 25 MiB for Cloudflare). Fetched only on an edit action, so its names are not hashed. |
 | `i18n/` | Externalized locale TSV catalogs + `manifest.json` fetched on demand. |
-| `samples/` | Pre-bundled `.md` showcase documents (`welcome.md`, `spec.md`, `letter.md`). |
+| `samples/` | Pre-bundled showcase documents (`welcome.md`, `spec.md`, `letter.md`, and `welcome.docx`, which the viewer opens on a first visit). |
 | `_headers`, `.htaccess` | Sample header rules for Cloudflare Pages/Workers static assets, Netlify, and Apache. |
 
+
+## Viewer first: what a visit loads
+
+The static site opens documents for reading first and fetches the editor only when someone wants
+to edit (plan 10.3). A first visit downloads `index.html`, the page module
+(`wordcraft-viewer-web-<hash>`), the view-only worker (`wordcraft-worker-viewer`) and the
+document; nothing of the editor. The pages are painted on 2D canvases, so reading needs no
+WebGL.
+
+- **Edit action:** the **Edit** button, a double click on a page, or Enter or F2 with the pages
+  focused. The page module then adds the editor's script (`wordcraft-web_loader.js`), keeps the
+  pages on screen while it loads, gives it the same `.docx` bytes (and password) through the
+  editor's page API, and removes the viewer once the editor has painted.
+- **When the editor can't take over,** the pages stay and a notice says why
+  (`data-wordcraft-notice` on `<html>`): `no-webgl` (nothing of the editor is fetched),
+  `load-failed` (its files didn't download), `start-failed`, `hand-over-failed`, or `timed-out`
+  (it did not start within the wait, 120 s by default).
+- **Modes:** `?mode=view` (reading only, no Edit), `?mode=viewer-first` (the default) or
+  `?mode=edit` (the editor at once, as before the viewer existed). A page that uses the editor's
+  bridge (`?host=parent`, see below) gets the editor at once and never the viewer, so the editor
+  itself reports `wordcraft:failed` to the parent and no sample is opened.
+- **Protected documents:** the password is asked for in the page (a form under the notice line),
+  never with a browser dialog.
+- **Embedding the viewer:** the module exports `start(options)`, which resolves to the viewer's
+  API (`phase()`, `pageCount()`, `missingFonts()`, `open(bytes, password?)`, `installFont`,
+  `edit()`; also `window.wordcraftViewer` with `installGlobal: true`). Options: `container`,
+  `mode`, `document` (a `Uint8Array` or `ArrayBuffer`) or `url` (same origin), `password`,
+  `assetBase`, `installGlobal`, and `editorWaitMs` (1 s to 10 min; also `data-editor-wait-ms`
+  on the container). The page also reports its state on `<html>`: `data-wordcraft-phase`
+  (`viewing`, `loading-editor`, `handing-over`, `editing`, `viewer-only`),
+  `data-wordcraft-error` and `data-wordcraft-painted`.
+
+The npm package ships the editor only (`start()` as before); the viewer files are not in it yet.
 
 ## Browser floor (WebAssembly SIMD)
 
@@ -98,9 +132,13 @@ Memory safety inside the isolate is bounded by the decompression budgets and DOC
 
 All URLs in `index.html` are relative (`public_url = "./"` in `apps/wordcraft-web/Trunk.toml`),
 so the static site works at a domain root (`https://example.com/`), under a prefix
-(`https://example.com/tools/wordcraft/`) and from a CDN bucket. Trunk-hashed `.js`, `.wasm`, and
-`snippets/` assets carry content hashes (`immutable`), while `index.html`, `i18n/`, and `samples/`
-revalidate on fetch. Never deploy the unhashed npm package filenames under the `immutable` wildcard rule.
+(`https://example.com/tools/wordcraft/`) and from a CDN bucket. The page module
+(`wordcraft-viewer-web-<hash>`) and `snippets/` carry content hashes (`immutable`), while
+`index.html`, `i18n/`, `samples/`, the editor (`wordcraft-web.js`, `wordcraft-web_loader.js`,
+`wordcraft-web_bg.wasm`) and the workers (`wordcraft-worker-*`) revalidate on fetch: their names
+are not hashed, because the page module names them at run time. A host that pins un-hashed names
+for a year keeps serving an old editor after every deploy. Never deploy the unhashed npm package
+filenames under the `immutable` wildcard rule either.
 
 ## Required server settings
 
@@ -108,9 +146,13 @@ revalidate on fetch. Never deploy the unhashed npm package filenames under the `
   any other type, and the app then loads slowly or not at all. Serve `.js` as `text/javascript`.
   Most hosts already do both. For nginx, check that `mime.types` has `application/wasm wasm;`.
 - **Compression:** turn on gzip or Brotli for `.wasm`, `.js` and `.html`. Gzip takes the release
-  `.wasm` from ~16.29 MB raw to ~6.69 MB (2026-11-14 build).
-- **Caching:** `Cache-Control: public, max-age=31536000, immutable` on the Trunk-hashed `.wasm`,
-  `.js`, and `snippets/` files, and `no-cache` on `index.html` (and revalidated `i18n/` / `samples/`).
+  editor's `.wasm` from ~18.39 MB raw to ~7.29 MB (2026-11-16 build), and the view-only worker's
+  from ~6.84 MB to ~3.12 MB.
+- **Caching:** `Cache-Control: public, max-age=31536000, immutable` on the content-hashed page
+  module (`wordcraft-viewer-web-<hash>`) and `snippets/` files, and `no-cache` on `index.html`,
+  the editor (`wordcraft-web{.js,_loader.js,_bg.wasm}`), the workers (`wordcraft-worker-*`) and
+  the revalidated `i18n/` / `samples/`. `_headers` and `.htaccess` already say so; the editor
+  costs one revalidation per file on a visit that edits (a 304 when unchanged).
 - **HTTPS:** Clipboard integration works best in a secure context (`https://` or `http://localhost`).
 - **No special isolation headers:** WordCraft doesn't use `SharedArrayBuffer`, so it doesn't
   need `Cross-Origin-Opener-Policy` or `Cross-Origin-Embedder-Policy`. If your site already sends
@@ -127,6 +169,8 @@ location /wordcraft/ {
     # Un-hashed worker files revalidate like index.html (same exception as _headers/.htaccess):
     # a year-pinned worker older than the hashed main module fails the protocol version check.
     location ~* /wordcraft-worker-.*\.(wasm|js)$ { add_header Cache-Control "no-cache"; }
+    # The editor's names are un-hashed too (fetched on an edit action): revalidate, never pin.
+    location ~* /wordcraft-web(\.js|_loader\.js|_bg\.wasm)$ { add_header Cache-Control "no-cache"; }
     location ~* \.(wasm|js)$ { add_header Cache-Control "public, max-age=31536000, immutable"; }
     location ~* index\.html$ { add_header Cache-Control "no-cache"; }
 }
@@ -171,7 +215,8 @@ downloading them. The two sides talk `postMessage` with plain window messages th
 | `wordcraft:dirty` | app → page | `dirty`: unsaved changes appeared or went away |
 | `wordcraft:failed` | app → page | `error`: the app couldn't start (no WebGPU or WebGL2, for example) |
 
-In host mode the app opens no sample document, so the framing page should send the file to edit
+In host mode the app opens no sample document (and the viewer-first page loads the editor at once,
+without the viewer), so the framing page should send the file to edit
 and guard leaving the page while changes are unsaved. `&author=` on the iframe's URL names the
 user for the comments and tracked changes the app creates. Opening `?host=parent` outside an
 iframe gives the normal app with downloads.
@@ -198,7 +243,7 @@ Add the listeners before `init`: the app announces itself with `wordcraft:ready`
 still running, and a file sent in reply would otherwise be missed.
 
 ```js
-import init from "./wordcraft-web-<hash>.js"; // the wasm-bindgen glue shipped with the app
+import init from "./wordcraft-web.js"; // the editor's wasm-bindgen glue shipped with the app
 
 const canvas = document.getElementById("wordcraft_canvas");
 
@@ -224,7 +269,7 @@ canvas.addEventListener("wordcraft:failed", (event) => {
   showError(event.detail.error); // the app couldn't start
 });
 
-await init({ module_or_path: "./wordcraft-web-<hash>_bg.wasm" });
+await init({ module_or_path: "./wordcraft-web_bg.wasm" });
 ```
 
 - Saves are not downloads in this mode: the `bytes` in `wordcraft:save` hold the saved document,
