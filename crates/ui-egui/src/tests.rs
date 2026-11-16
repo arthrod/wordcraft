@@ -5806,8 +5806,10 @@ fn web_save_offers_the_host_its_lazy_formats_first() {
     let mut a = WordApp::new(Session::new(wordcraft_doc::Document::new()), services);
     a.run("text.insert", json!({"text": "Lazy export"})).unwrap();
     for (id, params, expect) in [("file.saveAs", json!({"path": "copy.rtf"}), "copy.rtf"), ("file.exportPdf", json!({"path": "copy"}), "copy.pdf")] {
+        // Nothing is downloaded yet: the answer says the export is under way, not done.
         let r = a.execute(id, params).unwrap();
-        assert_eq!(r, json!({"downloaded": expect, "pending": true}), "{id}");
+        assert_eq!(r, json!({"exporting": expect, "pending": true}), "{id}");
+        assert!(r.get("downloaded").is_none(), "{id}");
         let (name, password, bytes) = asked.borrow_mut().pop().unwrap();
         assert_eq!((name.as_str(), password), (expect, None));
         let doc = wordcraft_engine::io::open_bytes("document.docx", &bytes).unwrap();
