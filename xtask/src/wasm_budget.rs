@@ -74,9 +74,15 @@ fn forbidden_symbols_for(worker_stem: &str) -> &[&str] {
 /// (`cargo xtask wasm-budget --viewer`) instead of a place in [`WORKER_CEILINGS`].
 pub const VIEWER_STEM: &str = "wordcraft-viewer";
 
-/// The view-only module's ceilings. Unmeasured (plan 8.2): zero until a release build is
-/// measured (plan 8.3), so the row fails rather than pass on a guessed number.
-pub const VIEWER_CEILING: WorkerCeiling = WorkerCeiling { name: VIEWER_STEM, max_raw: 0, max_gzip: 0 };
+/// The view-only module's ceilings, at measured size plus the headroom the multi-megabyte
+/// workers got (about 3% raw, 4% gzip). Measured 2026-11-15 on the SIMD release build
+/// (`cargo build -p wordcraft-viewer --lib --target wasm32-unknown-unknown --profile
+/// wasm-release`, `wasm-bindgen --target web --weak-refs`, then `wasm-opt -Oz` with the flags
+/// `apps/wordcraft-web/index.html` gives the workers): 8,159,381 raw / 3,440,073 gzip /
+/// 2,627,147 Brotli q11. That is above the PDF worker, not below it as plan 8.3 expected: the
+/// rasteriser's picture decoders and the document model's serde code outweigh `krilla`.
+/// Ceilings ratchet down; raising one is a recorded decision in the plan.
+pub const VIEWER_CEILING: WorkerCeiling = WorkerCeiling { name: VIEWER_STEM, max_raw: 8_400_000, max_gzip: 3_575_000 };
 
 /// Crates the view-only module must never link (plan 8.2): it opens a document and paints its
 /// pages, so the editor (`wordcraft-engine`, `wordcraft-ui-egui`, `egui`, `eframe`), PDF export
