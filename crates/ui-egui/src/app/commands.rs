@@ -127,7 +127,7 @@ impl WordApp {
     }
 
     /// Tell the host the command `id` is about to run ([`Services::on_command`]).
-    fn announce_command(&self, id: &str) {
+    pub(crate) fn announce_command(&self, id: &str) {
         if let Some(seen) = &self.services.on_command {
             seen(id);
         }

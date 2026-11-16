@@ -5889,6 +5889,27 @@ fn web_lazy_pdf_shows_the_fields_as_the_engines_pdf_does() {
     assert_eq!(seqs(&a.session.doc), ["9", "9"], "the document keeps its stored results");
 }
 
+/// The context menu's spelling suggestions (right-click, Shift+F10) are a proofing command the
+/// host hears (`Services::on_command`), as when a script or the ribbon asks: on the web that
+/// starts the proofing worker on a document nobody has edited (plan 10.1).
+#[test]
+fn context_menu_suggestions_are_announced_to_the_host() {
+    let heard: std::rc::Rc<std::cell::RefCell<Vec<String>>> = Default::default();
+    let sink = heard.clone();
+    let services = Services { on_command: Some(Box::new(move |id: &str| sink.borrow_mut().push(id.to_string()))), ..Default::default() };
+    let a = WordApp::new(Session::new(wordcraft_doc::Document::from_text("Kilns fire clay.")), services);
+    let mut h = harness(a);
+    h.run_steps(4);
+    h.state_mut().canvas.want_focus = true;
+    h.run_steps(3);
+    assert!(!h.state().session.dirty, "a document nobody has edited");
+    assert!(!heard.borrow().iter().any(|id| id == "review.suggestions"));
+    h.event(egui::Event::Key { key: egui::Key::F10, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::SHIFT });
+    h.run_steps(2);
+    assert!(h.state().canvas.context_menu_open, "Shift+F10 opened the menu");
+    assert!(heard.borrow().iter().any(|id| id == "review.suggestions"), "the host heard the suggestions lookup: {:?}", heard.borrow());
+}
+
 /// A file the web host converts lands in the inbox long after the user asked to open it (plan
 /// 10.2), maybe after more typing or another open. It opens beside a document with work in it,
 /// never in its place: the unsaved text stays, still unsaved, in its own document.
