@@ -64,6 +64,19 @@ AddType text/javascript .js
   </FilesMatch>
 </IfModule>
 
+# By directory, after the by-name rules above so these win (Apache 2.4 `<If>` is merged last).
+# snippets/: wasm-bindgen's `snippets/<crate>-<id>/inlineN.js` names carry the crate's identity,
+# not a hash of the file, so the `\.(wasm|js)$` rule above must not pin them for a year.
+# i18n/ and samples/: un-hashed names, one hour then revalidate, as in _headers.
+<IfModule mod_headers.c>
+  <If "%{REQUEST_URI} =~ m#/snippets/#">
+    Header set Cache-Control "no-cache"
+  </If>
+  <If "%{REQUEST_URI} =~ m#/(i18n|samples)/#">
+    Header set Cache-Control "public, max-age=3600, must-revalidate"
+  </If>
+</IfModule>
+
 <IfModule mod_headers.c>
   <FilesMatch "^(manifest\.json)$">
     Header set Cache-Control "no-cache"

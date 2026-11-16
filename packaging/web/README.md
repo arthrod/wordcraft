@@ -133,8 +133,8 @@ Memory safety inside the isolate is bounded by the decompression budgets and DOC
 All URLs in `index.html` are relative (`public_url = "./"` in `apps/wordcraft-web/Trunk.toml`),
 so the static site works at a domain root (`https://example.com/`), under a prefix
 (`https://example.com/tools/wordcraft/`) and from a CDN bucket. The page module
-(`wordcraft-viewer-web-<hash>`) and `snippets/` carry content hashes (`immutable`), while
-`index.html`, `i18n/`, `samples/`, the editor (`wordcraft-web.js`, `wordcraft-web_loader.js`,
+(`wordcraft-viewer-web-<hash>`) carries a content hash (`immutable`), while
+`index.html`, `snippets/`, `i18n/`, `samples/`, the editor (`wordcraft-web.js`, `wordcraft-web_loader.js`,
 `wordcraft-web_bg.wasm`) and the workers (`wordcraft-worker-*`) revalidate on fetch: their names
 are not hashed, because the page module names them at run time. A host that pins un-hashed names
 for a year keeps serving an old editor after every deploy. Never deploy the unhashed npm package
@@ -149,9 +149,10 @@ filenames under the `immutable` wildcard rule either.
   editor's `.wasm` from ~17.70 MB raw to ~7.21 MB (2026-11-16 build), and the view-only worker's
   from ~5.85 MB to ~2.78 MB.
 - **Caching:** `Cache-Control: public, max-age=31536000, immutable` on the content-hashed page
-  module (`wordcraft-viewer-web-<hash>`) and `snippets/` files, and `no-cache` on `index.html`,
-  the editor (`wordcraft-web{.js,_loader.js,_bg.wasm}`), the workers (`wordcraft-worker-*`) and
-  the revalidated `i18n/` / `samples/`. `_headers` and `.htaccess` already say so; the editor
+  module (`wordcraft-viewer-web-<hash>`) only, and `no-cache` on `index.html`, the editor
+  (`wordcraft-web{.js,_loader.js,_bg.wasm}`), the workers (`wordcraft-worker-*`) and `snippets/`
+  (a snippet's directory name comes from its crate, not from the file's content). `i18n/` and
+  `samples/` are cached for an hour and then revalidated. `_headers` and `.htaccess` already say so; the editor
   costs one revalidation per file on a visit that edits (a 304 when unchanged).
 - **HTTPS:** Clipboard integration works best in a secure context (`https://` or `http://localhost`).
 - **No special isolation headers:** WordCraft doesn't use `SharedArrayBuffer`, so it doesn't
