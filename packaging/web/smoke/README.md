@@ -94,7 +94,7 @@ Trunk release build (`dist/web`) with the deployed Content-Security-Policy and d
 Chrome through the viewer-first flow.
 
 ```sh
-cd apps/wordcraft-web && trunk build --release          # dist/web
+(cd apps/wordcraft-web && trunk build --release)        # writes dist/web
 node packaging/web/smoke/viewer.mjs --dist dist/web --core <dir> --out <results.json>
 ```
 
