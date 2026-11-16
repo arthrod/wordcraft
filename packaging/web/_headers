@@ -32,17 +32,41 @@
   Vary: Accept-Encoding
   Cache-Control: no-cache
 
-/wordcraft-web-*.wasm
+# The page's first module, the viewer-first page module (plan 10.3): content-hashed by Trunk.
+/wordcraft-viewer-web-*.wasm
   Cache-Control: public, max-age=31536000, immutable
 
-/wordcraft-web-*.js
+/wordcraft-viewer-web-*.js
   Cache-Control: public, max-age=31536000, immutable
+
+# The editor (wordcraft-web{.js,_loader.js,_bg.wasm}) is fetched on an edit action, by a script
+# element the page module adds, so its names must be known at run time: Trunk builds it as a
+# secondary target with un-hashed names. Like the workers below it is therefore `no-cache`,
+# never `immutable`: one revalidation per file on a visit that edits (a 304 when unchanged).
+/wordcraft-web.js
+  Cache-Control: no-cache
+
+/wordcraft-web_loader.js
+  Cache-Control: no-cache
+
+/wordcraft-web_bg.wasm
+  Cache-Control: no-cache
+
+/wordcraft-web_bg.wasm.br
+  ! Content-Type
+  ! Content-Encoding
+  ! Vary
+  ! Cache-Control
+  Content-Type: application/wasm
+  Content-Encoding: br
+  Vary: Accept-Encoding
+  Cache-Control: no-cache
 
 # Dedicated worker artifacts (wordcraft-worker-proof{,_bg.wasm,_loader.js}): Trunk keeps
 # worker names un-hashed because they must be named at runtime, so — unlike the content-hashed
-# wordcraft-web-* files — they can never be `immutable` (the plan's own ground rule: immutable
+# wordcraft-viewer-web-* files — they can never be `immutable` (the plan's own ground rule: immutable
 # caching only on content-hashed file names). They are `no-cache`, not a short max-age window
-# (S4): the hashed main module updates at once on a deploy, and a cached worker older than the
+# (S4): the hashed page module updates at once on a deploy, and a cached worker older than the
 # module would fail the protocol version check for the window's whole duration — a missing
 # feature, not a crash, but one the user cannot fix by reloading the module. `no-cache` costs
 # one revalidation per load (a 304 when unchanged) and closes the window entirely.

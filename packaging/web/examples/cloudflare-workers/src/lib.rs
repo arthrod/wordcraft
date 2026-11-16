@@ -78,8 +78,17 @@ fn accepts_brotli(header: &str) -> bool {
 /// named at runtime), so those follow `packaging/web/_headers`' worker rule and revalidate on
 /// every load — a worker cached past the hashed main module it talks to would fail the
 /// protocol version check for as long as the cache lives.
+///
+/// Since the viewer-first page (plan 10.3) the editor's module is un-hashed too
+/// (`wordcraft-web_bg.wasm`, fetched on an edit action), so the rule is the name itself:
+/// `immutable` only for a module whose name carries Trunk's content hash. Trunk writes that
+/// hash as a 64-bit number in hex without leading zeros, so it is up to 16 digits (15 in one
+/// build of 16); 12 is the floor, so a word made of hex letters (`-cafe`) is not a hash.
 fn wasm_sidecar_cache_control(path: &str) -> &'static str {
-    if path.rsplit('/').next().is_some_and(|name| name.starts_with("wordcraft-worker-")) { "no-cache" } else { "public, max-age=31536000, immutable" }
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let stem = name.strip_suffix(".br").unwrap_or(name).strip_suffix("_bg.wasm").unwrap_or_default();
+    let hashed = stem.rsplit_once('-').is_some_and(|(_, hash)| (12..=16).contains(&hash.len()) && hash.bytes().all(|b| b.is_ascii_hexdigit()));
+    if hashed { "public, max-age=31536000, immutable" } else { "no-cache" }
 }
 
 /// Pick the `Accept-Encoding` offer to honour: Cloudflare exposes the client's original offer
@@ -416,6 +425,14 @@ mod tests {
         assert_eq!(wasm_sidecar_cache_control("/wordcraft-worker-proof_bg.wasm"), "no-cache");
         assert_eq!(wasm_sidecar_cache_control("/wordcraft-worker-codecs_bg.wasm"), "no-cache");
         assert_eq!(wasm_sidecar_cache_control("/wordcraft-worker-proof_bg.wasm.br"), "no-cache");
+        // The viewer-first page: the page module is hashed, the lazily fetched editor is not.
+        assert_eq!(wasm_sidecar_cache_control("/wordcraft-viewer-web-0f3a5192d64fd846_bg.wasm"), "public, max-age=31536000, immutable");
+        assert_eq!(wasm_sidecar_cache_control("/wordcraft-viewer-web-e118c4fba775ab5_bg.wasm.br"), "public, max-age=31536000, immutable");
+        assert_eq!(wasm_sidecar_cache_control("/wordcraft-worker-cafe_bg.wasm"), "no-cache");
+        assert_eq!(wasm_sidecar_cache_control("/wordcraft-web_bg.wasm"), "no-cache");
+        assert_eq!(wasm_sidecar_cache_control("/wordcraft-web_bg.wasm.br"), "no-cache");
+        assert_eq!(wasm_sidecar_cache_control("/wordcraft-worker-viewer_bg.wasm"), "no-cache");
+        assert_eq!(wasm_sidecar_cache_control("/nested/wordcraft-web-not-a-hash-at-all_bg.wasm"), "no-cache");
     }
 
     /// F8: the `br` decision must match the Accept-Encoding token, not a substring of another
