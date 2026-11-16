@@ -1,6 +1,6 @@
 //! `cargo xtask wasm-budget`: inspect `dist/web/wordcraft-web*_bg.wasm` and every
 //! `dist/web/wordcraft-worker-*_bg.wasm`, report section sizes and the gzip/Brotli sizes, and
-//! enforce size + symbol ceilings per artifact and for everything loaded together.
+//! enforce size + symbol ceilings per artifact and for the first load (plan 10.5).
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -16,22 +16,33 @@ use sha2::{Digest as _, Sha384};
 /// ratchet (17,749,525 → 17.9 MB); the 2026-11-13 19.5 MB ceiling had measured an artifact
 /// `wasm-opt` had not run on (a plain `trunk build` skips it outside release mode), which the
 /// `name`-section guard below now catches.
-pub const MAX_UNCOMPRESSED_BYTES: usize = 16_500_000;
-pub const MAX_GZIPPED_BYTES: usize = 6_750_000;
+///
+/// Re-set 2026-11-16 (plan 10.5) from 16,500,000 / 6,750,000 to the measured size plus about
+/// 3% raw and 4% gzip: 17,695,535 raw / 7,205,429 gzip on the release build after the merge
+/// of `main` (which is what grew it past the old ceiling) and the typed model bridge. The
+/// editor is no longer on the first-load path (plan 10.3), so this ceiling watches the file a
+/// reader fetches on the first edit action, not the first visit.
+pub const MAX_UNCOMPRESSED_BYTES: usize = 18_227_000;
+pub const MAX_GZIPPED_BYTES: usize = 7_494_000;
 pub const MAX_DATA_SECTION_BYTES: usize = 2_750_000;
 pub const CLOUDFLARE_MAX_FILE_BYTES: usize = 25 * 1024 * 1024;
 
-/// "Everything loaded" ceilings (plan §3.5): the main module plus every dedicated worker a
-/// session may fetch, raw and gzipped. Each worker links its own copy of std, alloc and the
-/// document model, so the total grows as workers land even while the main module shrinks —
-/// this is the row that catches a sum that quietly drifts past the platform's 25 MiB file
-/// limit (still enforced per file by [`check_static_file_sizes`]) or the story the size work
-/// tells. First cut 2026-11-14 from the two-artifact build (18,764,612 raw / 7,610,740 gzip);
-/// with all three workers the measured totals are 26,827,570 raw / 11,599,922 gzip, which
-/// exceeds these ceilings — raising them is a recorded owner decision (the deferred plan's
-/// Waiting on Owner), so they stand until then and the budget reports the failure.
-pub const MAX_TOTAL_UNCOMPRESSED_BYTES: usize = 19_000_000;
-pub const MAX_TOTAL_GZIPPED_BYTES: usize = 7_750_000;
+/// The first-load ceiling (plan 10.5): the wasm a first visit fetches, which is the page
+/// module ([`PAGE_STEM`]) plus the view-only worker ([`VIEWER_WORKER_STEM`]), raw and gzipped. Measured
+/// 2026-11-16 on the release build: 6,051,105 raw / 2,876,521 gzip / 2,364,729 Brotli q11,
+/// ceiling about 3% raw and 4% gzip above. Everything else is fetched on demand and has its
+/// own row: the editor above, the workers in [`WORKER_CEILINGS`].
+///
+/// This replaces the "everything loaded" total (19,000,000 raw / 7,750,000 gzip, first cut
+/// 2026-11-14), which summed the editor and every worker. No session loads them all at once
+/// any more, and the sum had been over its ceiling since the third worker landed. The sum is
+/// still printed, without a ceiling.
+pub const MAX_FIRST_LOAD_UNCOMPRESSED_BYTES: usize = 6_233_000;
+pub const MAX_FIRST_LOAD_GZIPPED_BYTES: usize = 2_992_000;
+
+/// File-name stems the first-load page must not name outside a comment: the editor and the
+/// three on-demand workers. `wordcraft-web` does not occur inside `wordcraft-viewer-web`.
+pub const ON_DEMAND_STEMS: &[&str] = &["wordcraft-web", "wordcraft-worker-proof", "wordcraft-worker-codecs", "wordcraft-worker-pdf"];
 
 /// One dedicated worker's ceilings, at the artifact's measured size plus headroom (plan §3.5:
 /// workers get their own rows, not a shared provisional number). A worker artifact with no
@@ -44,16 +55,19 @@ pub struct WorkerCeiling {
     pub max_gzip: usize,
 }
 
-/// Measured 2026-11-14 on the SIMD release build (`trunk build --release` with
-/// `-C target-feature=+simd128`, plan §4.2), each at its size plus headroom: proof 1,012,294
-/// raw / 636,246 gzip; codecs 4,164,394 / 1,766,120; pdf 5,394,070 / 2,525,902. The view-only
+/// Measured 2026-11-16 on the release build (plan 10.5), each at its size plus about 3% raw
+/// and 4% gzip: proof 1,011,227 raw / 635,960 gzip (lowered from 1,100,000 / 700,000); codecs
+/// 4,407,114 / 1,866,280 (from 4,300,000 / 1,850,000); pdf 6,444,918 / 3,000,608 (from
+/// 5,550,000 / 2,625,000). Codecs and pdf grew with the merge of `main`; the typed model
+/// bridge then took 2.3 MB and 1.0 MB raw back off them. All three load on first use, never
+/// on a first visit. The view-only
 /// worker (plan 10.3) re-measured 2026-11-16 after the typed model bridge, on the same kind of
 /// build (no optional inputs): 5,845,030 raw / 2,784,071 gzip / 2,285,910 Brotli q11, ceilings
 /// about 3% raw and 4% gzip above.
 pub const WORKER_CEILINGS: &[WorkerCeiling] = &[
-    WorkerCeiling { name: "wordcraft-worker-proof", max_raw: 1_100_000, max_gzip: 700_000 },
-    WorkerCeiling { name: "wordcraft-worker-codecs", max_raw: 4_300_000, max_gzip: 1_850_000 },
-    WorkerCeiling { name: "wordcraft-worker-pdf", max_raw: 5_550_000, max_gzip: 2_625_000 },
+    WorkerCeiling { name: "wordcraft-worker-proof", max_raw: 1_042_000, max_gzip: 662_000 },
+    WorkerCeiling { name: "wordcraft-worker-codecs", max_raw: 4_540_000, max_gzip: 1_941_000 },
+    WorkerCeiling { name: "wordcraft-worker-pdf", max_raw: 6_639_000, max_gzip: 3_121_000 },
     WorkerCeiling { name: VIEWER_WORKER_STEM, max_raw: 6_021_000, max_gzip: 2_896_000 },
 ];
 
@@ -419,19 +433,82 @@ fn check_worker_budget(r: &WasmReport) -> Vec<String> {
     errs
 }
 
-/// The "everything loaded" totals (plan §3.5): the main module plus every worker, raw and
-/// gzipped, against [`MAX_TOTAL_UNCOMPRESSED_BYTES`] / [`MAX_TOTAL_GZIPPED_BYTES`].
-fn check_total_budget(main: &WasmReport, workers: &[WasmReport]) -> Vec<String> {
-    let raw: usize = std::iter::once(main.total_bytes).chain(workers.iter().map(|w| w.total_bytes)).fold(0usize, usize::saturating_add);
-    let gzip: usize = std::iter::once(main.gzip_bytes).chain(workers.iter().map(|w| w.gzip_bytes)).fold(0usize, usize::saturating_add);
+/// The first-load total (plan 10.5): the page module plus the view-only worker, raw and
+/// gzipped, against [`MAX_FIRST_LOAD_UNCOMPRESSED_BYTES`] / [`MAX_FIRST_LOAD_GZIPPED_BYTES`].
+/// A build without the view-only worker is an error: the page cannot show a document.
+fn check_first_load_budget(page: &WasmReport, viewer_worker: Option<&WasmReport>) -> Vec<String> {
+    let Some(worker) = viewer_worker else {
+        return vec![format!("first load: no {VIEWER_WORKER_STEM}_bg.wasm beside the page module")];
+    };
+    let raw = page.total_bytes.saturating_add(worker.total_bytes);
+    let gzip = page.gzip_bytes.saturating_add(worker.gzip_bytes);
     let mut errs = Vec::new();
-    if raw > MAX_TOTAL_UNCOMPRESSED_BYTES {
-        errs.push(format!("everything loaded: {raw} uncompressed bytes (main + workers) > ceiling {MAX_TOTAL_UNCOMPRESSED_BYTES}"));
+    if raw > MAX_FIRST_LOAD_UNCOMPRESSED_BYTES {
+        errs.push(format!("first load: {raw} uncompressed bytes (page module + view-only worker) > ceiling {MAX_FIRST_LOAD_UNCOMPRESSED_BYTES}"));
     }
-    if gzip > MAX_TOTAL_GZIPPED_BYTES {
-        errs.push(format!("everything loaded: {gzip} gzipped bytes (main + workers) > ceiling {MAX_TOTAL_GZIPPED_BYTES}"));
+    if gzip > MAX_FIRST_LOAD_GZIPPED_BYTES {
+        errs.push(format!("first load: {gzip} gzipped bytes (page module + view-only worker) > ceiling {MAX_FIRST_LOAD_GZIPPED_BYTES}"));
     }
     errs
+}
+
+/// `html` with every `<!-- ... -->` comment removed (an unterminated comment runs to the end).
+fn without_comments(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(start) = rest.find("<!--") {
+        out.push_str(rest.get(..start).unwrap_or_default());
+        let after = rest.get(start..).unwrap_or_default();
+        rest = after.find("-->").and_then(|end| after.get(end.saturating_add(3)..)).unwrap_or_default();
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The [`ON_DEMAND_STEMS`] the first-load page names outside a comment. Any hit means a first
+/// visit fetches, preloads or at least points at a file that should load on demand: the page
+/// module names those files at run time, from its own code, never from the page.
+pub fn on_demand_files_named_by_page(html: &str) -> Vec<&'static str> {
+    let live = without_comments(html);
+    ON_DEMAND_STEMS.iter().copied().filter(|stem| live.contains(stem)).collect()
+}
+
+/// The local files `html` names in `href`, `src` or a quoted `./` path of its inline module
+/// script, comments excluded, sorted and without duplicates.
+pub fn files_named_by_page(html: &str) -> Vec<String> {
+    let live = without_comments(html);
+    let mut names: Vec<String> = Vec::new();
+    for (i, _) in live.match_indices("./") {
+        let tail = live.get(i.saturating_add(2)..).unwrap_or_default();
+        let end = tail.find(['"', '\'', ' ', '>', ')']).unwrap_or(tail.len());
+        let name = tail.get(..end).unwrap_or_default();
+        if !name.is_empty() && !name.contains("..") {
+            names.push(name.to_string());
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// The first-load file list for the report: `index.html`, the files it names, and the
+/// view-only worker's three files, each with its size on disk; then the page's on-demand
+/// names, which must be none.
+fn first_load_files(dist_web: &Path) -> Result<(Vec<(String, u64)>, Vec<&'static str>), String> {
+    let index = dist_web.join("index.html");
+    let html = std::fs::read_to_string(&index).map_err(|e| format!("{}: {e}", index.display()))?;
+    let mut names = vec!["index.html".to_string()];
+    names.extend(files_named_by_page(&html));
+    for suffix in ["_loader.js", ".js", "_bg.wasm"] {
+        names.push(format!("{VIEWER_WORKER_STEM}{suffix}"));
+    }
+    let mut files = Vec::new();
+    for name in names {
+        let path = dist_web.join(&name);
+        let len = std::fs::metadata(&path).map_err(|e| format!("first-load file {}: {e}", path.display()))?.len();
+        files.push((name, len));
+    }
+    Ok((files, on_demand_files_named_by_page(&html)))
 }
 
 /// Crates that must not be in the web target's dependency graph. The byte scan for
@@ -681,12 +758,10 @@ pub fn run(root: &Path, report_only: bool) -> Result<(), String> {
     let total_raw: usize =
         std::iter::once(report.total_bytes).chain(worker_reports.iter().map(|w| w.total_bytes)).fold(0usize, usize::saturating_add);
     let total_gz: usize = std::iter::once(report.gzip_bytes).chain(worker_reports.iter().map(|w| w.gzip_bytes)).fold(0usize, usize::saturating_add);
-    println!(
-        "  everything loaded: {total_raw:>10} bytes raw (budget {MAX_TOTAL_UNCOMPRESSED_BYTES:>10}), {total_gz:>10} gzip (budget {MAX_TOTAL_GZIPPED_BYTES:>10})"
-    );
+    println!("  editor + every worker: {total_raw:>10} bytes raw, {total_gz:>10} gzip (reported; no session loads them all, so no ceiling)");
 
     // The viewer-first page module (plan 10.3), and the first-load modules: it and the
-    // view-only worker. The first-load total is reported only; its ceiling is plan 10.5's.
+    // view-only worker, against the first-load ceiling (plan 10.5).
     let page_report = match find_page_wasm(&dist_web) {
         Ok(path) => {
             let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -708,11 +783,28 @@ pub fn run(root: &Path, report_only: bool) -> Result<(), String> {
                 (a.saturating_add(w.total_bytes), b.saturating_add(w.gzip_bytes), c.saturating_add(w.brotli_bytes))
             });
             println!(
-                "  first load (wasm: {PAGE_STEM} + {}): {raw:>10} bytes raw, {gz:>10} gzip, {br:>10} brotli q11 (reported; no ceiling yet)",
+                "  first load (wasm: {PAGE_STEM} + {}): {raw:>10} bytes raw (budget {MAX_FIRST_LOAD_UNCOMPRESSED_BYTES:>10}), {gz:>10} gzip (budget {MAX_FIRST_LOAD_GZIPPED_BYTES:>10}), {br:>10} brotli q11",
                 if viewer_worker.is_some() { VIEWER_WORKER_STEM } else { "NO VIEWER WORKER" }
             );
         }
         Err(e) => println!("  page {PAGE_STEM}: ERROR ({e})"),
+    }
+
+    let first_load_res = first_load_files(&dist_web);
+    match &first_load_res {
+        Ok((files, on_demand)) => {
+            let sum = files.iter().map(|(_, len)| *len).fold(0u64, u64::saturating_add);
+            println!("  first-load files: {} files, {sum} bytes raw", files.len());
+            for (name, len) in files {
+                println!("    {len:>10}  {name}");
+            }
+            if on_demand.is_empty() {
+                println!("  first-load page names none of: {}", ON_DEMAND_STEMS.join(", "));
+            } else {
+                println!("  first-load page names on-demand files: {}", on_demand.join(", "));
+            }
+        }
+        Err(e) => println!("  first-load files: ERROR ({e})"),
     }
 
     let sri_res = verify_sri_digests(&dist_web);
@@ -751,11 +843,18 @@ pub fn run(root: &Path, report_only: bool) -> Result<(), String> {
         errs.extend(check_worker_budget(r));
     }
     match &page_report {
-        Ok(r) => errs.extend(check_page_budget(r)),
+        Ok(r) => {
+            errs.extend(check_page_budget(r));
+            errs.extend(check_first_load_budget(r, worker_reports.iter().find(|w| worker_stem(&w.path) == VIEWER_WORKER_STEM)));
+        }
         Err(e) => errs.push(e.clone()),
     }
     errs.extend(graph_errs);
-    errs.extend(check_total_budget(&report, &worker_reports));
+    match first_load_res {
+        Ok((_, on_demand)) if on_demand.is_empty() => {}
+        Ok((_, on_demand)) => errs.push(format!("the first-load page names on-demand files outside a comment: {}", on_demand.join(", "))),
+        Err(e) => errs.push(e),
+    }
     if let Err(e) = sri_res {
         errs.push(e);
     }
@@ -1017,21 +1116,97 @@ mod tests {
     }
 
     #[test]
-    fn unregistered_worker_and_totals_flag() {
+    fn unregistered_worker_flags() {
         // A worker with no measured ceiling row is an error, not a pass: guessed or shared
         // numbers hide growth.
         let rep = analyze_wasm_bytes(PathBuf::from("wordcraft-worker-future_bg.wasm"), &minimal_wasm(1024, 512, b"safe_symbol"), 400).unwrap();
         let errs = check_worker_budget(&rep);
         assert!(errs.iter().any(|e| e.contains("no ceiling") && e.contains("wordcraft-worker-future")), "{errs:?}");
+    }
 
-        // The everything-loaded total: main + workers against the total ceilings.
-        let main = analyze_wasm_bytes(PathBuf::from("m.wasm"), &minimal_wasm(1000, 100, b"x"), 500).unwrap();
-        let w = analyze_wasm_bytes(PathBuf::from("wordcraft-worker-proof_bg.wasm"), &minimal_wasm(1000, 100, b"x"), 500).unwrap();
-        assert!(check_total_budget(&main, std::slice::from_ref(&w)).is_empty());
-        let huge_main = WasmReport { total_bytes: MAX_TOTAL_UNCOMPRESSED_BYTES, gzip_bytes: MAX_TOTAL_GZIPPED_BYTES, ..main.clone() };
-        let worker = WasmReport { total_bytes: 1, gzip_bytes: 1, ..w };
-        let errs = check_total_budget(&huge_main, &[worker]);
-        assert!(errs.iter().any(|e| e.contains("uncompressed")) && errs.iter().any(|e| e.contains("gzipped")), "{errs:?}");
+    #[test]
+    fn first_load_total_is_the_page_plus_the_view_only_worker() {
+        let page = analyze_wasm_bytes(PathBuf::from("wordcraft-viewer-web-abc_bg.wasm"), &minimal_wasm(1000, 100, b"x"), 500).unwrap();
+        let worker = analyze_wasm_bytes(PathBuf::from("wordcraft-worker-viewer_bg.wasm"), &minimal_wasm(1000, 100, b"x"), 500).unwrap();
+        assert!(check_first_load_budget(&page, Some(&worker)).is_empty());
+
+        // One byte over either ceiling fails that ceiling and only that one.
+        let at_raw = WasmReport { total_bytes: MAX_FIRST_LOAD_UNCOMPRESSED_BYTES, gzip_bytes: 0, ..worker.clone() };
+        let one = WasmReport { total_bytes: 1, gzip_bytes: 0, ..page.clone() };
+        let errs = check_first_load_budget(&one, Some(&at_raw));
+        assert!(errs.len() == 1 && errs[0].contains("uncompressed"), "{errs:?}");
+        let at_gzip = WasmReport { total_bytes: 0, gzip_bytes: MAX_FIRST_LOAD_GZIPPED_BYTES, ..worker.clone() };
+        let one = WasmReport { total_bytes: 0, gzip_bytes: 1, ..page.clone() };
+        let errs = check_first_load_budget(&one, Some(&at_gzip));
+        assert!(errs.len() == 1 && errs[0].contains("gzipped"), "{errs:?}");
+        // Exactly at the ceilings passes.
+        let zero = WasmReport { total_bytes: 0, gzip_bytes: 0, ..page.clone() };
+        let at_both = WasmReport { total_bytes: MAX_FIRST_LOAD_UNCOMPRESSED_BYTES, gzip_bytes: MAX_FIRST_LOAD_GZIPPED_BYTES, ..worker };
+        assert!(check_first_load_budget(&zero, Some(&at_both)).is_empty());
+
+        // No view-only worker: the page cannot show a document.
+        let errs = check_first_load_budget(&page, None);
+        assert!(errs.iter().any(|e| e.contains("wordcraft-worker-viewer")), "{errs:?}");
+    }
+
+    #[test]
+    fn the_first_load_ceiling_is_no_looser_than_its_parts() {
+        let viewer_worker = WORKER_CEILINGS.iter().find(|c| c.name == VIEWER_WORKER_STEM).expect("the view-only worker is registered");
+        assert!(MAX_FIRST_LOAD_UNCOMPRESSED_BYTES <= PAGE_CEILING.max_raw + viewer_worker.max_raw);
+        assert!(MAX_FIRST_LOAD_GZIPPED_BYTES <= PAGE_CEILING.max_gzip + viewer_worker.max_gzip);
+    }
+
+    #[test]
+    fn a_first_load_page_that_names_an_on_demand_file_is_caught() {
+        let clean = r#"<head><!-- the editor: wordcraft-web_loader.js, and wordcraft-worker-pdf -->
+<script type="module">import init from './wordcraft-viewer-web-8a80.js';
+await init({ module_or_path: './wordcraft-viewer-web-7858_bg.wasm' });</script>
+<link rel="icon" href="./wordcraft-fa59.ico"/></head>"#;
+        assert!(on_demand_files_named_by_page(clean).is_empty(), "comments and the page module's own names are fine");
+        assert_eq!(files_named_by_page(clean), ["wordcraft-fa59.ico", "wordcraft-viewer-web-7858_bg.wasm", "wordcraft-viewer-web-8a80.js"]);
+
+        for (tag, stem) in [
+            (r#"<link rel="modulepreload" href="./wordcraft-web.js">"#, "wordcraft-web"),
+            (r#"<link rel="preload" href="./wordcraft-web_bg.wasm" as="fetch">"#, "wordcraft-web"),
+            (r#"<script type="module" src="wordcraft-web_loader.js"></script>"#, "wordcraft-web"),
+            (r#"<link rel="prefetch" href="/wordcraft-worker-proof_bg.wasm">"#, "wordcraft-worker-proof"),
+            (r#"<script>new Worker("wordcraft-worker-codecs_loader.js")</script>"#, "wordcraft-worker-codecs"),
+            (r#"<link rel="preload" href="wordcraft-worker-pdf.js">"#, "wordcraft-worker-pdf"),
+        ] {
+            let html = format!("{clean}{tag}");
+            assert_eq!(on_demand_files_named_by_page(&html), [stem], "{tag}");
+        }
+        // A comment that never closes hides nothing before it and cannot panic.
+        assert_eq!(on_demand_files_named_by_page(r#"<script src="wordcraft-web.js"></script><!-- open"#), ["wordcraft-web"]);
+        assert!(on_demand_files_named_by_page("<!-- wordcraft-web.js").is_empty());
+        assert!(files_named_by_page("./").is_empty() && files_named_by_page("<!--").is_empty());
+    }
+
+    #[test]
+    fn the_first_load_file_list_reads_a_built_page() {
+        let dir = std::env::temp_dir().join(format!("wc-first-load-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, body: &[u8]| std::fs::write(dir.join(name), body).unwrap();
+        write("p-1.js", b"12345");
+        write("wordcraft-worker-viewer_loader.js", b"1");
+        write("wordcraft-worker-viewer.js", b"12");
+        write("wordcraft-worker-viewer_bg.wasm", b"123");
+        write("index.html", br#"<script type="module">import './p-1.js';</script>"#);
+        let (files, on_demand) = first_load_files(&dir).unwrap();
+        assert!(on_demand.is_empty());
+        let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            ["index.html", "p-1.js", "wordcraft-worker-viewer_loader.js", "wordcraft-worker-viewer.js", "wordcraft-worker-viewer_bg.wasm"]
+        );
+        assert_eq!(files.iter().map(|(_, l)| *l).skip(1).collect::<Vec<_>>(), [5, 1, 2, 3]);
+
+        // A page that names the editor is reported; a named file that is missing is an error.
+        write("index.html", br#"<script type="module" src="./wordcraft-web_loader.js"></script>"#);
+        assert!(first_load_files(&dir).is_err(), "the named file does not exist");
+        write("wordcraft-web_loader.js", b"x");
+        assert_eq!(first_load_files(&dir).unwrap().1, ["wordcraft-web"]);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
