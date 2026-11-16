@@ -119,11 +119,37 @@ impl WordApp {
         // A PDF shows the fields as Word prints them, as the engine's own PDF writer does
         // (`output_fields`); other formats keep the stored results. The document keeps its own.
         let pdf = name.rsplit(['/', '\\']).next().and_then(|f| f.rsplit_once('.')).is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("pdf"));
+        // A strict PDF is refused here, as the engine's writer refuses it, before any job starts:
+        // the check needs this document (the pictures dropped when it was opened are not in the
+        // package) and the faces this page lays out with, and the refusal is the engine's own.
         let docx = || {
             let printed = if pdf { wordcraft_engine::cmd::references::output_fields(&self.session.doc) } else { None };
-            wordcraft_engine::io::save_bytes_opts("document.docx", printed.as_ref().unwrap_or(&self.session.doc), opts)
+            let doc = printed.as_ref().unwrap_or(&self.session.doc);
+            if pdf
+                && opts.strict
+                && let Some(refusal) = wordcraft_engine::strict::pdf_refusal(doc, opts)
+            {
+                return Err(refusal);
+            }
+            wordcraft_engine::io::save_bytes_opts("document.docx", doc, opts)
         };
-        Some(lazy(name, password, &docx)?.map(|()| json!({"exporting": name, "pending": true})))
+        // The faces that PDF draws text in, from the same printed document.
+        let faces = || {
+            let printed = if pdf { wordcraft_engine::cmd::references::output_fields(&self.session.doc) } else { None };
+            wordcraft_engine::strict::pdf_faces(printed.as_ref().unwrap_or(&self.session.doc), opts)
+        };
+        Some(lazy(name, password, opts, &docx, &faces)?.map(|()| json!({"exporting": name, "pending": true})))
+    }
+
+    /// A web save (`file.save`, `file.saveAs`) under `name` with `params` is checked as the
+    /// engine's `file.save` checks it (`strict` on an output that is no PDF or page image), with
+    /// the engine's own error; the exports always name such an output.
+    fn check_web_save(&self, id: &str, name: &str, params: &Value) -> Result<(), String> {
+        if !matches!(id, "file.save" | "file.saveAs") {
+            return Ok(());
+        }
+        let strict = wordcraft_engine::cmd::file::export_options(&self.session, params).strict;
+        wordcraft_engine::cmd::file::check_strict_output(strict, name).map_err(|e| e.to_string())
     }
 
     /// Tell the host the command `id` is about to run ([`Services::on_command`]).
@@ -173,6 +199,8 @@ impl WordApp {
             // Inspect only the suffix bytes: no full-name allocation or UTF-8 slicing.
             let has_pdf_suffix = name.as_bytes().last_chunk::<4>().is_some_and(|suffix| suffix.eq_ignore_ascii_case(b".pdf"));
             let name = if id == "file.exportPdf" && !has_pdf_suffix { format!("{name}.pdf") } else { name };
+            // The engine's `file.save` parameter check, before anything is written or stamped.
+            self.check_web_save(id, &name, &params)?;
             // A save with a password encrypts this and later saves (`file.save`'s `password`).
             if matches!(id, "file.save" | "file.saveAs")
                 && let Some(pw) = params.get("password").filter(|v| !v.is_null())

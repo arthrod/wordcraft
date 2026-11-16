@@ -114,7 +114,7 @@ pub fn specs() -> Vec<CommandSpec> {
             crate::io::save_path_with(std::path::Path::new(&path), &s.doc, None, &opts).map_err(CmdError::Failed)?;
             Ok(json!({"path": path, "markup": opts.markup}))
         })
-        .params(r#"{"path": string, "markup"?: bool (Print Markup: tracked changes marked up and each page scaled down beside the comments in balloons; default file.printMarkup), "strict"?: bool (refuse, writing nothing, if a character can't be drawn or a picture is missing; see file.strictReport)}"#)
+        .params(r#"{"path": string, "markup"?: bool (Print Markup: tracked changes marked up and each page scaled down beside the comments in balloons; default file.printMarkup), "strict"?: bool (refuse, writing nothing, if a character can't be drawn or a picture is missing; see file.strictReport), "hostTag"?: n (a host's own id for the export, handed back with its options; nothing else reads it)}"#)
         .pure(),
         CommandSpec::new("file.exportPng", "Export Page as PNG", "File › Export", export_png)
             .params(r#"{"path": string, "page"?: n (1-based), "scale"?: px per pt, "markup"?: bool (the page with its comments in balloons beside it; default file.printMarkup), "strict"?: bool (refuse, writing nothing, if a character on the page can't be drawn or a picture is missing; see file.strictReport)}"#)
@@ -506,11 +506,14 @@ pub fn export_options(s: &Session, v: &Value) -> crate::io::ExportOptions {
         word2003: p::str(v, "format") == Some(FORMAT_WORD_2003),
         numeral: s.view.numeral.resolve(crate::session::system_locale()),
         strict: p::bool(v, "strict").unwrap_or(false),
+        host_tag: p::u64(v, "hostTag").unwrap_or(0),
     }
 }
 
 /// `strict: true` is for a PDF or a page image only: any other output is a parameter error.
-fn check_strict_output(strict: bool, path: &str) -> Result<(), CmdError> {
+/// Public for a host that writes a save itself (the web app's downloads) and must refuse the
+/// same parameters `file.save` refuses.
+pub fn check_strict_output(strict: bool, path: &str) -> Result<(), CmdError> {
     if strict && !crate::strict::is_strict_output(path) {
         return Err(CmdError::Params("`strict` applies to a .pdf or .png output only".into()));
     }
@@ -752,7 +755,17 @@ fn layout_summary(s: &mut Session, _: &Value) -> CmdResult {
     Ok(json!({"pages": pages, "caret": caret, "ms": l.ms}))
 }
 
-const MAX_DOCX_BASE64_BYTES: usize = 64 * 1024 * 1024;
+/// Most bytes of base64 `doc.loadDocx` takes ([`check_docx_base64_len`]).
+pub const MAX_DOCX_BASE64_BYTES: usize = 64 * 1024 * 1024;
+
+/// `doc.loadDocx`'s bound on a `docxBase64` of `len` bytes. Public for a host that holds the
+/// package as bytes (the web page API) and must refuse it before encoding it, with this error.
+pub fn check_docx_base64_len(len: usize) -> Result<(), CmdError> {
+    if len > MAX_DOCX_BASE64_BYTES {
+        return Err(CmdError::Params("`docxBase64` payload exceeds 64 MB limit".into()));
+    }
+    Ok(())
+}
 
 /// Exports the active document as a base64-encoded `.docx` package.
 fn export_docx_cmd(s: &mut Session, v: &Value) -> CmdResult {
@@ -769,9 +782,7 @@ fn export_docx_cmd(s: &mut Session, v: &Value) -> CmdResult {
 /// it; otherwise it opens beside the active document, as `file.open` does.
 fn load_docx_cmd(s: &mut Session, v: &Value) -> CmdResult {
     let b64 = p::str(v, "docxBase64").or_else(|| p::str(v, "data")).ok_or_else(|| CmdError::Params("missing `docxBase64` string".into()))?;
-    if b64.len() > MAX_DOCX_BASE64_BYTES {
-        return Err(CmdError::Params("`docxBase64` payload exceeds 64 MB limit".into()));
-    }
+    check_docx_base64_len(b64.len())?;
     let bytes = super::insert::base64_decode(b64).ok_or_else(|| CmdError::Params("invalid base64 in `docxBase64`".into()))?;
     if !bytes.starts_with(b"PK\x03\x04") && !wordcraft_docx::is_encrypted(&bytes) {
         return Err(CmdError::Params("payload is not a valid .docx package".into()));
