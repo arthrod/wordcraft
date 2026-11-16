@@ -32,3 +32,9 @@ getrandom = { workspace = true, features = ["wasm_js"] }
 wasm-bindgen = "0.2"
 js-sys = "0.3"
 web-sys = { version = "0.3", features = ["DedicatedWorkerGlobalScope", "ErrorEvent", "MessageEvent", "console"] }
+
+[dev-dependencies]
+# Host tests only: the worker's PDF must match the engine's own export for the same options
+# (Print Markup, comments, digits). Never a normal dependency: the worker stays free of the
+# engine (`cargo xtask wasm-budget` reads the wasm32 normal-dependency tree).
+wordcraft-engine = { workspace = true }

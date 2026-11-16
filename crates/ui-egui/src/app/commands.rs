@@ -119,11 +119,21 @@ impl WordApp {
         // A PDF shows the fields as Word prints them, as the engine's own PDF writer does
         // (`output_fields`); other formats keep the stored results. The document keeps its own.
         let pdf = name.rsplit(['/', '\\']).next().and_then(|f| f.rsplit_once('.')).is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("pdf"));
+        // A strict PDF is refused here, as the engine's writer refuses it, before any job starts:
+        // the check needs this document (the pictures dropped when it was opened are not in the
+        // package) and the faces this page lays out with, and the refusal is the engine's own.
         let docx = || {
             let printed = if pdf { wordcraft_engine::cmd::references::output_fields(&self.session.doc) } else { None };
-            wordcraft_engine::io::save_bytes_opts("document.docx", printed.as_ref().unwrap_or(&self.session.doc), opts)
+            let doc = printed.as_ref().unwrap_or(&self.session.doc);
+            if pdf
+                && opts.strict
+                && let Some(refusal) = wordcraft_engine::strict::pdf_refusal(doc, opts)
+            {
+                return Err(refusal);
+            }
+            wordcraft_engine::io::save_bytes_opts("document.docx", doc, opts)
         };
-        Some(lazy(name, password, &docx)?.map(|()| json!({"exporting": name, "pending": true})))
+        Some(lazy(name, password, opts, &docx)?.map(|()| json!({"exporting": name, "pending": true})))
     }
 
     /// Tell the host the command `id` is about to run ([`Services::on_command`]).

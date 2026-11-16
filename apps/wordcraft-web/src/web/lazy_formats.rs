@@ -148,6 +148,22 @@ pub(crate) fn export_route(name: &str) -> Option<ExportRoute> {
     }
 }
 
+/// The `renderPdf` options for the export options a save or export resolved
+/// (`wordcraft_engine::cmd::file::export_options`): what the engine's PDF writer applies, and a
+/// Word package does not carry. The comments only show with Print Markup, as in the engine.
+/// `strict` is not among them: the app refuses a strict PDF before the job starts.
+pub(crate) fn pdf_job_options(opts: &wordcraft_engine::io::ExportOptions) -> wordcraft_worker_proto::PdfJobOptions {
+    use wordcraft_layout::NumeralMode;
+    use wordcraft_worker_proto::Numeral;
+    let numeral = match opts.numeral {
+        NumeralMode::Hindi => Numeral::Hindi,
+        NumeralMode::Context => Numeral::Context,
+        // `System` is resolved before an export (`export_options`); unresolved, it is the default.
+        NumeralMode::Arabic | NumeralMode::System => Numeral::Arabic,
+    };
+    wordcraft_worker_proto::PdfJobOptions { markup: opts.markup, comments: opts.markup && opts.comments, numeral }
+}
+
 /// The name a converted file opens under: the engine picks a reader by extension, and what
 /// it is handed is a Word package, so `report.odt` opens as `report.docx`. The original name
 /// stays in the messages the user sees.
@@ -550,5 +566,23 @@ mod tests {
         let mut q = JobQueue::default();
         q.admit(u64::MAX);
         assert_eq!(q.admit(5).1, u64::MAX, "saturates");
+    }
+
+    /// Review finding (the lazy PDF's options): the export options the command resolved reach the
+    /// PDF job, each as the engine's PDF writer reads it (`strict::pdf_options`).
+    #[test]
+    fn a_pdf_job_carries_the_export_options() {
+        use wordcraft_engine::io::ExportOptions;
+        use wordcraft_layout::NumeralMode;
+        use wordcraft_worker_proto::{Numeral, PdfJobOptions};
+        let job = |markup, comments, numeral| pdf_job_options(&ExportOptions { markup, comments, numeral, ..Default::default() });
+        assert_eq!(job(false, false, NumeralMode::Arabic), PdfJobOptions::default());
+        assert_eq!(job(true, false, NumeralMode::Arabic), PdfJobOptions { markup: true, comments: false, numeral: Numeral::Arabic });
+        assert_eq!(job(true, true, NumeralMode::Hindi), PdfJobOptions { markup: true, comments: true, numeral: Numeral::Hindi });
+        assert_eq!(job(false, true, NumeralMode::Context), PdfJobOptions { markup: false, comments: false, numeral: Numeral::Context });
+        assert_eq!(job(false, false, NumeralMode::System).numeral, Numeral::Arabic);
+        // Neither strict nor the 2003 XML flag is a PDF option.
+        let other = ExportOptions { strict: true, word2003: true, ..Default::default() };
+        assert_eq!(pdf_job_options(&other), PdfJobOptions::default());
     }
 }

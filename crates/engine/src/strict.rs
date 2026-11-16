@@ -211,6 +211,14 @@ pub(crate) fn pdf_report(doc: &Document, opts: &ExportOptions) -> StrictReport {
     strict_report(doc, &lay, &pdf.display_options(), None, StrictOutput::Pdf)
 }
 
+/// The refusal a strict PDF export of `doc` meets ([`export_pdf`]'s message), or `None` when
+/// nothing is missing: for a host that writes the PDF elsewhere (the web app's PDF worker) and
+/// must refuse exactly as the engine does. `doc` is the document as printed (`output_fields`).
+pub fn pdf_refusal(doc: &Document, opts: &ExportOptions) -> Option<String> {
+    let report = pdf_report(doc, opts);
+    (!report.passed()).then(|| report.refusal())
+}
+
 /// The PDF of `doc`; with `opts.strict`, only if nothing is missing, laid out once for the check
 /// and the export.
 pub(crate) fn export_pdf(doc: &Document, opts: &ExportOptions) -> Result<Vec<u8>, String> {

@@ -342,6 +342,40 @@ pub struct PdfRenderRequest {
     /// Font copies to install before layout: at most [`MAX_FONT_COPIES`], totalling at most
     /// [`MAX_FONT_TOTAL_BYTES`].
     pub fonts: Vec<FontCopy>,
+    /// How the PDF shows the document. Not part of the document, so not in the package.
+    pub options: PdfJobOptions,
+}
+
+/// How a `renderPdf` job shows the document: the engine's export options for a PDF (Print
+/// Markup, its comments, the Numeral setting), as plain data the worker applies to its own
+/// `PdfOptions` the way the engine's export does.
+///
+/// It rides in the JSON part of the payload as `options`. Every field defaults, and the whole
+/// field may be absent: a request from a client that predates it renders as it always did (no
+/// markup, Western digits), and a worker that predates it ignores it — the same additive rule
+/// `convert`'s `password` follows, so the envelope's [`PROTOCOL_VERSION`] stays.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PdfJobOptions {
+    /// Print Markup: tracked changes shown marked up.
+    pub markup: bool,
+    /// With `markup`, the comments in balloons beside each page (ignored without it).
+    pub comments: bool,
+    /// How digits look.
+    pub numeral: Numeral,
+}
+
+/// The digits a PDF shows (the Numeral setting, with `System` already resolved by the client).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Numeral {
+    /// Western digits everywhere.
+    #[default]
+    Arabic,
+    /// Eastern Arabic-Indic digits everywhere.
+    Hindi,
+    /// Hindi digits in and around right-to-left text, Western elsewhere.
+    Context,
 }
 
 /// The JSON part of a `convert` payload (everything but `input`).
@@ -353,10 +387,13 @@ struct ConvertMeta {
     password: Option<String>,
 }
 
-/// The JSON part of a `renderPdf` payload: the fonts' names, in `fonts` order.
+/// The JSON part of a `renderPdf` payload: the fonts' names, in `fonts` order, and the job's
+/// options (absent from an older client's request: the defaults).
 #[derive(Serialize, Deserialize)]
 struct PdfMeta {
     fonts: Vec<FontMeta>,
+    #[serde(default)]
+    options: PdfJobOptions,
 }
 
 /// One font's names inside [`PdfMeta`]; its bytes ride as a binary part.
@@ -466,7 +503,10 @@ pub fn decode_convert_request(bytes: &[u8]) -> Result<ConvertRequest, ProtoError
 
 /// Encode a `renderPdf` payload: `[metaJson, docx, font0, font1, …]`.
 pub fn encode_pdf_request(req: &PdfRenderRequest) -> Result<Vec<u8>, ProtoError> {
-    let meta = encode_payload(&PdfMeta { fonts: req.fonts.iter().map(|f| FontMeta { family: f.family.clone(), style: f.style.clone() }).collect() })?;
+    let meta = encode_payload(&PdfMeta {
+        fonts: req.fonts.iter().map(|f| FontMeta { family: f.family.clone(), style: f.style.clone() }).collect(),
+        options: req.options,
+    })?;
     let mut parts: Vec<&[u8]> = Vec::with_capacity(req.fonts.len().saturating_add(2));
     parts.push(&meta);
     parts.push(&req.docx);
@@ -508,6 +548,7 @@ pub fn decode_pdf_request(bytes: &[u8]) -> Result<PdfRenderRequest, ProtoError> 
             .zip(&parts[2..])
             .map(|(f, bytes)| FontCopy { family: f.family, style: f.style, bytes: bytes.to_vec() })
             .collect(),
+        options: meta.options,
     })
 }
 
@@ -916,6 +957,7 @@ mod tests {
                 FontCopy { family: "Inter".into(), style: "Regular".into(), bytes: vec![0, 1, 0, 0, 9] },
                 FontCopy { family: "Liter".into(), style: "Italic".into(), bytes: vec![0, 1, 0, 0, 8, 8, 8] },
             ],
+            options: PdfJobOptions { markup: true, comments: true, numeral: Numeral::Context },
         };
         let bytes = encode_pdf_request(&req).unwrap();
         let parts = unpack_binary(&bytes).unwrap();
@@ -930,6 +972,87 @@ mod tests {
         // A request without fonts is meta + docx and nothing else.
         let bare = PdfRenderRequest { fonts: Vec::new(), ..req };
         assert_eq!(decode_pdf_request(&encode_pdf_request(&bare).unwrap()).unwrap(), bare);
+    }
+
+    /// Review finding (PDF options): the options travel in the JSON part, each value as sent.
+    #[test]
+    fn pdf_request_carries_its_options() {
+        for options in [
+            PdfJobOptions::default(),
+            PdfJobOptions { markup: true, comments: false, numeral: Numeral::Arabic },
+            PdfJobOptions { markup: true, comments: true, numeral: Numeral::Hindi },
+            PdfJobOptions { markup: false, comments: true, numeral: Numeral::Context },
+        ] {
+            let req = PdfRenderRequest { docx: b"PK".to_vec(), fonts: Vec::new(), options };
+            let bytes = encode_pdf_request(&req).unwrap();
+            let meta: serde_json::Value = serde_json::from_slice(unpack_binary(&bytes).unwrap()[0]).unwrap();
+            assert_eq!(meta["options"]["markup"], options.markup);
+            assert_eq!(decode_pdf_request(&bytes).unwrap().options, options);
+        }
+        let meta: serde_json::Value = serde_json::from_slice(
+            unpack_binary(
+                &encode_pdf_request(&PdfRenderRequest {
+                    docx: b"PK".to_vec(),
+                    fonts: Vec::new(),
+                    options: PdfJobOptions { numeral: Numeral::Hindi, ..Default::default() },
+                })
+                .unwrap(),
+            )
+            .unwrap()[0],
+        )
+        .unwrap();
+        assert_eq!(meta["options"]["numeral"], "hindi");
+    }
+
+    /// The options are additive: a request from a client that predates them (no `options`, or
+    /// only some fields) renders as before, and a worker that predates them reads a new request
+    /// (serde ignores the field it does not know). The envelope's version is unchanged.
+    #[test]
+    fn pdf_options_are_compatible_both_ways() {
+        let old_client = encode_payload(&serde_json::json!({"fonts": []})).unwrap();
+        let frame = pack_binary(&[&old_client, b"PK"]).unwrap();
+        assert_eq!(decode_pdf_request(&frame).unwrap().options, PdfJobOptions::default());
+        let partial = encode_payload(&serde_json::json!({"fonts": [], "options": {"markup": true}})).unwrap();
+        let frame = pack_binary(&[&partial, b"PK"]).unwrap();
+        assert_eq!(decode_pdf_request(&frame).unwrap().options, PdfJobOptions { markup: true, ..Default::default() });
+        // A later client's extra option is ignored here, as this one's are by an older worker.
+        let later = encode_payload(&serde_json::json!({"fonts": [], "options": {"markup": true, "future": 1}, "more": [1]})).unwrap();
+        let frame = pack_binary(&[&later, b"PK"]).unwrap();
+        assert!(decode_pdf_request(&frame).unwrap().options.markup);
+        #[derive(Deserialize)]
+        struct OldPdfMeta {
+            fonts: Vec<serde_json::Value>,
+        }
+        let new_meta = unpack_binary(
+            &encode_pdf_request(&PdfRenderRequest {
+                docx: b"PK".to_vec(),
+                fonts: Vec::new(),
+                options: PdfJobOptions { markup: true, comments: true, numeral: Numeral::Hindi },
+            })
+            .unwrap(),
+        )
+        .unwrap()[0]
+            .to_vec();
+        let old: OldPdfMeta = decode_payload(&new_meta).unwrap();
+        assert!(old.fonts.is_empty());
+    }
+
+    /// Hostile options are a typed decode error, never a panic or a silent default.
+    #[test]
+    fn pdf_options_reject_junk() {
+        for options in [
+            serde_json::json!(5),
+            serde_json::json!("markup"),
+            serde_json::json!({"markup": "yes"}),
+            serde_json::json!({"comments": 1}),
+            serde_json::json!({"numeral": "system"}),
+            serde_json::json!({"numeral": "klingon"}),
+            serde_json::json!({"numeral": 2}),
+        ] {
+            let meta = encode_payload(&serde_json::json!({"fonts": [], "options": options})).unwrap();
+            let frame = pack_binary(&[&meta, b"PK"]).unwrap();
+            assert!(matches!(decode_pdf_request(&frame), Err(ProtoError::Decode(_))), "{options}");
+        }
     }
 
     #[test]
@@ -974,9 +1097,16 @@ mod tests {
         assert_eq!(convert_request_error(&ConvertRequest { input: vec![0; MAX_CONVERT_BYTES + 1], ..ok.clone() }), Some(ErrorCode::TooLarge));
         assert_eq!(convert_request_error(&ConvertRequest { format: String::new(), ..ok.clone() }), Some(ErrorCode::BadRequest));
 
-        let ok = PdfRenderRequest { docx: b"PK".to_vec(), fonts: vec![FontCopy { family: "a".into(), style: "b".into(), bytes: vec![1; 8] }] };
+        let ok = PdfRenderRequest {
+            docx: b"PK".to_vec(),
+            fonts: vec![FontCopy { family: "a".into(), style: "b".into(), bytes: vec![1; 8] }],
+            options: PdfJobOptions::default(),
+        };
         assert_eq!(pdf_request_error(&ok), None);
-        assert_eq!(pdf_request_error(&PdfRenderRequest { docx: vec![0; MAX_PDF_DOC_BYTES + 1], fonts: Vec::new() }), Some(ErrorCode::TooLarge));
+        assert_eq!(
+            pdf_request_error(&PdfRenderRequest { docx: vec![0; MAX_PDF_DOC_BYTES + 1], fonts: Vec::new(), ..ok.clone() }),
+            Some(ErrorCode::TooLarge)
+        );
         assert_eq!(
             pdf_request_error(&PdfRenderRequest {
                 fonts: (0..MAX_FONT_COPIES + 1).map(|_| FontCopy { family: String::new(), style: String::new(), bytes: Vec::new() }).collect(),
@@ -999,7 +1129,7 @@ mod tests {
             }),
             Some(ErrorCode::TooLarge)
         );
-        assert_eq!(pdf_request_error(&PdfRenderRequest { docx: Vec::new(), fonts: Vec::new() }), Some(ErrorCode::BadRequest));
+        assert_eq!(pdf_request_error(&PdfRenderRequest { docx: Vec::new(), fonts: Vec::new(), ..ok.clone() }), Some(ErrorCode::BadRequest));
     }
 
     #[test]

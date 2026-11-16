@@ -5792,15 +5792,17 @@ fn web_save_offers_the_host_its_lazy_formats_first() {
             sink.borrow_mut().push(n.to_string());
             Ok(())
         })),
-        lazy_export: Some(Box::new(move |name: &str, password: Option<&str>, docx: &dyn Fn() -> Result<Vec<u8>, String>| {
-            if name.ends_with(".broken") {
-                return Some(Err("the module could not start".into()));
-            }
-            if !(name.ends_with(".rtf") || name.ends_with(".pdf")) {
-                return None;
-            }
-            Some(docx().map(|bytes| seen.borrow_mut().push((name.to_string(), password.map(str::to_string), bytes))))
-        })),
+        lazy_export: Some(Box::new(
+            move |name: &str, password: Option<&str>, _: &wordcraft_engine::io::ExportOptions, docx: &dyn Fn() -> Result<Vec<u8>, String>| {
+                if name.ends_with(".broken") {
+                    return Some(Err("the module could not start".into()));
+                }
+                if !(name.ends_with(".rtf") || name.ends_with(".pdf")) {
+                    return None;
+                }
+                Some(docx().map(|bytes| seen.borrow_mut().push((name.to_string(), password.map(str::to_string), bytes))))
+            },
+        )),
         ..Default::default()
     };
     let mut a = WordApp::new(Session::new(wordcraft_doc::Document::new()), services);
@@ -5839,12 +5841,14 @@ fn web_lazy_pdf_shows_the_fields_as_the_engines_pdf_does() {
     let seen = asked.clone();
     let services = Services {
         download: Some(Box::new(|_: &str, _: &[u8]| Ok(()))),
-        lazy_export: Some(Box::new(move |name: &str, _: Option<&str>, docx: &dyn Fn() -> Result<Vec<u8>, String>| {
-            if !(name.ends_with(".rtf") || name.ends_with(".pdf")) {
-                return None;
-            }
-            Some(docx().map(|bytes| seen.borrow_mut().push((name.to_string(), bytes))))
-        })),
+        lazy_export: Some(Box::new(
+            move |name: &str, _: Option<&str>, _: &wordcraft_engine::io::ExportOptions, docx: &dyn Fn() -> Result<Vec<u8>, String>| {
+                if !(name.ends_with(".rtf") || name.ends_with(".pdf")) {
+                    return None;
+                }
+                Some(docx().map(|bytes| seen.borrow_mut().push((name.to_string(), bytes))))
+            },
+        )),
         ..Default::default()
     };
     let mut a = WordApp::new(Session::new(wordcraft_doc::Document::new()), services);
@@ -5887,6 +5891,95 @@ fn web_lazy_pdf_shows_the_fields_as_the_engines_pdf_does() {
     a.execute("file.saveAs", json!({"path": "figures.rtf"})).unwrap();
     assert_eq!(seqs(&take("figures.rtf")), ["9", "9"], "a save keeps the stored results");
     assert_eq!(seqs(&a.session.doc), ["9", "9"], "the document keeps its stored results");
+}
+
+/// A web host that writes the PDF itself (`Services::lazy_export`) is handed the export options
+/// the command resolved — Print Markup from the command or File › Print, the comments as Track
+/// Changes Options show them, the Numeral setting — the same ones the engine's own PDF writer
+/// would apply (`cmd::file::export_options`). A Word package carries none of them.
+#[test]
+fn web_lazy_export_hands_the_host_the_commands_export_options() {
+    type Seen = std::rc::Rc<std::cell::RefCell<Vec<(String, wordcraft_engine::io::ExportOptions)>>>;
+    let asked: Seen = Default::default();
+    let seen = asked.clone();
+    let services = Services {
+        download: Some(Box::new(|_: &str, _: &[u8]| Ok(()))),
+        lazy_export: Some(Box::new(
+            move |name: &str, _: Option<&str>, opts: &wordcraft_engine::io::ExportOptions, docx: &dyn Fn() -> Result<Vec<u8>, String>| {
+                if !(name.ends_with(".rtf") || name.ends_with(".pdf")) {
+                    return None;
+                }
+                Some(docx().map(|_| seen.borrow_mut().push((name.to_string(), *opts))))
+            },
+        )),
+        ..Default::default()
+    };
+    let mut a = WordApp::new(Session::new(wordcraft_doc::Document::from_text("The quarterly figures look strong.")), services);
+    a.session.view.numeral = wordcraft_layout::NumeralMode::Hindi;
+    let cases = [
+        ("file.exportPdf", json!({"path": "a.pdf"})),
+        ("file.exportPdf", json!({"path": "b.pdf", "markup": true})),
+        ("file.saveAs", json!({"path": "c.pdf", "markup": true})),
+        ("file.saveAs", json!({"path": "d.rtf", "markup": true})),
+    ];
+    for (id, params) in cases.iter().cloned() {
+        let expected = wordcraft_engine::cmd::file::export_options(&a.session, &params);
+        a.execute(id, params.clone()).unwrap();
+        let (name, got) = asked.borrow_mut().pop().unwrap();
+        assert_eq!(got, expected, "{id} {params}: the host gets the options the engine's writer would use ({name})");
+    }
+    // Comments hidden in Track Changes Options stay hidden; File › Print's Print Markup counts.
+    a.session.prefs.markup.comments = false;
+    a.session.prefs.print_markup = true;
+    a.execute("file.exportPdf", json!({"path": "e.pdf"})).unwrap();
+    let (_, got) = asked.borrow_mut().pop().unwrap();
+    assert!(got.markup && !got.comments, "{got:?}");
+    assert_eq!(got.numeral, wordcraft_layout::NumeralMode::Hindi);
+}
+
+/// A strict PDF (`strict: true`) the web host would write is refused before any job starts, with
+/// the engine's own refusal: the check needs the document itself, whose pictures dropped when it
+/// was opened are not in the Word package the host is handed. Nothing reaches the host, and a
+/// document with nothing missing still goes.
+#[test]
+fn web_lazy_pdf_refuses_a_strict_export_as_the_engine_does() {
+    let calls = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let packaged = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let (c, p) = (calls.clone(), packaged.clone());
+    let services = Services {
+        download: Some(Box::new(|_: &str, _: &[u8]| Ok(()))),
+        lazy_export: Some(Box::new(
+            move |name: &str, _: Option<&str>, _: &wordcraft_engine::io::ExportOptions, docx: &dyn Fn() -> Result<Vec<u8>, String>| {
+                if !name.ends_with(".pdf") {
+                    return None;
+                }
+                c.set(c.get() + 1);
+                Some(docx().map(|_| p.set(p.get() + 1)))
+            },
+        )),
+        ..Default::default()
+    };
+    let mut a = WordApp::new(Session::new(wordcraft_doc::Document::from_text("A picture was here.")), services);
+    // A clean document exports, strict or not.
+    a.execute("file.exportPdf", json!({"path": "ok.pdf", "strict": true})).unwrap();
+    assert_eq!(packaged.get(), 1);
+    // A picture the file named but did not contain, as a reader records it on open.
+    a.session.doc.missing_pictures.list.push(wordcraft_doc::MissingPicture {
+        part: "media/image1.png".into(),
+        story: "word/document.xml".into(),
+        reason: wordcraft_doc::MissingPictureReason::MissingPart,
+    });
+    a.session.doc.missing_pictures.total = 1;
+    let params = json!({"path": "lost.pdf", "strict": true});
+    let opts = wordcraft_engine::cmd::file::export_options(&a.session, &params);
+    let engine = wordcraft_engine::io::save_bytes_with("lost.pdf", &a.session.doc, None, &opts).unwrap_err();
+    assert!(engine.starts_with("strict: "), "{engine}");
+    let err = a.execute("file.exportPdf", params).unwrap_err();
+    assert_eq!(err, engine, "the same refusal the engine's writer gives");
+    assert_eq!(packaged.get(), 1, "nothing was handed over");
+    // Not strict: the export goes, as the engine's would.
+    a.execute("file.exportPdf", json!({"path": "lost.pdf"})).unwrap();
+    assert_eq!((calls.get(), packaged.get()), (3, 2));
 }
 
 /// The context menu's spelling suggestions (right-click, Shift+F10) are a proofing command the

@@ -99,13 +99,26 @@ fn render_pdf(payload: &[u8]) -> Result<(Kind, Vec<u8>), (ErrorCode, String)> {
     }
     install_font_copies(&req.fonts)?;
     let doc = wordcraft_docx::read(&req.docx).map_err(|e| (ErrorCode::Internal, e.to_string()))?;
-    let pdf = wordcraft_pdf::PdfOptions::default();
+    let pdf = pdf_options(req.options);
     let lay = wordcraft_layout::layout(&doc, &mut wordcraft_layout::LayoutCache::new(), &pdf.layout_options());
     let bytes = wordcraft_pdf::export_layout(&doc, &lay, &pdf).map_err(|e| (ErrorCode::Internal, e.to_string()))?;
     if bytes.is_empty() {
         return error(ErrorCode::Internal, "the export wrote no bytes".into());
     }
     Ok((Kind::Pdf, bytes))
+}
+
+/// The PDF options for a job's [`proto::PdfJobOptions`], built as the engine's own PDF export
+/// builds them from its export options (`wordcraft_engine::strict::pdf_options`): tracked
+/// changes marked up with Print Markup, the comments only with it, digits as the client resolved
+/// them. Everything else stays at the PDF export's defaults.
+fn pdf_options(o: proto::PdfJobOptions) -> wordcraft_pdf::PdfOptions {
+    let numeral = match o.numeral {
+        proto::Numeral::Arabic => wordcraft_layout::NumeralMode::Arabic,
+        proto::Numeral::Hindi => wordcraft_layout::NumeralMode::Hindi,
+        proto::Numeral::Context => wordcraft_layout::NumeralMode::Context,
+    };
+    wordcraft_pdf::PdfOptions { include_markup: o.markup, comments: o.markup && o.comments, numeral, ..Default::default() }
 }
 
 /// Install the client's font copies the way a `.docx` file's embedded fonts are installed: the
@@ -218,7 +231,7 @@ mod tests {
 
     #[test]
     fn render_pdf_answers_a_pdf_for_a_document_package() {
-        let req = wordcraft_worker_proto::PdfRenderRequest { docx: sample_docx(), fonts: Vec::new() };
+        let req = wordcraft_worker_proto::PdfRenderRequest { docx: sample_docx(), fonts: Vec::new(), options: Default::default() };
         let (h, p) = request(&req, 1);
         let (rh, rp) = handle_message(&h, &p);
         let env = proto::decode_envelope(&rh).unwrap();
@@ -240,13 +253,13 @@ mod tests {
 
         // An empty package is a bad request; a blob that is not a package is an internal
         // error — both typed, never a panic.
-        let req = wordcraft_worker_proto::PdfRenderRequest { docx: Vec::new(), fonts: Vec::new() };
+        let req = wordcraft_worker_proto::PdfRenderRequest { docx: Vec::new(), fonts: Vec::new(), options: Default::default() };
         let (h, p) = request(&req, 2);
         let (_rh, rp) = handle_message(&h, &p);
         let body: proto::ErrorReply = serde_json::from_slice(&rp).unwrap();
         assert_eq!(body.code, ErrorCode::BadRequest);
 
-        let req = wordcraft_worker_proto::PdfRenderRequest { docx: b"not a package".to_vec(), fonts: Vec::new() };
+        let req = wordcraft_worker_proto::PdfRenderRequest { docx: b"not a package".to_vec(), fonts: Vec::new(), options: Default::default() };
         let (h, p) = request(&req, 3);
         let (rh, rp) = handle_message(&h, &p);
         assert_eq!(proto::decode_envelope(&rh).unwrap().kind, Kind::Error);
@@ -290,7 +303,7 @@ mod tests {
             eprintln!("skipped: /tmp/sample.docx not present (wordcraft-cli run --template sample --save /tmp/sample.docx)");
             return;
         };
-        let req = wordcraft_worker_proto::PdfRenderRequest { docx, fonts: Vec::new() };
+        let req = wordcraft_worker_proto::PdfRenderRequest { docx, fonts: Vec::new(), options: Default::default() };
         let (h, p) = request(&req, 21);
         let t0 = std::time::Instant::now();
         let (rh, rp) = handle_message(&h, &p);
@@ -298,6 +311,63 @@ mod tests {
         assert_eq!(env.kind, Kind::Pdf, "body starts with {:?}", &rp[..rp.len().min(8)]);
         assert!(rp.starts_with(b"%PDF"));
         eprintln!("sample render: {} bytes in {:?}", rp.len(), t0.elapsed());
+    }
+
+    /// A document with a comment and a tracked deletion, dated so its PDFs compare byte for byte.
+    fn marked_up_document() -> wordcraft_doc::Document {
+        use serde_json::json;
+        let mut s = wordcraft_engine::Session::new(wordcraft_doc::Document::from_text("The quarterly figures look strong: 2024."));
+        s.author = "Ada Reviewer".into();
+        s.run("select.text", &json!({"text": "figures"})).unwrap();
+        s.run("review.newComment", &json!({"text": "Check the totals"})).unwrap();
+        s.run("review.trackChanges", &json!({"value": true})).unwrap();
+        s.run("select.text", &json!({"text": "quarterly "})).unwrap();
+        s.run("text.delete", &json!({})).unwrap();
+        let mut doc = s.doc.clone();
+        doc.core.created = "2024-05-06T07:08:09Z".into();
+        doc
+    }
+
+    /// The `renderPdf` reply's bytes for `docx` rendered with `options`.
+    fn worker_pdf(docx: &[u8], options: proto::PdfJobOptions) -> Vec<u8> {
+        let req = wordcraft_worker_proto::PdfRenderRequest { docx: docx.to_vec(), fonts: Vec::new(), options };
+        let (h, p) = request(&req, 31);
+        let (rh, rp) = handle_message(&h, &p);
+        assert_eq!(proto::decode_envelope(&rh).unwrap().kind, Kind::Pdf, "{}", String::from_utf8_lossy(&rp));
+        rp
+    }
+
+    /// Review finding (the lazy PDF's options): the worker's PDF of a package is the engine's own
+    /// PDF of the same document for the same export options — Print Markup, its comments and the
+    /// digits — so markup on differs from markup off exactly as the engine's export does. Before,
+    /// the worker rendered every job with the defaults, whatever the user asked for.
+    #[test]
+    fn render_pdf_applies_the_export_options_as_the_engine_does() {
+        use wordcraft_engine::io::ExportOptions;
+        use wordcraft_layout::NumeralMode;
+        let docx = wordcraft_docx::write(&marked_up_document()).unwrap();
+        let read = wordcraft_docx::read(&docx).unwrap();
+        let cases = [
+            (false, false, NumeralMode::Arabic, proto::Numeral::Arabic),
+            (true, false, NumeralMode::Arabic, proto::Numeral::Arabic),
+            (true, true, NumeralMode::Arabic, proto::Numeral::Arabic),
+            (false, false, NumeralMode::Hindi, proto::Numeral::Hindi),
+            (true, true, NumeralMode::Context, proto::Numeral::Context),
+        ];
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+        for (markup, comments, numeral, wire) in cases {
+            let opts = ExportOptions { markup, comments, numeral, ..Default::default() };
+            let engine = wordcraft_engine::io::save_bytes_opts("x.pdf", &read, &opts).unwrap();
+            let worker = worker_pdf(&docx, proto::PdfJobOptions { markup, comments, numeral: wire });
+            assert!(worker == engine, "markup {markup}, comments {comments}, {numeral:?}: the worker's PDF is not the engine's");
+            // Context digits in left-to-right text are Western ones: that case equals its Arabic twin.
+            if numeral != NumeralMode::Context {
+                assert!(!seen.contains(&worker), "markup {markup}, comments {comments}, {numeral:?} changed nothing");
+            }
+            seen.push(worker);
+        }
+        // Comments without markup are no comments, as in the engine (`comments: markup && …`).
+        assert!(worker_pdf(&docx, proto::PdfJobOptions { markup: false, comments: true, numeral: proto::Numeral::Arabic }) == seen[0]);
     }
 
     #[test]
