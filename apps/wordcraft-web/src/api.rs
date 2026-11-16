@@ -114,6 +114,17 @@ async fn execute_command(queue: Sender<ControlRequest>, ctx: egui::Context, comm
     }
 }
 
+/// The bytes a page passed as `val`, without copying them: a `Uint8Array` as it is (`new
+/// Uint8Array(typedArray)` would clone its buffer, ECMA-262 InitializeTypedArrayFromTypedArray),
+/// a view on an `ArrayBuffer`; `None` for anything else. The caller bounds the length, then
+/// copies once.
+fn byte_view(val: &JsValue) -> Option<js_sys::Uint8Array> {
+    match val.dyn_ref::<js_sys::Uint8Array>() {
+        Some(view) => Some(view.clone()),
+        None => val.is_instance_of::<js_sys::ArrayBuffer>().then(|| js_sys::Uint8Array::new(val)),
+    }
+}
+
 fn json_to_js(v: &Value) -> JsValue {
     js_sys::JSON::parse(&v.to_string()).unwrap_or(JsValue::NULL)
 }
@@ -171,11 +182,17 @@ fn attach_doc_helpers(api: &js_sys::Object, queue: Sender<ControlRequest>, ctx: 
         let q = queue.clone();
         let c = ctx.clone();
         future_to_promise(async move {
-            let b64 = if let Some(s) = val.as_string() {
-                s
-            } else if val.is_instance_of::<js_sys::Uint8Array>() || val.is_instance_of::<js_sys::ArrayBuffer>() {
-                let bytes = js_sys::Uint8Array::new(&val).to_vec();
-                base64_encode(&bytes)
+            // Bounded before any copy, with `doc.loadDocx`'s own refusal.
+            let b64 = if let Some(s) = val.dyn_ref::<js_sys::JsString>() {
+                if let Some(refused) = crate::lazy_formats::load_docx_error(s.length() as usize) {
+                    return Err(js_err(&refused));
+                }
+                String::from(s)
+            } else if let Some(view) = byte_view(&val) {
+                if let Some(refused) = crate::lazy_formats::load_docx_error(crate::lazy_formats::base64_len(view.length() as usize)) {
+                    return Err(js_err(&refused));
+                }
+                base64_encode(&view.to_vec())
             } else {
                 return Err(js_err("loadDocx expects Uint8Array, ArrayBuffer, or base64 string"));
             };
@@ -236,8 +253,12 @@ fn attach_doc_helpers(api: &js_sys::Object, queue: Sender<ControlRequest>, ctx: 
             let data = js_sys::Reflect::get(&val, &JsValue::from_str("data")).unwrap_or(JsValue::UNDEFINED);
             let input = if let Some(s) = data.as_string() {
                 base64_decode(&s).unwrap_or_default()
-            } else if data.is_instance_of::<js_sys::Uint8Array>() || data.is_instance_of::<js_sys::ArrayBuffer>() {
-                js_sys::Uint8Array::new(&data).to_vec()
+            } else if let Some(view) = byte_view(&data) {
+                // Bounded before the copy, with the conversion's own refusal.
+                if let Some(refused) = crate::lazy_formats::convert_input_error(view.length() as usize) {
+                    return fail(&reject, refused);
+                }
+                view.to_vec()
             } else {
                 return fail(&reject, "convertDocument expects `data` as Uint8Array, ArrayBuffer, or base64 string".into());
             };

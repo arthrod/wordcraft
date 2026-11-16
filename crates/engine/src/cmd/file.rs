@@ -754,7 +754,17 @@ fn layout_summary(s: &mut Session, _: &Value) -> CmdResult {
     Ok(json!({"pages": pages, "caret": caret, "ms": l.ms}))
 }
 
-const MAX_DOCX_BASE64_BYTES: usize = 64 * 1024 * 1024;
+/// Most bytes of base64 `doc.loadDocx` takes ([`check_docx_base64_len`]).
+pub const MAX_DOCX_BASE64_BYTES: usize = 64 * 1024 * 1024;
+
+/// `doc.loadDocx`'s bound on a `docxBase64` of `len` bytes. Public for a host that holds the
+/// package as bytes (the web page API) and must refuse it before encoding it, with this error.
+pub fn check_docx_base64_len(len: usize) -> Result<(), CmdError> {
+    if len > MAX_DOCX_BASE64_BYTES {
+        return Err(CmdError::Params("`docxBase64` payload exceeds 64 MB limit".into()));
+    }
+    Ok(())
+}
 
 /// Exports the active document as a base64-encoded `.docx` package.
 fn export_docx_cmd(s: &mut Session, v: &Value) -> CmdResult {
@@ -771,9 +781,7 @@ fn export_docx_cmd(s: &mut Session, v: &Value) -> CmdResult {
 /// it; otherwise it opens beside the active document, as `file.open` does.
 fn load_docx_cmd(s: &mut Session, v: &Value) -> CmdResult {
     let b64 = p::str(v, "docxBase64").or_else(|| p::str(v, "data")).ok_or_else(|| CmdError::Params("missing `docxBase64` string".into()))?;
-    if b64.len() > MAX_DOCX_BASE64_BYTES {
-        return Err(CmdError::Params("`docxBase64` payload exceeds 64 MB limit".into()));
-    }
+    check_docx_base64_len(b64.len())?;
     let bytes = super::insert::base64_decode(b64).ok_or_else(|| CmdError::Params("invalid base64 in `docxBase64`".into()))?;
     if !bytes.starts_with(b"PK\x03\x04") && !wordcraft_docx::is_encrypted(&bytes) {
         return Err(CmdError::Params("payload is not a valid .docx package".into()));

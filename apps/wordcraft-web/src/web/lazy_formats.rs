@@ -247,6 +247,26 @@ pub(crate) fn font_batch(
     batch
 }
 
+/// The length of the base64 a package of `raw` bytes becomes (padded, as
+/// `wordcraft_engine::cmd::insert::base64_encode` writes it); saturates.
+pub(crate) fn base64_len(raw: usize) -> usize {
+    raw.div_ceil(3).saturating_mul(4)
+}
+
+/// The page API's `loadDocx` refusal for a package whose base64 is `base64_len` bytes, before
+/// it is copied or encoded: `doc.loadDocx`'s own bound and error
+/// (`wordcraft_engine::cmd::file::check_docx_base64_len`), as the command would answer it.
+pub(crate) fn load_docx_error(base64_len: usize) -> Option<String> {
+    wordcraft_engine::cmd::file::check_docx_base64_len(base64_len).err().map(|e| e.to_string())
+}
+
+/// A conversion's refusal for an input of `len` bytes, past
+/// [`wordcraft_worker_proto::MAX_CONVERT_BYTES`]: the one check, which the page API makes before
+/// copying the input and `lazy_io::convert` before sending it.
+pub(crate) fn convert_input_error(len: usize) -> Option<String> {
+    (len > wordcraft_worker_proto::MAX_CONVERT_BYTES).then(|| format!("the document is too large to convert in the browser ({len} bytes)"))
+}
+
 /// Most page-API PDF exports waiting at once ([`ApiExports`]).
 pub(crate) const MAX_API_EXPORTS: usize = 16;
 
@@ -1159,5 +1179,39 @@ mod tests {
         assert!(rig.timers.borrow().iter().all(|(n, _, _)| *n != "f"));
         assert_eq!(rig.stops.get(), 1, "only a timer that answered stops the worker");
         assert_eq!(queue.borrow().len(), 0, "nothing is left holding up a later job");
+    }
+
+    /// Review item (the page API's input copies): `loadDocx` and `convertDocument` refuse bytes
+    /// past the bound the later step enforces before copying them, with that step's own error:
+    /// `doc.loadDocx`'s cap on its base64, and the conversion's cap on its input.
+    #[test]
+    fn page_api_input_is_bounded_before_it_is_copied_with_the_later_steps_error() {
+        use wordcraft_engine::cmd::insert::base64_encode;
+        // The base64 a package of `n` bytes becomes, as `loadDocx` writes it.
+        for n in 0..12 {
+            assert_eq!(base64_len(n), base64_encode(&vec![7u8; n]).len(), "{n}");
+        }
+        assert_eq!(base64_len(usize::MAX), usize::MAX, "saturates");
+        // The command's own refusal, word for word, for the largest base64 it refuses.
+        let max = wordcraft_engine::cmd::file::MAX_DOCX_BASE64_BYTES;
+        let over = "A".repeat(max + 1);
+        let engine = wordcraft_engine::Session::new(wordcraft_doc::Document::default())
+            .run("doc.loadDocx", &serde_json::json!({"docxBase64": over}))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(load_docx_error(max + 1).as_deref(), Some(engine.as_str()));
+        assert_eq!(load_docx_error(max), None);
+        // In raw bytes: the largest package whose base64 fits goes, one more byte is refused.
+        let fits = max / 4 * 3;
+        assert_eq!((base64_len(fits), base64_len(fits + 1) > max), (max, true));
+        assert_eq!(load_docx_error(base64_len(fits)), None);
+        assert_eq!(load_docx_error(base64_len(fits + 1)).as_deref(), Some(engine.as_str()));
+        // The conversion's cap, with the words the conversion itself refuses with.
+        let cap = wordcraft_worker_proto::MAX_CONVERT_BYTES;
+        assert_eq!(convert_input_error(cap), None);
+        assert_eq!(
+            convert_input_error(cap + 1).as_deref(),
+            Some(format!("the document is too large to convert in the browser ({} bytes)", cap + 1).as_str())
+        );
     }
 }

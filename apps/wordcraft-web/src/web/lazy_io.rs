@@ -24,8 +24,8 @@ use wordcraft_worker_proto as proto;
 
 use super::{codec_worker, pdf_worker};
 use crate::lazy_formats::{
-    ApiExports, ExportRoute, FONT_BUDGET, Job, JobKind, JobQueue, deadline_job, export_route, failure_message, font_batch, import_format,
-    job_budget_ms, open_request, opened_name, pdf_job_options,
+    ApiExports, ExportRoute, FONT_BUDGET, Job, JobKind, JobQueue, convert_input_error, deadline_job, export_route, failure_message, font_batch,
+    import_format, job_budget_ms, open_request, opened_name, pdf_job_options,
 };
 
 /// Status-bar lines waiting for the shell's next frame.
@@ -99,8 +99,8 @@ fn with_deadline(kind: JobKind, input_bytes: usize, on_reply: impl FnOnce(Result
 /// at once when the job cannot be sent, otherwise on a later task turn, at the latest at the
 /// job's deadline.
 pub(crate) fn convert(asset_base: &str, req: &proto::ConvertRequest, on_reply: impl FnOnce(Result<Vec<u8>, String>) + 'static) {
-    if req.input.len() > proto::MAX_CONVERT_BYTES {
-        return on_reply(Err(format!("the document is too large to convert in the browser ({} bytes)", req.input.len())));
+    if let Some(refusal) = convert_input_error(req.input.len()) {
+        return on_reply(Err(refusal));
     }
     if !codec_worker::ensure(asset_base) {
         return on_reply(Err(NO_CODEC_WORKER.into()));
