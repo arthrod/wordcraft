@@ -39,8 +39,27 @@ import { brotliCompressSync, constants, gzipSync } from "node:zlib";
 import puppeteer from "puppeteer-core";
 import { findChrome, startServer } from "./drive.mjs";
 
-const args = {};
-for (let i = 2; i < process.argv.length; i += 2) args[process.argv[i].slice(2)] = process.argv[i + 1];
+const USAGE = "usage: node viewer.mjs --dist <dir> [--core <dir>] [--font <file.ttf>] [--out <file.json>]";
+// Strict: a misspelt option or one without its value is an error (exit 2), not a run against
+// the defaults that looks like a pass.
+function parseArgs(argv) {
+  const parsed = {};
+  for (let i = 0; i < argv.length; i += 2) {
+    const name = argv[i].startsWith("--") ? argv[i].slice(2) : "";
+    const value = argv[i + 1];
+    let why = null;
+    if (!["dist", "core", "font", "out"].includes(name)) why = `unknown argument ${JSON.stringify(argv[i])}`;
+    else if (value === undefined || value.startsWith("--")) why = `--${name} needs a value`;
+    else if (name in parsed) why = `--${name} given twice`;
+    if (why) {
+      console.error(`viewer.mjs: ${why}\n${USAGE}`);
+      process.exit(2);
+    }
+    parsed[name] = value;
+  }
+  return parsed;
+}
+const args = parseArgs(process.argv.slice(2));
 const dist = resolve(args.dist ?? "../../../dist/web");
 // The editor's files: its glue, loader and module, and its wasm-bindgen snippets (eframe's).
 const EDITOR = /\/wordcraft-web(_bg\.wasm|\.js|_loader\.js)$|\/snippets\/eframe-/;
