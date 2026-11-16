@@ -684,7 +684,7 @@ fn lazy_export_hook(exporter: lazy_io::Exporter) -> wordcraft_ui_egui::LazyExpor
               password: Option<&str>,
               opts: &wordcraft_engine::io::ExportOptions,
               docx: &dyn Fn() -> Result<Vec<u8>, String>,
-              used: &dyn Fn() -> Vec<(String, String)>| exporter.export(name, password, opts, docx, used),
+              used: &dyn Fn() -> wordcraft_engine::strict::PdfFaces| exporter.export(name, password, opts, docx, used),
     )
 }
 

@@ -332,14 +332,35 @@ fn pdf_faces_lists_the_faces_the_text_is_drawn_in() {
     let primary = wordcraft_fonts::word::resolve(&s.doc.settings.minor_font, false, false).face;
     let drawn = (primary.get().family.clone(), primary.get().style.clone());
     let faces = wordcraft_engine::strict::pdf_faces(&s.doc, &opts);
-    assert_eq!(faces, std::slice::from_ref(&drawn), "one font, one face");
+    assert!(!faces.cut);
+    assert_eq!(faces.faces, std::slice::from_ref(&drawn), "one font, one face");
     // A second family on part of the text: both are drawn in, each listed once.
     let other = if drawn.0 == "Source Serif 4" { "Source Sans 3" } else { "Source Serif 4" };
     s.run("select.text", &json!({"text": "figures"})).unwrap();
     s.run("format.font", &json!({"name": other})).unwrap();
-    let faces = wordcraft_engine::strict::pdf_faces(&s.doc, &opts);
+    let faces = wordcraft_engine::strict::pdf_faces(&s.doc, &opts).faces;
     assert!(faces.contains(&drawn) && faces.iter().any(|(f, _)| *f == other), "{faces:?}");
     assert_eq!(faces.len(), 2, "{faces:?}");
     // A blank document draws no text.
-    assert_eq!(wordcraft_engine::strict::pdf_faces(&Document::default(), &opts), Vec::<(String, String)>::new());
+    assert_eq!(wordcraft_engine::strict::pdf_faces(&Document::default(), &opts), Default::default());
+}
+
+/// Review finding (gate 3, F1): the list stopped at its bound in silence, so a face past it
+/// looked unused and a strict export decided from the cut list. Past the bound the list now
+/// says it was cut; at the bound it is whole.
+#[test]
+fn pdf_faces_says_when_its_list_was_cut() {
+    use wordcraft_engine::strict::pdf_faces_within;
+    let opts = wordcraft_engine::io::ExportOptions::default();
+    let mut s = Session::new(Document::from_text("Quarterly figures"));
+    let primary = wordcraft_fonts::word::resolve(&s.doc.settings.minor_font, false, false).face;
+    let other = if primary.get().family == "Source Serif 4" { "Source Sans 3" } else { "Source Serif 4" };
+    s.run("select.text", &json!({"text": "figures"})).unwrap();
+    s.run("format.font", &json!({"name": other})).unwrap();
+    let whole = pdf_faces_within(&s.doc, &opts, 2);
+    assert_eq!((whole.faces.len(), whole.cut), (2, false), "two faces fit a bound of two");
+    let cut = pdf_faces_within(&s.doc, &opts, 1);
+    assert_eq!((cut.faces.len(), cut.cut), (1, true), "the second face is left out, and the list says so");
+    assert_eq!(cut.faces[0], whole.faces[0]);
+    assert_eq!(pdf_faces_within(&Document::default(), &opts, 0), Default::default(), "nothing drawn, nothing cut");
 }

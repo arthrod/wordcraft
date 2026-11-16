@@ -492,7 +492,7 @@ mod tests {
         let plain = doc.clone();
         doc.insert_object(&wordcraft_doc::Pos::body(0, 0), chart, &Default::default()).unwrap();
         // What the page lists for each: its own `pdf_faces` of the document it exports.
-        let faces = |d: &wordcraft_doc::Document| wordcraft_engine::strict::pdf_faces(d, &Default::default());
+        let faces = |d: &wordcraft_doc::Document| wordcraft_engine::strict::pdf_faces(d, &Default::default()).faces;
         let drawn = faces(&doc);
         let style = drawn.iter().find(|(family, _)| family == LABEL_FONT).map(|(_, style)| style.clone()).expect("the chart label's face is listed");
         assert!(!faces(&plain).iter().any(|(family, _)| family == LABEL_FONT), "only the chart draws in {LABEL_FONT}");

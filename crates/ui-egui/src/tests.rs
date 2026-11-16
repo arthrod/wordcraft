@@ -5797,7 +5797,7 @@ fn web_save_offers_the_host_its_lazy_formats_first() {
                   password: Option<&str>,
                   _: &wordcraft_engine::io::ExportOptions,
                   docx: &dyn Fn() -> Result<Vec<u8>, String>,
-                  _: &dyn Fn() -> Vec<(String, String)>| {
+                  _: &dyn Fn() -> wordcraft_engine::strict::PdfFaces| {
                 if name.ends_with(".broken") {
                     return Some(Err("the module could not start".into()));
                 }
@@ -5850,7 +5850,7 @@ fn web_lazy_pdf_shows_the_fields_as_the_engines_pdf_does() {
                   _: Option<&str>,
                   _: &wordcraft_engine::io::ExportOptions,
                   docx: &dyn Fn() -> Result<Vec<u8>, String>,
-                  _: &dyn Fn() -> Vec<(String, String)>| {
+                  _: &dyn Fn() -> wordcraft_engine::strict::PdfFaces| {
                 if !(name.ends_with(".rtf") || name.ends_with(".pdf")) {
                     return None;
                 }
@@ -5917,7 +5917,7 @@ fn web_lazy_export_hands_the_host_the_commands_export_options() {
                   _: Option<&str>,
                   opts: &wordcraft_engine::io::ExportOptions,
                   docx: &dyn Fn() -> Result<Vec<u8>, String>,
-                  _: &dyn Fn() -> Vec<(String, String)>| {
+                  _: &dyn Fn() -> wordcraft_engine::strict::PdfFaces| {
                 if !(name.ends_with(".rtf") || name.ends_with(".pdf")) {
                     return None;
                 }
@@ -5965,7 +5965,7 @@ fn web_lazy_pdf_refuses_a_strict_export_as_the_engine_does() {
                   _: Option<&str>,
                   _: &wordcraft_engine::io::ExportOptions,
                   docx: &dyn Fn() -> Result<Vec<u8>, String>,
-                  _: &dyn Fn() -> Vec<(String, String)>| {
+                  _: &dyn Fn() -> wordcraft_engine::strict::PdfFaces| {
                 if !name.ends_with(".pdf") {
                     return None;
                 }
@@ -6032,7 +6032,7 @@ fn web_save_refuses_strict_on_a_word_package_as_the_engine_does() {
 /// for them; it asks only when it must choose.
 #[test]
 fn web_lazy_pdf_offers_the_faces_its_text_is_drawn_in() {
-    type Seen = std::rc::Rc<std::cell::RefCell<Vec<Vec<(String, String)>>>>;
+    type Seen = std::rc::Rc<std::cell::RefCell<Vec<wordcraft_engine::strict::PdfFaces>>>;
     let asked: Seen = Default::default();
     let seen = asked.clone();
     let services = Services {
@@ -6042,7 +6042,7 @@ fn web_lazy_pdf_offers_the_faces_its_text_is_drawn_in() {
                   _: Option<&str>,
                   _: &wordcraft_engine::io::ExportOptions,
                   _: &dyn Fn() -> Result<Vec<u8>, String>,
-                  faces: &dyn Fn() -> Vec<(String, String)>| {
+                  faces: &dyn Fn() -> wordcraft_engine::strict::PdfFaces| {
                 name.ends_with(".pdf").then(|| {
                     seen.borrow_mut().push(faces());
                     Ok(())
@@ -6054,7 +6054,7 @@ fn web_lazy_pdf_offers_the_faces_its_text_is_drawn_in() {
     let mut a = WordApp::new(Session::new(wordcraft_doc::Document::from_text("The quarterly figures look strong.")), services);
     let params = json!({"path": "a.pdf"});
     let expected = wordcraft_engine::strict::pdf_faces(&a.session.doc, &wordcraft_engine::cmd::file::export_options(&a.session, &params));
-    assert!(!expected.is_empty());
+    assert!(!expected.faces.is_empty());
     a.execute("file.exportPdf", params).unwrap();
     assert_eq!(asked.borrow().as_slice(), [expected]);
 }

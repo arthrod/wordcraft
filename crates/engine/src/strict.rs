@@ -219,9 +219,20 @@ pub fn pdf_refusal(doc: &Document, opts: &ExportOptions) -> Option<String> {
     (!report.passed()).then(|| report.refusal())
 }
 
-/// Most faces [`pdf_faces`] lists: the font database bounds them already; this bounds the list a
-/// hostile document can make a host hold.
+/// Most faces [`pdf_faces`] lists. The font database bounds faces per file and font files, not
+/// faces (a document may embed many collections), so this bounds the list a hostile document
+/// can make a host hold; a longer list is cut and says so ([`PdfFaces::cut`]).
 pub const MAX_PDF_FACES: usize = 4096;
+
+/// The faces a PDF export draws text in ([`pdf_faces`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PdfFaces {
+    /// `(typographic family, style)`, each once, in the order first drawn.
+    pub faces: Vec<(String, String)>,
+    /// The PDF draws text in more faces than the list holds: some are left out, so the list
+    /// cannot show that a face is unused. A strict host refuses what it cannot check.
+    pub cut: bool,
+}
 
 /// The faces a PDF export of `doc` draws text in, as `(typographic family, style)`, each once in
 /// the order first drawn: the faces its fonts ask for and the fallback faces drawn instead, over
@@ -229,19 +240,31 @@ pub const MAX_PDF_FACES: usize = 4096;
 /// diagrams, equations) and the watermark. Text inside a picture's metafile is not included. For
 /// a host that writes the PDF elsewhere with copies of its faces (the web app's PDF worker) and
 /// must know which copies this document needs. Lays the document out, so a host asks only when
-/// it has to choose. `doc` is the document as printed (`output_fields`).
-pub fn pdf_faces(doc: &Document, opts: &ExportOptions) -> Vec<(String, String)> {
+/// it has to choose. `doc` is the document as printed (`output_fields`). At most
+/// [`MAX_PDF_FACES`], else [`PdfFaces::cut`].
+pub fn pdf_faces(doc: &Document, opts: &ExportOptions) -> PdfFaces {
+    pdf_faces_within(doc, opts, MAX_PDF_FACES)
+}
+
+/// [`pdf_faces`] holding at most `limit` faces: past it the list is cut and says so.
+pub fn pdf_faces_within(doc: &Document, opts: &ExportOptions, limit: usize) -> PdfFaces {
     use wordcraft_layout::display::{Draw, page_display};
     let pdf = pdf_options(opts);
     let lay = wordcraft_layout::layout(doc, &mut LayoutCache::new(), &pdf.layout_options());
     let display = pdf.display_options();
     let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
+    let mut out = PdfFaces::default();
     let mut add = |face: &wordcraft_fonts::FaceRef| {
-        if out.len() < MAX_PDF_FACES && seen.insert(face.id()) {
-            let f = face.get();
-            out.push((f.family.clone(), f.style.clone()));
+        if seen.contains(&face.id()) {
+            return;
         }
+        if out.faces.len() >= limit {
+            out.cut = true;
+            return;
+        }
+        seen.insert(face.id());
+        let f = face.get();
+        out.faces.push((f.family.clone(), f.style.clone()));
     };
     for page in &lay.pages {
         // A stack, not recursion: nesting depth comes from the document.

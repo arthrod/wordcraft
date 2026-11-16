@@ -136,7 +136,7 @@ pub(crate) fn render_pdf(
     asset_base: &str,
     docx: Vec<u8>,
     options: proto::PdfJobOptions,
-    used: &dyn Fn() -> Vec<(String, String)>,
+    used: &dyn Fn() -> wordcraft_engine::strict::PdfFaces,
     on_reply: impl FnOnce(Result<Vec<u8>, String>) + 'static,
 ) {
     if docx.is_empty() {
@@ -277,7 +277,7 @@ impl Exporter {
         password: Option<&str>,
         opts: &wordcraft_engine::io::ExportOptions,
         docx: &dyn Fn() -> Result<Vec<u8>, String>,
-        used: &dyn Fn() -> Vec<(String, String)>,
+        used: &dyn Fn() -> wordcraft_engine::strict::PdfFaces,
     ) -> Option<Result<(), String>> {
         let route = export_route(name)?;
         let docx = match docx() {

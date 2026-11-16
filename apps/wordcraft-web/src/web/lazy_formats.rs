@@ -260,22 +260,35 @@ pub(crate) struct PdfFonts {
 /// `strict` job, the faces its PDF draws text in (`used`, which lays the document out), so the
 /// worker refuses when a copy it cannot install is one of them. A strict job with no copies to
 /// lose is not laid out (its list is empty: the worker never reads it). `Err` is a strict
-/// job's refusal: a face the text is drawn in does not fit the budget.
+/// job's refusal: a face the text is drawn in does not fit the budget, or the list was cut
+/// ([`wordcraft_engine::strict::PdfFaces::cut`]) and some face does not fit, which could be one
+/// of those. A cut list whose copies all fit is sent as unknown (`drawn: None`), so the worker
+/// refuses on any copy it cannot install.
 pub(crate) fn pdf_fonts(
     faces: Vec<(String, String, std::sync::Arc<Vec<u8>>)>,
-    used: impl FnOnce() -> Vec<(String, String)>,
+    used: impl FnOnce() -> wordcraft_engine::strict::PdfFaces,
     budget: FontBudget,
     strict: bool,
 ) -> Result<PdfFonts, String> {
     if !strict {
-        return Ok(PdfFonts { batch: font_batch(faces, used, budget), drawn: None });
+        return Ok(PdfFonts { batch: font_batch(faces, || used().faces, budget), drawn: None });
     }
-    let drawn = if faces.is_empty() { Vec::new() } else { used() };
+    if faces.is_empty() {
+        return Ok(PdfFonts { batch: FontBatch::default(), drawn: Some(Vec::new()) });
+    }
+    let wordcraft_engine::strict::PdfFaces { faces: drawn, cut } = used();
     let batch = font_batch(faces, || drawn.clone(), budget);
-    match batch.strict_refusal() {
-        Some(refusal) => Err(refusal),
-        None => Ok(PdfFonts { batch, drawn: Some(drawn) }),
+    if let Some(refusal) = batch.strict_refusal() {
+        return Err(refusal);
     }
+    let left = batch.left_used.saturating_add(batch.left_unused);
+    if cut && left > 0 {
+        return Err(format!(
+            "strict: this PDF draws text in more than {} font faces, so whether the {left} face(s) too many to send to the PDF export are among them cannot be checked",
+            wordcraft_engine::strict::MAX_PDF_FACES
+        ));
+    }
+    Ok(PdfFonts { batch, drawn: (!cut).then_some(drawn) })
 }
 
 /// The length of the base64 a package of `raw` bytes becomes (padded, as
@@ -1058,8 +1071,9 @@ mod tests {
     /// nothing is laid out either.
     #[test]
     fn a_strict_pdf_job_sends_the_faces_its_text_is_drawn_in() {
+        use wordcraft_engine::strict::PdfFaces;
         let drawn = || vec![("Family 1".to_string(), "Regular".to_string())];
-        let job = pdf_fonts(faces(3), drawn, FONT_BUDGET, true).unwrap();
+        let job = pdf_fonts(faces(3), || PdfFaces { faces: drawn(), cut: false }, FONT_BUDGET, true).unwrap();
         assert_eq!(job.drawn, Some(drawn()));
         assert_eq!(job.batch.copies.len(), 3);
         let job = pdf_fonts(faces(3), || panic!("laid out for a job that is not strict"), FONT_BUDGET, false).unwrap();
@@ -1068,9 +1082,31 @@ mod tests {
         assert_eq!((job.drawn, job.batch.copies.len()), (Some(Vec::new()), 0));
         // The budget's own refusal still comes first.
         let budget = FontBudget { count: 1, bytes: FONT_BUDGET.bytes };
-        let err =
-            pdf_fonts(faces(3), || vec![("Family 1".into(), "Regular".into()), ("Family 2".into(), "Regular".into())], budget, true).unwrap_err();
+        let two = || PdfFaces { faces: vec![("Family 1".into(), "Regular".into()), ("Family 2".into(), "Regular".into())], cut: false };
+        let err = pdf_fonts(faces(3), two, budget, true).unwrap_err();
         assert!(err.starts_with("strict: 1 font face(s)"), "{err}");
+    }
+
+    /// Review finding (gate 3, F1): the list of faces the PDF draws text in is bounded, and a
+    /// face past the bound looked unused, so a strict export decided from a cut list. A cut list
+    /// now says so: a strict job whose copies do not all fit refuses (a face left out may be one
+    /// its text is drawn in), and one whose copies all fit runs but tells the worker the list is
+    /// not whole, so the worker refuses on any copy it cannot install.
+    #[test]
+    fn a_strict_pdf_job_refuses_what_a_cut_face_list_cannot_check() {
+        use wordcraft_engine::strict::PdfFaces;
+        let cut = || PdfFaces { faces: vec![("Family 0".into(), "Regular".into())], cut: true };
+        let job = pdf_fonts(faces(3), cut, FONT_BUDGET, true).unwrap();
+        assert_eq!((job.drawn, job.batch.copies.len()), (None, 3), "all fit: sent, the list marked unknown");
+        let budget = FontBudget { count: 2, bytes: FONT_BUDGET.bytes };
+        let err = pdf_fonts(faces(3), cut, budget, true).unwrap_err();
+        assert!(err.starts_with("strict: ") && err.contains("cannot be checked"), "{err}");
+        let job = pdf_fonts(faces(3), cut, budget, false).unwrap();
+        assert_eq!((job.drawn, job.batch.copies.len()), (None, 2), "not strict: what fits goes");
+        // The same budget with the whole list: the face left out is one the text never uses.
+        let whole = || PdfFaces { faces: vec![("Family 0".into(), "Regular".into())], cut: false };
+        let job = pdf_fonts(faces(3), whole, budget, true).unwrap();
+        assert_eq!((job.drawn.map(|d| d.len()), job.batch.left_unused), (Some(1), 1));
     }
 
     /// Review finding (the clients' inbound guards): a worker's message is judged by its shape

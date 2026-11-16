@@ -138,16 +138,17 @@ pub type Inbox = std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>;
 /// command resolved (Print Markup, comments, digits), which a package does not carry, for the
 /// host to apply as the engine's writer would. `docx` already refuses a strict PDF that would
 /// leave something out, with the engine's message. `faces` lists the faces a PDF of the document
-/// draws text in, `(family, style)` ([`wordcraft_engine::strict::pdf_faces`]), for a host that
-/// copies faces to its module and must choose which: it lays the document out, so ask only when
-/// a choice has to be made. `Some(Err)` is a job that could not start.
+/// draws text in, `(family, style)`, and says when that list was cut
+/// ([`wordcraft_engine::strict::pdf_faces`]), for a host that copies faces to its module and
+/// must choose which: it lays the document out, so ask only when a choice has to be made.
+/// `Some(Err)` is a job that could not start.
 pub type LazyExportFn = Box<
     dyn Fn(
         &str,
         Option<&str>,
         &wordcraft_engine::io::ExportOptions,
         &dyn Fn() -> Result<Vec<u8>, String>,
-        &dyn Fn() -> Vec<(String, String)>,
+        &dyn Fn() -> wordcraft_engine::strict::PdfFaces,
     ) -> Option<Result<(), String>>,
 >;
 
