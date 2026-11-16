@@ -583,6 +583,27 @@ mod tests {
     }
 
     #[test]
+    fn a_documents_fonts_leave_with_the_last_session_showing_it() {
+        // A server opens a document for each request and drops it after the answer, with no
+        // replacement; two requests for the same document may be open at once.
+        const FAMILY: &str = "JetBrains WkrD";
+        let docx = docx_in(FAMILY, Some(&font_named(FAMILY)));
+        let first = wordcraft_viewer::open(&docx, None).unwrap();
+        let second = wordcraft_viewer::open(&docx, None).unwrap();
+        assert_eq!(wordcraft_fonts::FontDb::global().styles(FAMILY), ["Regular"]);
+        drop(first);
+        assert_eq!(wordcraft_fonts::FontDb::global().styles(FAMILY), ["Regular"], "the other session still shows it");
+        drop(second);
+        assert!(wordcraft_fonts::FontDb::global().styles(FAMILY).is_empty(), "gone with the last session showing it");
+        // A worker dropped with its document: the same.
+        let mut worker = ViewerWorker::new();
+        assert_eq!(open(&mut worker, &docx, None, 1).0.kind, Kind::ViewOpened);
+        assert_eq!(wordcraft_fonts::FontDb::global().styles(FAMILY), ["Regular"]);
+        drop(worker);
+        assert!(wordcraft_fonts::FontDb::global().styles(FAMILY).is_empty());
+    }
+
+    #[test]
     fn the_protocol_bounds_are_the_cores() {
         // The page module sizes its requests by the protocol's copies, without linking the core.
         assert_eq!(proto::MAX_VIEW_SIDE, wordcraft_viewer::MAX_RASTER_SIDE);

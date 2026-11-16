@@ -174,8 +174,18 @@ pub struct Session {
     doc: Document,
     layout: DocLayout,
     /// The faces this document's embedded fonts added: withdrawn when another document takes
-    /// its place ([`open_after`]).
+    /// its place ([`open_after`]), and released when the session is dropped.
     fonts: wordcraft_fonts::DocumentFaces,
+}
+
+/// A dropped session's embedded fonts leave the font list, unless another open session holds
+/// them (the same document opened twice, as a server may for two requests at once): a font one
+/// document embeds never answers for a later one that only names the family, however the
+/// session ends. Already withdrawn by a [`Replacement`], they stay out.
+impl Drop for Session {
+    fn drop(&mut self) {
+        wordcraft_fonts::FontDb::global().release_document_fonts(&self.fonts);
+    }
 }
 
 /// Open the `.docx` package in `bytes` (decrypted with `password` when it is encrypted) and lay

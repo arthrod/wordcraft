@@ -43,10 +43,13 @@ impl DocumentFaces {
 /// that matches all three. The hash has per-process random keys, so two kept files under one
 /// key take a 64-bit collision no document can aim at: a file is hashed once and compared with
 /// at most the one file it is.
+///
+/// It also counts, per face, the documents holding it ([`FontDb::release_document_fonts`]).
 #[derive(Default)]
 pub(super) struct DocumentFiles {
     hasher: RandomState,
     files: HashMap<FileKey, Vec<KeptFile>>,
+    held: HashMap<u32, usize>,
 }
 
 /// What a kept font file is found by ([`DocumentFiles`]).
@@ -148,7 +151,17 @@ impl FontDb {
         }
         let mut list = self.faces.write().unwrap_or_else(PoisonError::into_inner);
         let mut present: HashSet<_> = list.iter().map(|g| key(g)).collect();
-        let mut added: Vec<Arc<FontFace>> = known.into_iter().filter(|f| present.insert(key(f))).collect();
+        // A kept face in the list already is another open document's of this file: this one
+        // holds it too.
+        let listed: HashSet<u32> = list.iter().map(|g| g.id).collect();
+        let (mut shared, mut added) = (Vec::new(), Vec::new());
+        for f in known {
+            if listed.contains(&f.id) {
+                shared.push(f);
+            } else if present.insert(key(&f)) {
+                added.push(f);
+            }
+        }
         let (mut room, mut new_bytes) = (room, 0usize);
         for (file_key, file) in fresh {
             let mut own = HashSet::new();
@@ -166,11 +179,44 @@ impl FontDb {
         }
         list.extend(added.iter().cloned());
         drop(list);
+        let changed = !added.is_empty();
+        added.extend(shared);
+        for f in &added {
+            let held = kept.held.entry(f.id).or_insert(0);
+            *held = held.saturating_add(1);
+        }
         drop(kept);
-        if !added.is_empty() {
+        if changed {
             self.forget_choices();
         }
         DocumentFaces { faces: added, new_bytes }
+    }
+
+    /// The document that added `faces` ([`FontDb::add_document_fonts_scoped`]) is closed: each
+    /// face no other open document holds leaves the font list, as in
+    /// [`FontDb::withdraw_document_fonts`]. Call it once per addition; a face it is called for
+    /// more often than added leaves the list (again), nothing worse.
+    pub fn release_document_fonts(&self, faces: &DocumentFaces) {
+        let mut kept = self.document_files.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut free = HashSet::new();
+        for f in &faces.faces {
+            match kept.held.get_mut(&f.id) {
+                Some(held) if *held > 1 => *held -= 1,
+                _ => {
+                    kept.held.remove(&f.id);
+                    free.insert(f.id);
+                }
+            }
+        }
+        let mut list = self.faces.write().unwrap_or_else(PoisonError::into_inner);
+        let before = list.len();
+        list.retain(|f| !free.contains(&f.id));
+        let removed = list.len() != before;
+        drop(list);
+        drop(kept);
+        if removed {
+            self.forget_choices();
+        }
     }
 
     /// Take a document's faces out of the font list: lookups no longer find them, and fallback

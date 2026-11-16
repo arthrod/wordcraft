@@ -152,3 +152,25 @@ fn new_document_files_are_kept_while_they_fit_the_room() {
         assert_eq!(db.styles(family).len(), styles, "{family}");
     }
 }
+
+#[test]
+fn a_documents_faces_leave_when_the_last_document_holding_them_is_released() {
+    let db = FontDb::with_font_dirs(vec![]);
+    let font = renamed("SourceSans3-Regular.ttf", "Held Sans Abc");
+    let first = db.add_document_fonts_scoped(vec![(font.clone(), "Held Sans Abc".to_string())], usize::MAX);
+    let second = db.add_document_fonts_scoped(vec![(font.clone(), "Held Sans Abc".to_string())], usize::MAX);
+    assert_eq!(second.faces.iter().map(|f| f.id).collect::<Vec<_>>(), first.faces.iter().map(|f| f.id).collect::<Vec<_>>(), "both hold it");
+    assert_eq!(db.read_faces().iter().filter(|f| f.named("Held Sans Abc")).count(), 1, "listed once");
+    db.release_document_fonts(&first);
+    assert_eq!(db.styles("Held Sans Abc"), ["Regular"], "the second still holds it");
+    let generation = db.generation();
+    db.release_document_fonts(&second);
+    assert!(db.styles("Held Sans Abc").is_empty(), "gone with the last");
+    assert!(db.generation() > generation, "lookups made while it was there are forgotten");
+    db.release_document_fonts(&second);
+    assert!(db.styles("Held Sans Abc").is_empty(), "released again: nothing worse");
+    // Opened again later, the file's faces come back.
+    let again = db.add_document_fonts_scoped(vec![(font, "Held Sans Abc".to_string())], 0);
+    assert_eq!((again.len(), again.new_bytes()), (1, 0));
+    assert_eq!(db.styles("Held Sans Abc"), ["Regular"]);
+}
