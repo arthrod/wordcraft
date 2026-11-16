@@ -7332,6 +7332,7 @@ dependencies = [
  "serde_json",
  "wordcraft-doc",
  "wordcraft-geom",
+ "wordcraft-model-bridge",
 ]
 
 [[package]]

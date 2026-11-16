@@ -1,6 +1,5 @@
 //! Bounded conversion between craft-wordmodel and WordCraft's document model.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use craft_docx::DocxError;
@@ -26,153 +25,6 @@ where
     serde_json::from_slice(&bytes).map_err(|error| DocxError::Xml(format!("shared model conversion: {error}")))
 }
 
-// ---------------------------------------------------------------------------
-// From Shared Model -> WordCraft Document
-// ---------------------------------------------------------------------------
-
-type GraphicCache = HashMap<usize, Arc<wordcraft_doc::graphic::Graphic>>;
-
-fn blocks_from_shared(source: craft_wordmodel::Blocks, graphics: &mut GraphicCache) -> Result<wordcraft_doc::Blocks, DocxError> {
-    source
-        .into_iter()
-        .map(|block| {
-            let block = Arc::try_unwrap(block).unwrap_or_else(|shared| (*shared).clone());
-            block_value_from_shared(block, graphics).map(Arc::new)
-        })
-        .collect()
-}
-
-fn block_value_from_shared(source: craft_wordmodel::Block, graphics: &mut GraphicCache) -> Result<wordcraft_doc::Block, DocxError> {
-    match source {
-        craft_wordmodel::Block::Para(paragraph) => paragraph_value_from_shared(paragraph, graphics).map(wordcraft_doc::Block::Para),
-        craft_wordmodel::Block::Table(table) => table_value_from_shared(table, graphics).map(wordcraft_doc::Block::Table),
-    }
-}
-
-fn paragraph_value_from_shared(
-    source: craft_wordmodel::para::Paragraph,
-    graphics: &mut GraphicCache,
-) -> Result<wordcraft_doc::para::Paragraph, DocxError> {
-    let craft_wordmodel::para::Paragraph { text, runs, props, mark, objects, section, .. } = source;
-    let mut paragraph = wordcraft_doc::para::Paragraph::new();
-    paragraph.text = text;
-    paragraph.runs =
-        runs.into_iter().map(|run| Ok(wordcraft_doc::para::Run { len: run.len, props: convert(run.props)? })).collect::<Result<_, DocxError>>()?;
-    paragraph.props = convert(props)?;
-    paragraph.mark = convert(mark)?;
-    paragraph.objects = objects.into_iter().map(|o| object_value_from_shared(o, graphics)).collect::<Result<_, _>>()?;
-    paragraph.section = section.map(|section| convert(*section).map(Box::new)).transpose()?;
-    Ok(paragraph)
-}
-
-fn object_value_from_shared(
-    source: craft_wordmodel::para::InlineObject,
-    graphics: &mut GraphicCache,
-) -> Result<wordcraft_doc::para::InlineObject, DocxError> {
-    use craft_wordmodel::para::InlineObject as Source;
-    use wordcraft_doc::para::InlineObject as Target;
-
-    match source {
-        Source::Image { media, w, h, alt, float, crop, fx, ole } => Ok(Target::Image {
-            media,
-            w,
-            h,
-            alt,
-            float: convert(float)?,
-            crop,
-            fx: convert(fx)?,
-            ole: ole.map(|o| convert(Arc::try_unwrap(o).unwrap_or_else(|s| (*s).clone())).map(Arc::new)).transpose()?,
-        }),
-        Source::Graphic { w, h, alt, float, graphic } => {
-            let key = Arc::as_ptr(&graphic) as usize;
-            let graphic = if let Some(cached) = graphics.get(&key) {
-                Arc::clone(cached)
-            } else {
-                let converted: Arc<wordcraft_doc::graphic::Graphic> = Arc::new(convert(Arc::try_unwrap(graphic).unwrap_or_else(|s| (*s).clone()))?);
-                graphics.insert(key, Arc::clone(&converted));
-                converted
-            };
-            Ok(Target::Graphic { w, h, alt, float: convert(float)?, graphic })
-        }
-        Source::Group { w, h, float, ch_w, ch_h, children, canvas } => Ok(Target::Group {
-            w,
-            h,
-            float: convert(float)?,
-            ch_w,
-            ch_h,
-            children: children.into_iter().map(|c| group_child_value_from_shared(c, graphics)).collect::<Result<_, _>>()?,
-            canvas: canvas.map(convert).transpose()?,
-        }),
-        other => convert(other),
-    }
-}
-
-fn group_child_value_from_shared(
-    source: craft_wordmodel::para::GroupChild,
-    graphics: &mut GraphicCache,
-) -> Result<wordcraft_doc::para::GroupChild, DocxError> {
-    Ok(wordcraft_doc::para::GroupChild { x: source.x, y: source.y, obj: object_value_from_shared(source.obj, graphics)? })
-}
-
-fn table_value_from_shared(source: craft_wordmodel::table::Table, graphics: &mut GraphicCache) -> Result<wordcraft_doc::table::Table, DocxError> {
-    Ok(wordcraft_doc::table::Table {
-        props: convert(source.props)?,
-        grid: source.grid,
-        rows: source.rows.into_iter().map(|r| row_value_from_shared(r, graphics)).collect::<Result<_, _>>()?,
-        controls: convert(source.controls)?,
-    })
-}
-
-fn row_value_from_shared(source: craft_wordmodel::table::Row, graphics: &mut GraphicCache) -> Result<wordcraft_doc::table::Row, DocxError> {
-    Ok(wordcraft_doc::table::Row {
-        props: convert(source.props)?,
-        cells: source.cells.into_iter().map(|c| cell_value_from_shared(c, graphics)).collect::<Result<_, _>>()?,
-        controls: convert(source.controls)?,
-    })
-}
-
-fn cell_value_from_shared(source: craft_wordmodel::table::Cell, graphics: &mut GraphicCache) -> Result<wordcraft_doc::table::Cell, DocxError> {
-    Ok(wordcraft_doc::table::Cell {
-        props: convert(source.props)?,
-        blocks: blocks_from_shared(source.blocks, graphics)?,
-        controls: convert(source.controls)?,
-    })
-}
-
-fn part_value_from_shared(source: craft_wordmodel::Part, graphics: &mut GraphicCache) -> Result<wordcraft_doc::Part, DocxError> {
-    Ok(wordcraft_doc::Part { kind: convert(source.kind)?, blocks: blocks_from_shared(source.blocks, graphics)?, body: convert(source.body)? })
-}
-
-fn glossary_value_from_shared(
-    source: craft_wordmodel::BuildingBlock,
-    graphics: &mut GraphicCache,
-) -> Result<wordcraft_doc::BuildingBlock, DocxError> {
-    Ok(wordcraft_doc::BuildingBlock {
-        name: source.name,
-        gallery: source.gallery,
-        category: source.category,
-        description: source.description,
-        guid: source.guid,
-        style: source.style,
-        types: source.types,
-        behaviors: source.behaviors,
-        blocks: blocks_from_shared(source.blocks, graphics)?,
-    })
-}
-
-fn missing_pictures_from_shared(source: craft_wordmodel::MissingPictures) -> Result<wordcraft_doc::MissingPictures, DocxError> {
-    let mut target = wordcraft_doc::MissingPictures::default();
-    target.truncated = source.truncated;
-    target.total = source.total;
-    target.main = source.main;
-    target.part_names = source.part_names;
-    target.media_parts = source.media_parts;
-    for item in source.list {
-        target.list.push(convert(item)?);
-    }
-    Ok(target)
-}
-
 /// Converts the shared reader's model without copying the full document or its embedded media.
 pub fn from_shared_model(mut source: craft_wordmodel::Document) -> Result<wordcraft_doc::Document, DocxError> {
     let mut fit_state = None;
@@ -185,46 +37,7 @@ pub fn from_shared_model(mut source: craft_wordmodel::Document) -> Result<wordcr
         source.passthrough.remove(&key);
     }
 
-    let craft_wordmodel::Document {
-        body,
-        last_section,
-        parts,
-        styles,
-        numbering,
-        comments,
-        revisions,
-        settings,
-        core,
-        sources,
-        custom_props,
-        footnote_separators,
-        endnote_separators,
-        media,
-        passthrough,
-        glossary,
-        missing_pictures,
-        ..
-    } = source;
-
-    let mut graphics = GraphicCache::new();
-    let mut document = wordcraft_doc::Document::new();
-    document.body = blocks_from_shared(body, &mut graphics)?;
-    document.last_section = convert(last_section)?;
-    document.parts = parts.into_iter().map(|(id, part)| Ok((id, part_value_from_shared(part, &mut graphics)?))).collect::<Result<_, DocxError>>()?;
-    document.styles = Arc::new(convert((*styles).clone())?);
-    document.numbering = Arc::new(convert((*numbering).clone())?);
-    document.comments = convert(comments)?;
-    document.revisions = convert(revisions)?;
-    document.settings = convert(settings)?;
-    document.core = convert(core)?;
-    document.sources = convert(sources)?;
-    document.custom_props = convert(custom_props)?;
-    document.footnote_separators = convert(footnote_separators)?;
-    document.endnote_separators = convert(endnote_separators)?;
-    document.media = media;
-    document.passthrough = passthrough;
-    document.glossary = glossary.into_iter().map(|g| glossary_value_from_shared(g, &mut graphics)).collect::<Result<_, _>>()?;
-    document.missing_pictures = missing_pictures_from_shared(missing_pictures)?;
+    let mut document = wordcraft_model_bridge::from_shared(source).map_err(|error| DocxError::Xml(error.to_string()))?;
     document.fit_state = fit_state;
     Ok(document)
 }
