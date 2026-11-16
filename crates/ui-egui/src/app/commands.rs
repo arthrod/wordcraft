@@ -109,6 +109,16 @@ impl WordApp {
         r
     }
 
+    /// Offer a web save or export under `name` to the host ([`Services::lazy_export`]): a format
+    /// it writes in a module it loads on first use is its job, taken as a Word package and
+    /// delivered later. Asked before the engine, whose answer for such a format is "not included
+    /// in this build". `None`: the engine writes it.
+    fn lazy_export(&self, name: &str, password: Option<&str>, opts: &wordcraft_engine::io::ExportOptions) -> Option<Result<Value, String>> {
+        let lazy = self.services.lazy_export.as_ref()?;
+        let docx = || wordcraft_engine::io::save_bytes_opts("document.docx", &self.session.doc, opts);
+        Some(lazy(name, password, &docx)?.map(|()| json!({"downloaded": name, "pending": true})))
+    }
+
     /// Run a command for a script or an agent (control channel, MCP bridge): never asks first.
     /// UI-level commands (`ui.*`) are handled here, the rest by the engine.
     pub fn execute(&mut self, id: &str, params: Value) -> Result<Value, String> {
@@ -165,6 +175,10 @@ impl WordApp {
             let password =
                 if matches!(id, "file.save" | "file.saveAs") { self.session.password.as_ref().map(wordcraft_engine::Password::as_str) } else { None };
             let opts = wordcraft_engine::cmd::file::export_options(&self.session, &params);
+            // A format the host writes in a module it loads on first use is its job from here.
+            if let Some(taken) = self.lazy_export(&name, password, &opts) {
+                return taken;
+            }
             let bytes = wordcraft_engine::io::save_bytes_with(&name, &self.session.doc, password, &opts)?;
             // A ticket left over from an earlier call isn't this save's.
             let saves = self.services.async_saves.clone();

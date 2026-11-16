@@ -71,6 +71,13 @@ when a flow fails and prints `PASS`/`FAIL` per flow on stderr.
 |---|---|---|
 | `idle` | loads `/` and `/?sample`, waits 8 s with no input, lists every request with raw and gzip size | a page that is only read requests no `wordcraft-worker-*` file |
 | `edit` | `/?sample&proof-worker`: waits, clicks into the page, types a misspelt sentence with real key events | no proofing file before the keystrokes; after them the loader, glue and wasm are requested, the known-bad check answers and a document paragraph comes back with an issue |
+| `open` | `/?sample`: drops `fixture.rtf`, `fixture.html` and `fixture.odt` on the canvas (a drop and the file picker's answer land in the same queue) | each file's text shows in the document; the codecs worker's loader, glue and wasm are requested on the first open and not before |
+| `pdf` | runs `file.exportPdf`, the command File › Export dispatches | the download starts with `%PDF-`; the PDF worker's files are requested on that export and not before |
+| `saveas` | runs `file.saveAs` to `.rtf` and `.odt`, then drops each download back on the app | the bytes read back to the text that was saved |
+| `missing` | the static server answers 404 for the codecs and PDF worker loaders; one open, one PDF export and one Save As are tried | each failure is said in plain words (`Couldn't open fixture.rtf: …`), nothing throws or panics, nothing is downloaded and the document's text is unchanged |
+
+Downloads are read in the page (the save picker is switched off there, so a save takes the
+anchor-download path and its blob is kept); fixture text is written in `lazy.mjs`.
 
 ## JavaScript exception
 

@@ -91,7 +91,7 @@ impl CodecWorker {
                 inner.queued.clear();
                 inner.pending.drain().map(|(id, p)| (id, p.sink)).collect::<Vec<_>>()
             };
-            log::warn!("codec worker failed ({}:{}): {}", event.filename(), event.lineno(), event.message());
+            log::warn!("codec worker failed: {}", super::worker_error_text(&event));
             fail_pending(pending, "the codec worker stopped");
         });
         worker.set_onerror(Some(onerror.as_ref().unchecked_ref()));

@@ -37,6 +37,10 @@ craft-web-api = { git = "https://github.com/storytold/craft-libs", rev = "fd5e2f
 craft-web-host = { git = "https://github.com/storytold/craft-libs", rev = "fd5e2feff6ea25bed371a99cc732b3968d621505", version = "0.1.0" }
 egui = { workspace = true }
 wordcraft-fonts = { workspace = true, default-features = false, features = ["minimal-wasm-fonts"] }
+# `is_encrypted` alone: a password-protected Word package under a legacy name stays with the
+# engine (which asks for the password) instead of going to the codecs worker. Already linked
+# through the engine.
+wordcraft-docx = { workspace = true }
 wordcraft-geom = { workspace = true }
 eframe = { workspace = true, features = ["accesskit"] }
 rfd = { workspace = true }

@@ -95,8 +95,27 @@ const RECIPIENT_EXTS: &[&str] = wordcraft_engine::cmd::mailings::RECIPIENT_EXTEN
 pub(crate) mod codec_worker;
 pub(crate) mod font_packs;
 mod font_store;
+pub(crate) mod lazy_io;
 pub(crate) mod pdf_worker;
 pub(crate) mod proof_worker;
+
+/// A dedicated worker's `error` event in words, for the log. A script error is an `ErrorEvent`
+/// with a message and a place. A worker whose script could not be fetched (a 404, no network)
+/// fires a plain `Event` with neither: reading them through `ErrorEvent`'s string getters
+/// throws out of the handler, before it has failed the requests that were waiting — so the
+/// fields are read as whatever they are.
+pub(crate) fn worker_error_text(event: &web_sys::Event) -> String {
+    let field = |key: &str| js_sys::Reflect::get(event, &wasm_bindgen::JsValue::from_str(key)).ok();
+    match field("message").and_then(|v| v.as_string()).filter(|m| !m.is_empty()) {
+        Some(message) => {
+            let file = field("filename").and_then(|v| v.as_string()).unwrap_or_default();
+            let line = field("lineno").and_then(|v| v.as_f64()).unwrap_or_default();
+            format!("{message} ({file}:{line})")
+        }
+        None => "its script could not be loaded".to_string(),
+    }
+}
+
 const CANVAS_ID: &str = "wordcraft_canvas";
 const LOADING_ID: &str = "wordcraft_loading";
 
@@ -336,7 +355,7 @@ fn launch_with_config(config: StartConfig) -> js_sys::Promise {
                     let mut session = Session::new(doc);
                     session.system_region = region;
                     let messages = Rc::new(RefCell::new(Vec::new()));
-                    let mut services = services(inbox.clone(), cc.egui_ctx.clone(), dirty, saves.clone(), messages.clone());
+                    let mut services = services(inbox.clone(), cc.egui_ctx.clone(), dirty, saves.clone(), messages.clone(), &initial_asset_base);
                     if let Some(bridge) = &app_bridge {
                         bridge.connect(&mut services, inbox.clone(), cc.egui_ctx.clone());
                     }
@@ -492,6 +511,9 @@ impl eframe::App for WebShell {
             ensure_locale_loaded(&self.last_lang_pref, &self.asset_base, ctx.clone());
             label_ime_input(&self.canvas);
         }
+        // Picked, dropped or host-sent files only the codecs worker reads leave the inbox here
+        // and come back as Word packages on a later frame (plan 10.2); the app opens the rest.
+        lazy_io::take_foreign_opens(&self.inbox, &self.asset_base, &self.messages, ctx);
         self.app.logic(ctx);
         // Wanted pack faces are recorded during layout, so drain them after the app ran.
         font_packs::drain_wanted(ctx);
@@ -592,7 +614,17 @@ fn listen_for_pasted_pictures(inbox: Inbox, ctx: egui::Context) -> Result<(), St
 }
 
 /// `dirty` is the flag the `beforeunload` guard reads ([`guard_unload`]).
-fn services(inbox: Inbox, ctx: egui::Context, dirty: Rc<Cell<bool>>, saves: AsyncSaves, messages: Rc<RefCell<Vec<String>>>) -> Services {
+fn services(
+    inbox: Inbox,
+    ctx: egui::Context,
+    dirty: Rc<Cell<bool>>,
+    saves: AsyncSaves,
+    messages: Rc<RefCell<Vec<String>>>,
+    asset_base: &str,
+) -> Services {
+    // Save As and Export in a format a worker writes (plan 10.2): the worker is fetched on the
+    // first such save, and the finished file goes to the same download as every other save.
+    let exporter = lazy_io::Exporter { asset_base: asset_base.to_string(), messages: messages.clone(), saves: saves.clone(), ctx: ctx.clone() };
     let open_inbox = inbox.clone();
     let save_ctx = ctx.clone();
     let font_ctx = ctx.clone();
@@ -633,6 +665,9 @@ fn services(inbox: Inbox, ctx: egui::Context, dirty: Rc<Cell<bool>>, saves: Asyn
         // Exports ask for a name; the browser decides where the download goes.
         pick_save: Some(Box::new(|name: &str| Some(name.to_string()))),
         async_saves: Some(saves.clone()),
+        lazy_export: Some(Box::new(move |name: &str, password: Option<&str>, docx: &dyn Fn() -> Result<Vec<u8>, String>| {
+            exporter.export(name, password, docx)
+        })),
         download: Some(Box::new(move |path: &str, bytes: &[u8]| download(&saves, &save_ctx, path, bytes))),
         print: Some(Box::new(print_pdf)),
         inbox: Some(inbox),

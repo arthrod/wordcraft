@@ -14,6 +14,18 @@
 //            misspelt word with real key events the proofing worker's files
 //            are requested and a document paragraph comes back with an issue
 //            (10.1 AC2).
+//   open     drop an .rtf, an .html and an .odt file on the app (the queue the
+//            file picker's answer and a drop share): each shows its text, and
+//            the codecs worker's files are requested on the first of them and
+//            not before (10.2 AC1).
+//   pdf      File › Export's command for PDF: the download starts with `%PDF-`
+//            and the PDF worker's files are requested then and not before
+//            (10.2 AC2).
+//   saveas   Save As .rtf and .odt: each download, opened again, reads back to
+//            the same text (10.2 AC3).
+//   missing  the codecs and PDF worker loaders answer 404: the app says so in
+//            plain words, nothing throws, the document's text is unchanged
+//            (10.2 AC4).
 //
 // Fixture text is written here (our own words); nothing is read from disk but
 // the built site. Tooling-script JavaScript, as drive.mjs (see README.md).
@@ -26,6 +38,7 @@ import { findChrome, startServer } from "./drive.mjs";
 
 const RTF_TEXT = "Lazy rich text fixture for the codecs worker";
 const HTML_TEXT = "Lazy web page fixture for the codecs worker";
+const ODT_TEXT = "Lazy open document fixture for the codecs worker";
 const SAVED_TEXT = "Round trip text written by the lazy smoke";
 const KEPT_TEXT = "This text must survive a missing worker";
 
@@ -120,6 +133,16 @@ function sizes(siteDir, log) {
     });
 }
 
+async function missingWasm(browser, siteDir) {
+  const s = await open(browser, siteDir, "?sample", (path) => /wordcraft-worker-codecs_bg\.wasm$/.test(path));
+  try {
+    await drop(s.page, "fixture.rtf", RTF);
+    return await until("the failed open's message", () => s.said(/Couldn't open fixture\.rtf: /), 60_000).catch(() => null);
+  } finally {
+    await s.close();
+  }
+}
+
 const flows = {
   // 10.1 AC1: a page that is loaded and left alone fetches no worker.
   async idle(browser, siteDir) {
@@ -168,6 +191,132 @@ const flows = {
         smokeLine,
         squiggleLine,
         pageErrors: s.pageErrors,
+      };
+    } finally {
+      await s.close();
+    }
+  },
+
+  // 10.2 AC1: the app's Open reads the extra formats through the codecs worker,
+  // fetched on the first such open and not before.
+  async open(browser, siteDir) {
+    const s = await open(browser, siteDir, "?sample");
+    try {
+      await sleep(4_000);
+      const before = s.asked("wordcraft-worker-codecs");
+      const shown = {};
+      await drop(s.page, "fixture.rtf", RTF);
+      shown.rtf = await until("the .rtf text", async () => (await s.text()).includes(RTF_TEXT), 120_000).catch(() => false);
+      const afterFirst = s.asked("wordcraft-worker-codecs");
+      await drop(s.page, "fixture.html", HTML);
+      shown.html = await until("the .html text", async () => (await s.text()).includes(HTML_TEXT), 60_000).catch(() => false);
+      // An .odt of our own text: written by the app's Save As, opened again by the drop.
+      await s.page.evaluate((t) => globalThis.wordcraft.execute("document.setText", { text: t }), ODT_TEXT);
+      await s.page.evaluate(() => globalThis.wordcraft.execute("file.saveAs", { path: "fixture.odt" }));
+      const odt = await download(s.page, "fixture.odt");
+      await s.page.evaluate(() => globalThis.wordcraft.execute("document.setText", { text: "cleared" }));
+      await drop(s.page, "fixture.odt", odt.bytes);
+      shown.odt = await until("the .odt text", async () => (await s.text()).includes(ODT_TEXT), 60_000).catch(() => false);
+      return {
+        pass: before.length === 0 && shown.rtf === true && shown.html === true && shown.odt === true && afterFirst.length >= 3 && s.pageErrors.length === 0,
+        codecRequestsBeforeOpen: before,
+        codecRequestsAfterFirstOpen: afterFirst,
+        shown,
+        said: s.consoleLog.filter((m) => /Opening |Opened |Couldn't /.test(m.text)).map((m) => m.text),
+        otherWorkerRequests: s.asked("wordcraft-worker-pdf"),
+        pageErrors: s.pageErrors,
+      };
+    } finally {
+      await s.close();
+    }
+  },
+
+  // 10.2 AC2: Export PDF goes through the PDF worker, fetched on that first export.
+  async pdf(browser, siteDir) {
+    const s = await open(browser, siteDir, "?sample");
+    try {
+      await sleep(4_000);
+      const before = s.asked("wordcraft-worker-pdf");
+      const answer = await s.page.evaluate(() => globalThis.wordcraft.execute("file.exportPdf", {}));
+      const file = await download(s.page, ".pdf");
+      const head = String.fromCharCode(...file.bytes.slice(0, 5));
+      return {
+        pass: before.length === 0 && head === "%PDF-" && file.bytes.length > 2_000 && s.asked("wordcraft-worker-pdf").length >= 3 && s.pageErrors.length === 0,
+        pdfRequestsBeforeExport: before,
+        pdfRequestsAfterExport: s.asked("wordcraft-worker-pdf"),
+        commandAnswer: answer,
+        name: file.name,
+        head,
+        bytes: file.bytes.length,
+        said: s.consoleLog.filter((m) => /Exporting |Exported |Couldn't /.test(m.text)).map((m) => m.text),
+        pageErrors: s.pageErrors,
+      };
+    } finally {
+      await s.close();
+    }
+  },
+
+  // 10.2 AC3: Save As to a worker's format writes bytes that read back to the same text.
+  async saveas(browser, siteDir) {
+    const s = await open(browser, siteDir, "?sample");
+    try {
+      const out = { pass: true, formats: {}, pageErrors: s.pageErrors };
+      for (const ext of ["rtf", "odt"]) {
+        const text = `${SAVED_TEXT} (${ext})`;
+        await s.page.evaluate((t) => globalThis.wordcraft.execute("document.setText", { text: t }), text);
+        await s.page.evaluate((e) => globalThis.wordcraft.execute("file.saveAs", { path: `saved.${e}` }), ext);
+        const file = await download(s.page, `saved.${ext}`);
+        await s.page.evaluate(() => globalThis.wordcraft.execute("document.setText", { text: "cleared" }));
+        await drop(s.page, `saved.${ext}`, file.bytes);
+        const back = await until(`the saved .${ext} text`, async () => (await s.text()).includes(text), 60_000).catch(() => false);
+        out.formats[ext] = { bytes: file.bytes.length, head: String.fromCharCode(...file.bytes.slice(0, 6)), readBack: back };
+        if (back !== true || file.bytes.length === 0) out.pass = false;
+      }
+      if (s.pageErrors.length > 0) out.pass = false;
+      return out;
+    } finally {
+      await s.close();
+    }
+  },
+
+  // 10.2 AC4: with a worker's loader missing, the app says so and the document is unharmed.
+  async missing(browser, siteDir) {
+    const s = await open(browser, siteDir, "?sample", (path) => /wordcraft-worker-(codecs|pdf)_loader\.js$/.test(path));
+    try {
+      await s.page.evaluate((t) => globalThis.wordcraft.execute("document.setText", { text: t }), KEPT_TEXT);
+      const before = await s.text();
+      await drop(s.page, "fixture.rtf", RTF);
+      const openLine = await until("the failed open's message", () => s.said(/Couldn't open fixture\.rtf: /), 60_000).catch(() => null);
+      await s.page.evaluate(() => globalThis.wordcraft.execute("file.exportPdf", {}));
+      const pdfLine = await until("the failed export's message", () => s.said(/Couldn't export .*\.pdf: /), 60_000).catch(() => null);
+      await s.page.evaluate(() => globalThis.wordcraft.execute("file.saveAs", { path: "saved.rtf" }));
+      const saveLine = await until("the failed save's message", () => s.said(/Couldn't export saved\.rtf: /), 60_000).catch(() => null);
+      await sleep(1_000);
+      const after = await s.text();
+      const panics = s.consoleLog.filter((m) => /panicked|unreachable|RuntimeError/.test(m.text)).map((m) => m.text);
+      const downloads = await s.page.evaluate(() => globalThis.__DOWNLOADS.map((d) => d.name));
+      // The loader arrives but the worker's wasm does not: the same plain answer.
+      const wasmLine = await missingWasm(browser, siteDir);
+      return {
+        pass:
+          openLine !== null &&
+          pdfLine !== null &&
+          saveLine !== null &&
+          wasmLine !== null &&
+          after === before &&
+          after.includes(KEPT_TEXT) &&
+          panics.length === 0 &&
+          s.pageErrors.length === 0 &&
+          downloads.length === 0,
+        wasmLine,
+        openLine,
+        pdfLine,
+        saveLine,
+        textUnchanged: after === before,
+        downloads,
+        panics,
+        pageErrors: s.pageErrors,
+        loaderRequests: s.asked("_loader.js"),
       };
     } finally {
       await s.close();

@@ -7546,6 +7546,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "wordcraft-doc",
+ "wordcraft-docx",
  "wordcraft-engine",
  "wordcraft-fonts",
  "wordcraft-geom",

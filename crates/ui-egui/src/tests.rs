@@ -5776,6 +5776,56 @@ fn autosave_failures_are_reported_once() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A web host that writes some formats in a module it loads on first use (`Services::lazy_export`)
+/// is asked before the engine: it gets the document as an unencrypted Word package and the save
+/// is its job, so nothing is downloaded here and the document keeps its unsaved changes. A format
+/// it declines is written and downloaded as before, and a job that could not start is the
+/// command's error.
+#[test]
+fn web_save_offers_the_host_its_lazy_formats_first() {
+    type Seen = std::rc::Rc<std::cell::RefCell<Vec<(String, Option<String>, Vec<u8>)>>>;
+    let asked: Seen = Default::default();
+    let downloads: std::rc::Rc<std::cell::RefCell<Vec<String>>> = Default::default();
+    let (seen, sink) = (asked.clone(), downloads.clone());
+    let services = Services {
+        download: Some(Box::new(move |n: &str, _: &[u8]| {
+            sink.borrow_mut().push(n.to_string());
+            Ok(())
+        })),
+        lazy_export: Some(Box::new(move |name: &str, password: Option<&str>, docx: &dyn Fn() -> Result<Vec<u8>, String>| {
+            if name.ends_with(".broken") {
+                return Some(Err("the module could not start".into()));
+            }
+            if !(name.ends_with(".rtf") || name.ends_with(".pdf")) {
+                return None;
+            }
+            Some(docx().map(|bytes| seen.borrow_mut().push((name.to_string(), password.map(str::to_string), bytes))))
+        })),
+        ..Default::default()
+    };
+    let mut a = WordApp::new(Session::new(wordcraft_doc::Document::new()), services);
+    a.run("text.insert", json!({"text": "Lazy export"})).unwrap();
+    for (id, params, expect) in [("file.saveAs", json!({"path": "copy.rtf"}), "copy.rtf"), ("file.exportPdf", json!({"path": "copy"}), "copy.pdf")] {
+        let r = a.execute(id, params).unwrap();
+        assert_eq!(r, json!({"downloaded": expect, "pending": true}), "{id}");
+        let (name, password, bytes) = asked.borrow_mut().pop().unwrap();
+        assert_eq!((name.as_str(), password), (expect, None));
+        let doc = wordcraft_engine::io::open_bytes("document.docx", &bytes).unwrap();
+        assert_eq!(doc.plain_text(wordcraft_doc::StoryRef::Body).trim(), "Lazy export", "the host gets the document as a Word package");
+    }
+    assert!(downloads.borrow().is_empty(), "the host delivers its own formats");
+    assert!(a.session.dirty, "a copy the host has yet to deliver doesn't make the document saved");
+    // A format the host leaves alone is the engine's, downloaded as before.
+    a.execute("file.saveAs", json!({"path": "kept.docx"})).unwrap();
+    assert_eq!(*downloads.borrow(), ["kept.docx"]);
+    assert!(asked.borrow().is_empty());
+    assert!(!a.session.dirty);
+    // The host's refusal to start is the command's error, and nothing is downloaded for it.
+    let err = a.execute("file.saveAs", json!({"path": "x.broken"})).unwrap_err();
+    assert!(err.contains("could not start"), "{err}");
+    assert_eq!(downloads.borrow().len(), 1);
+}
+
 /// Web Save of an opened .docm downloads a .docm, so its macros stay (Codex review, docm lane).
 #[test]
 fn web_save_keeps_the_opened_word_format() {

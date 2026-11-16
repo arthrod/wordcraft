@@ -80,7 +80,7 @@ impl PdfWorker {
                 inner.queued.clear();
                 inner.pending.drain().collect::<Vec<_>>()
             };
-            log::warn!("pdf worker failed ({}:{}): {}", event.filename(), event.lineno(), event.message());
+            log::warn!("pdf worker failed: {}", super::worker_error_text(&event));
             fail_pending(pending, "the pdf worker stopped");
         });
         worker.set_onerror(Some(onerror.as_ref().unchecked_ref()));

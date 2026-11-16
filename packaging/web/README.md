@@ -61,6 +61,7 @@ const api = await start({
 });
 ```
 
+- **When each worker is fetched:** none on page load. The proofing worker on the first edit (or proofing command); the codecs worker the first time a file in one of its formats is opened or saved (`.rtf`, `.odt`, `.html`, legacy `.doc`, …; from the app's Open, a drop, Save As, Export, or `convertDocument`); the PDF worker on the first PDF export (File › Export, or `exportPdf`). A file opened this way opens as a Word document (`report.odt` becomes `report.docx`). If a worker's files cannot be fetched the status bar says so and the open document is left as it was, so all three must still be served. `packaging/web/smoke/lazy.mjs` measures this.
 - **CSP requirements:** allow `'wasm-unsafe-eval'` in `script-src` alongside `'self'` (plus any SHA-256 hash of Trunk's inline bootstrap `<script>` when using `dist/web`), `worker-src 'self'`, and `connect-src 'self'` (same-origin fetches for `.wasm`, `i18n/*.tsv`, and `samples/*.md`). No `COOP` / `COEP` headers are required.
 - **ESM wrapper scope (House Rule 4):** `packaging/web/npm/index.js` (with `index.d.ts`) is the thin ESM entrypoint wrapper over Rust's `#[wasm_bindgen] pub fn start(options)` export, and `packaging/web/smoke/` is the consumer smoke-test harness (see its README). These are the only approved handwritten JavaScript/TypeScript in the web packaging tree. Application logic and the demo bar (`apps/wordcraft-web/src/demo.rs`) stay pure Rust.
 

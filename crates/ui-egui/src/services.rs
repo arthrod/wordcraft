@@ -49,6 +49,12 @@ pub struct Services {
     /// under its own name and format, as on the desktop, and a Save or Save As that keeps
     /// everything makes that name the document's file, so the next Save goes to it.
     pub host_save: Option<HostSaveFn>,
+    /// Web: formats the build leaves to a module the host loads on first use (the extra formats,
+    /// PDF). Asked before the engine writes a save or export that becomes a download
+    /// ([`LazyExportFn`]): `None` leaves the format to the engine; `Some` means the host took the
+    /// job and delivers the file itself, later, saying how it went. Such a save is a copy: the
+    /// document keeps its unsaved changes.
+    pub lazy_export: Option<LazyExportFn>,
     /// Web: told whether the document has unsaved changes after each pass, for the browser's
     /// leave-page guard (`beforeunload` runs between frames and can't ask the app).
     pub on_dirty: Option<Box<dyn Fn(bool)>>,
@@ -119,6 +125,11 @@ pub struct Services {
 
 /// Files delivered asynchronously.
 pub type Inbox = std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>;
+
+/// [`Services::lazy_export`]: `(file name, password, docx)`. `docx` writes the document as an
+/// unencrypted Word package, the form the host's module takes; `password` is the document's, for
+/// the formats that are saved with one. `Some(Err)` is a job that could not start.
+pub type LazyExportFn = Box<dyn Fn(&str, Option<&str>, &dyn Fn() -> Result<Vec<u8>, String>) -> Option<Result<(), String>>>;
 
 /// [`Services::host_save`]: `(file name, bytes, save_as)`. An error means the page didn't get
 /// the file, and the save failed.
