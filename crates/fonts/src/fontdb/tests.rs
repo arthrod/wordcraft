@@ -522,10 +522,12 @@ fn a_documents_fonts_leave_with_it_and_come_back_if_the_next_one_fails() {
     db.reinstate_document_fonts(&faces);
     assert_eq!(db.runtime_faces().len(), 1, "back once, however often it is reinstated");
 
-    // The next document embeds the same family and style (Word embeds subsets, so its bytes may
-    // differ): with the first withdrawn, its own face is added, not skipped as already present.
+    // The next document embeds the same family and style in other bytes (Word embeds subsets):
+    // with the first withdrawn, its own face is added, not skipped as already present.
     db.withdraw_document_fonts(&faces);
-    let next = db.add_document_fonts_scoped(vec![(bold.clone(), "Contract Bold".to_string())]);
+    let mut subset = bold.clone();
+    subset.extend_from_slice(&[0; 4]);
+    let next = db.add_document_fonts_scoped(vec![(subset, "Contract Bold".to_string())]);
     assert_eq!(next.len(), 1, "the next document's own face");
     // Reinstating the first beside it adds nothing under a family and style already present.
     db.reinstate_document_fonts(&faces);
@@ -533,4 +535,27 @@ fn a_documents_fonts_leave_with_it_and_come_back_if_the_next_one_fails() {
     // Withdrawing faces it does not hold changes nothing.
     db.withdraw_document_fonts(&faces);
     assert_eq!(db.runtime_faces().len(), 1);
+}
+
+#[test]
+fn a_document_font_file_is_kept_once_and_its_faces_reused() {
+    let db = FontDb::with_font_dirs(vec![]);
+    let bold = include_bytes!("../../../../assets/fonts/SourceSans3-Bold.ttf").to_vec();
+    let first = db.add_document_fonts_scoped(vec![(bold.clone(), "Kept Bold".to_string())]);
+    assert_eq!((first.len(), first.new_bytes()), (1, bold.len()), "a new file is kept");
+    assert!(db.keeps_document_file(&bold, " Kept Bold "), "the name as it is kept");
+    assert!(!db.keeps_document_file(&bold, "Other Bold"), "the same bytes under another name are another file");
+    // The same file again (the document opened again, or another embedding it): the same
+    // faces come back and nothing new is kept.
+    db.withdraw_document_fonts(&first);
+    let again = db.add_document_fonts_scoped(vec![(bold.clone(), "Kept Bold".to_string())]);
+    assert_eq!((again.len(), again.new_bytes()), (1, 0));
+    let ids = |f: &FontDb| f.read_faces().iter().filter(|g| g.named("Kept Bold")).map(|g| g.id).collect::<Vec<_>>();
+    assert_eq!(ids(&db), first.faces.iter().map(|f| f.id).collect::<Vec<_>>(), "the faces made the first time");
+    // A file whose faces are all present already adds nothing and is not kept.
+    let regular = include_bytes!("../../../../assets/fonts/SourceSans3-Regular.ttf").to_vec();
+    assert!(db.add_document_fonts(vec![(regular.clone(), "Hosted Regular".to_string())]) > 0);
+    let skipped = db.add_document_fonts_scoped(vec![(regular.clone(), "Hosted Regular".to_string())]);
+    assert_eq!((skipped.len(), skipped.new_bytes()), (0, 0));
+    assert!(!db.keeps_document_file(&regular, "Hosted Regular"));
 }

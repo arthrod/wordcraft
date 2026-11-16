@@ -508,6 +508,35 @@ mod tests {
     }
 
     #[test]
+    fn opening_documents_again_does_not_spend_the_embedded_font_budget() {
+        const FAMILY: &str = "JetBrains Wkr8";
+        const HOSTED: &str = "JetBrains Wkr9";
+        const LAST: &str = "JetBrains WkrA";
+        let font = font_named(FAMILY);
+        // More opens than the budget would take if each paid for the font again.
+        let opens = u32::try_from(wordcraft_viewer::MAX_EMBEDDED_FONT_BYTES / font.len() + 2).unwrap();
+        let mut worker = ViewerWorker::new();
+        let embedding = docx_in(FAMILY, Some(&font));
+        for id in 0..opens {
+            assert_eq!(open(&mut worker, &embedding, None, id).0.kind, Kind::ViewOpened);
+        }
+        assert_eq!(missing(&mut worker, 0), Vec::<String>::new(), "the same document keeps its font however often it is opened");
+        // Documents embedding a font the host installed first: the embedded copy is never
+        // added, so it costs nothing either.
+        let payload =
+            proto::encode_view_install_font_request(&proto::ViewInstallFontRequest { name: HOSTED.into(), bytes: font_named(HOSTED) }).unwrap();
+        let (rh, rp) = worker.handle_message(&header(Kind::ViewInstallFont, 0), &payload);
+        assert_eq!(proto::decode_envelope(&rh).unwrap().kind, Kind::ViewOpened, "{}", String::from_utf8_lossy(&rp));
+        let hosted = docx_in(HOSTED, Some(&font_named(HOSTED)));
+        for id in 0..opens {
+            assert_eq!(open(&mut worker, &hosted, None, id).0.kind, Kind::ViewOpened);
+        }
+        // So a document with a font of its own still gets it.
+        assert_eq!(open(&mut worker, &docx_in(LAST, Some(&font_named(LAST))), None, 0).0.kind, Kind::ViewOpened);
+        assert_eq!(missing(&mut worker, 0), Vec::<String>::new(), "a new document's own font is still loaded");
+    }
+
+    #[test]
     fn the_protocol_bounds_are_the_cores() {
         // The page module sizes its requests by the protocol's copies, without linking the core.
         assert_eq!(proto::MAX_VIEW_SIDE, wordcraft_viewer::MAX_RASTER_SIDE);

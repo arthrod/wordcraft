@@ -252,14 +252,18 @@ impl Drop for Replacement<'_> {
     }
 }
 
-/// Most bytes of embedded fonts one process loads, over every document it opens. A face that
-/// layout has used stays in memory for the rest of the process (`wordcraft_fonts::FaceRef` keeps
-/// it, by design), whether or not it was withdrawn since, so this, not the font list, is what
-/// bounds them. Past it a document's embedded fonts are left out and its text falls back to
+/// Most bytes of embedded fonts one process keeps, over every document it opens. The font
+/// database keeps each embedded font file it added for the rest of the process, so that a
+/// document opened again (or another embedding the same file) reuses its faces; a face that
+/// layout has used stays in memory anyway (`wordcraft_fonts::FaceRef` keeps it, by design). So
+/// this, not the font list, is what bounds them, and withdrawing a document's fonts gives
+/// nothing back. A file is counted once, when the database first adds a face of it: one it
+/// keeps already, or whose faces were all present (a font the host installed), costs nothing.
+/// Past the limit a document's new embedded fonts are left out and its text falls back to
 /// other fonts ([`Session::missing_fonts`] names them).
 pub const MAX_EMBEDDED_FONT_BYTES: usize = 128 << 20;
 
-/// The embedded-font bytes loaded so far in this process ([`MAX_EMBEDDED_FONT_BYTES`]).
+/// The embedded-font bytes kept so far in this process ([`MAX_EMBEDDED_FONT_BYTES`]).
 static EMBEDDED_FONT_BYTES: Mutex<usize> = Mutex::new(0);
 
 /// Load the fonts `doc` embeds for this run, in memory only, as the engine does when it opens
@@ -271,26 +275,29 @@ fn load_embedded_fonts(doc: &Document) -> wordcraft_fonts::DocumentFaces {
         .into_iter()
         .filter_map(|f| wordcraft_fonts::decode_font_file(&f.data).ok().map(|data| (data, f.name)))
         .collect();
+    let db = wordcraft_fonts::FontDb::global();
     let mut used = EMBEDDED_FONT_BYTES.lock().unwrap_or_else(PoisonError::into_inner);
-    let files = within_budget(&mut used, MAX_EMBEDDED_FONT_BYTES, files);
+    // A file the database keeps already costs nothing more; a new one is let in while it fits
+    // what is left, and charged below only if the database adds a face of it.
+    let mut room = MAX_EMBEDDED_FONT_BYTES.saturating_sub(*used);
+    let files: Vec<_> = files.into_iter().filter(|(data, name)| db.keeps_document_file(data, name) || take_room(&mut room, data.len())).collect();
     if files.is_empty() {
         return wordcraft_fonts::DocumentFaces::default();
     }
-    wordcraft_fonts::FontDb::global().add_document_fonts_scoped(files)
+    let faces = db.add_document_fonts_scoped(files);
+    *used = used.saturating_add(faces.new_bytes());
+    faces
 }
 
-/// The files of `files` that fit in what is left of `max` after `used`, in order, counted in.
-fn within_budget(used: &mut usize, max: usize, files: Vec<(Vec<u8>, String)>) -> Vec<(Vec<u8>, String)> {
-    files
-        .into_iter()
-        .filter(|(data, _)| match used.checked_add(data.len()).filter(|n| *n <= max) {
-            Some(n) => {
-                *used = n;
-                true
-            }
-            None => false,
-        })
-        .collect()
+/// Take `len` out of `room` if it fits.
+fn take_room(room: &mut usize, len: usize) -> bool {
+    match room.checked_sub(len) {
+        Some(left) => {
+            *room = left;
+            true
+        }
+        None => false,
+    }
 }
 
 impl Session {
@@ -472,16 +479,12 @@ mod tests {
 
     #[test]
     fn embedded_fonts_stop_loading_at_the_process_budget() {
-        let file = |n: usize| (vec![0u8; n], format!("F{n}"));
-        let mut used = 0;
-        let names = |files: Vec<(Vec<u8>, String)>| files.into_iter().map(|(_, n)| n).collect::<Vec<_>>();
-        assert_eq!(names(within_budget(&mut used, 10, vec![file(4), file(5), file(3)])), ["F4", "F5"], "the third would pass it");
-        assert_eq!(used, 9);
-        assert_eq!(names(within_budget(&mut used, 10, vec![file(2), file(1)])), ["F1"], "what is left still takes a file that fits");
-        assert_eq!(used, 10);
-        assert!(within_budget(&mut used, 10, vec![file(1)]).is_empty(), "spent");
-        let mut near = usize::MAX - 1;
-        assert!(within_budget(&mut near, usize::MAX, vec![file(2)]).is_empty(), "no overflow");
+        let mut room = 10;
+        let fits: Vec<bool> = [4, 5, 3, 1].into_iter().map(|n| take_room(&mut room, n)).collect();
+        assert_eq!(fits, [true, true, false, true], "the third would pass it; what is left still takes a file that fits");
+        assert_eq!(room, 0);
+        assert!(!take_room(&mut room, 1), "spent");
+        assert!(take_room(&mut room, 0));
     }
 
     #[test]

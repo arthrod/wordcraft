@@ -493,19 +493,61 @@ impl FontDb {
     /// be withdrawn when another document takes its place ([`FontDb::withdraw_document_fonts`]):
     /// a font one document embeds then never answers for a later one that only names the family,
     /// and the later one's own subset of a family is not skipped as already present.
+    ///
+    /// A file the database already keeps from an earlier document (the same bytes under the same
+    /// name) brings back the faces made for it then: opening a document again, or another that
+    /// embeds the same font, makes no new faces and keeps no new bytes. A file whose faces were
+    /// all already present is not kept. [`DocumentFaces::new_bytes`] counts the bytes this call
+    /// newly kept, which stay for the life of the process: the caller bounds them.
     pub fn add_document_fonts_scoped(&self, files: Vec<(Vec<u8>, String)>) -> DocumentFaces {
-        let added = self.add_font_faces(files.into_iter().map(|(data, name)| (data, Some(name))).collect(), super::Adding::Document);
-        if !added.is_empty() {
-            self.fonts_changed();
+        let mut kept = self.document_files.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut known = Vec::new();
+        let mut fresh = Vec::new();
+        for (data, name) in files {
+            let name = super::given_name(Some(name));
+            match kept.iter().find(|k| k.name == name && *k.data == data) {
+                Some(k) => known.extend(k.faces.iter().cloned()),
+                None => {
+                    let data = Arc::new(data);
+                    let faces = super::file_faces(&data, name.as_deref(), true);
+                    fresh.push(KeptFile { data, name, faces });
+                }
+            }
         }
-        DocumentFaces(added)
+        let key = |f: &FontFace| (f.family.to_ascii_lowercase(), f.style.to_ascii_lowercase());
+        let mut list = self.faces.write().unwrap_or_else(|e| e.into_inner());
+        let mut present: std::collections::HashSet<_> = list.iter().map(|g| key(g)).collect();
+        let mut added: Vec<Arc<FontFace>> = known.into_iter().filter(|f| present.insert(key(f))).collect();
+        let mut new_bytes = 0usize;
+        for file in fresh {
+            let from_file: Vec<_> = file.faces.iter().filter(|f| present.insert(key(f))).cloned().collect();
+            if !from_file.is_empty() {
+                new_bytes = new_bytes.saturating_add(file.data.len());
+                added.extend(from_file);
+                kept.push(file);
+            }
+        }
+        list.extend(added.iter().cloned());
+        drop(list);
+        drop(kept);
+        if !added.is_empty() {
+            self.forget_choices();
+        }
+        DocumentFaces { faces: added, new_bytes }
+    }
+
+    /// Whether `data` under `name` is a font file the database keeps from an earlier document
+    /// ([`FontDb::add_document_fonts_scoped`]), so adding it again keeps no new bytes.
+    pub fn keeps_document_file(&self, data: &[u8], name: &str) -> bool {
+        let name = super::given_name(Some(name.to_string()));
+        self.document_files.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().any(|k| k.name == name && k.data.as_slice() == data)
     }
 
     /// Take a document's faces out of the font list: lookups no longer find them, and fallback
     /// choices made while they were there are forgotten. Faces not in the list are skipped.
     /// Layouts made with them keep drawing with them.
     pub fn withdraw_document_fonts(&self, faces: &DocumentFaces) {
-        let ids: std::collections::HashSet<u32> = faces.0.iter().map(|f| f.id).collect();
+        let ids: std::collections::HashSet<u32> = faces.faces.iter().map(|f| f.id).collect();
         let mut list = self.faces.write().unwrap_or_else(|e| e.into_inner());
         let before = list.len();
         list.retain(|f| !ids.contains(&f.id));
@@ -524,7 +566,7 @@ impl FontDb {
         let mut list = self.faces.write().unwrap_or_else(|e| e.into_inner());
         let mut present: std::collections::HashSet<_> = list.iter().map(|g| key(g)).collect();
         let before = list.len();
-        for f in &faces.0 {
+        for f in &faces.faces {
             if present.insert(key(f)) {
                 list.push(f.clone());
             }
@@ -797,16 +839,34 @@ pub(crate) mod tests;
 
 /// The faces one document added to the font list ([`FontDb::add_document_fonts_scoped`]).
 #[derive(Clone, Default)]
-pub struct DocumentFaces(Vec<Arc<FontFace>>);
+pub struct DocumentFaces {
+    pub(super) faces: Vec<Arc<FontFace>>,
+    new_bytes: usize,
+}
 
 impl DocumentFaces {
     /// How many faces the document added.
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.faces.len()
     }
 
     /// Whether it added none.
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.faces.is_empty()
     }
+
+    /// The bytes of font files the database kept for the first time when these faces were added
+    /// (a file it already kept, or one that added no face, counts nothing).
+    pub fn new_bytes(&self) -> usize {
+        self.new_bytes
+    }
+}
+
+/// A font file one document embedded, kept with the faces made for it so that a document
+/// embedding it again gets the same faces ([`FontDb::add_document_fonts_scoped`]).
+pub(super) struct KeptFile {
+    data: Arc<Vec<u8>>,
+    /// The name it was given to go by ([`super::given_name`]).
+    name: Option<String>,
+    faces: Vec<Arc<FontFace>>,
 }

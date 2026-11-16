@@ -26,7 +26,7 @@ mod fallback_data;
 mod lookup;
 mod names;
 
-use catalog::Adding;
+use catalog::{Adding, file_faces, given_name};
 use face::FontBytes;
 pub use face::{FALLBACK_FAMILY, FaceRef, FontFace, bundled, bundled_by_stem};
 #[cfg(not(target_arch = "wasm32"))]
@@ -68,6 +68,9 @@ pub struct FontDb {
     /// ([`crate::packs`]). Kept apart from `user` so packs never persist, count against
     /// [`user::MAX_USER_FONTS`], or answer to [`FontDb::remove_user_font`].
     pub(crate) packs: RwLock<crate::packs::PackFonts>,
+    /// The font files documents embedded, kept for the life of the database so that a
+    /// document opened again reuses its faces ([`FontDb::add_document_fonts_scoped`]).
+    document_files: Mutex<Vec<user::KeptFile>>,
     /// Bumped whenever user fonts are added or removed ([`FontDb::generation`]).
     generation: AtomicU64,
     /// The folders the system font scan reads (the platform's font folders for [`FontDb::global`]).
@@ -148,6 +151,7 @@ impl FontDb {
             catalog: RwLock::new(Vec::new()),
             user: RwLock::new(user::UserFonts::default()),
             packs: RwLock::new(crate::packs::PackFonts::default()),
+            document_files: Mutex::new(Vec::new()),
             generation: AtomicU64::new(0),
             font_dirs,
             #[cfg(not(target_arch = "wasm32"))]
