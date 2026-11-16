@@ -133,7 +133,12 @@ impl WordApp {
             }
             wordcraft_engine::io::save_bytes_opts("document.docx", doc, opts)
         };
-        Some(lazy(name, password, opts, &docx)?.map(|()| json!({"exporting": name, "pending": true})))
+        // The faces that PDF draws text in, from the same printed document.
+        let faces = || {
+            let printed = if pdf { wordcraft_engine::cmd::references::output_fields(&self.session.doc) } else { None };
+            wordcraft_engine::strict::pdf_faces(printed.as_ref().unwrap_or(&self.session.doc), opts)
+        };
+        Some(lazy(name, password, opts, &docx, &faces)?.map(|()| json!({"exporting": name, "pending": true})))
     }
 
     /// Tell the host the command `id` is about to run ([`Services::on_command`]).

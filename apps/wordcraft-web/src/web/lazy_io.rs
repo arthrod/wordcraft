@@ -24,8 +24,8 @@ use wordcraft_worker_proto as proto;
 
 use super::{codec_worker, pdf_worker};
 use crate::lazy_formats::{
-    ExportRoute, JobKind, JobQueue, NO_ANSWER, Once, export_route, failure_message, import_format, job_budget_ms, open_request, opened_name,
-    pdf_job_options,
+    ExportRoute, FONT_BUDGET, JobKind, JobQueue, NO_ANSWER, Once, export_route, failure_message, font_batch, import_format, job_budget_ms,
+    open_request, opened_name, pdf_job_options,
 };
 
 /// Status-bar lines waiting for the shell's next frame.
@@ -136,14 +136,17 @@ pub(crate) fn convert(asset_base: &str, req: &proto::ConvertRequest, on_reply: i
 /// Write `docx` as a PDF in the PDF worker with `options` (the export options a package does
 /// not carry), starting it on first use. The worker lays out with the faces the page shows:
 /// every face beyond its compiled-in set goes along as a copy (user fonts, pack faces, fonts
-/// embedded in the document), within the protocol's budgets. A `strict` export, already checked
-/// against this page's faces, is refused when a face would be left behind, since its text would
-/// then fall back in the PDF. `on_reply` runs exactly once, as for [`convert`].
+/// embedded in the document), within the protocol's budgets ([`font_batch`]). When they do not
+/// all fit, the faces the PDF draws text in (`used`, which lays the document out and is asked
+/// only then) go first; a `strict` export, already checked against this page's faces, is
+/// refused only when one of those would be left behind, since its text would then fall back in
+/// the PDF. `on_reply` runs exactly once, as for [`convert`].
 pub(crate) fn render_pdf(
     asset_base: &str,
     docx: Vec<u8>,
     options: proto::PdfJobOptions,
     strict: bool,
+    used: &dyn Fn() -> Vec<(String, String)>,
     on_reply: impl FnOnce(Result<Vec<u8>, String>) + 'static,
 ) {
     if docx.is_empty() {
@@ -152,31 +155,20 @@ pub(crate) fn render_pdf(
     if docx.len() > proto::MAX_PDF_DOC_BYTES {
         return on_reply(Err(format!("the document is too large to export as PDF in the browser ({} bytes)", docx.len())));
     }
+    let batch = font_batch(wordcraft_fonts::FontDb::global().runtime_faces(), used, FONT_BUDGET);
+    if strict && let Some(refusal) = batch.strict_refusal() {
+        return on_reply(Err(refusal));
+    }
     // What does not fit the budgets is left out with a log, and the export still runs: those
-    // faces fall back inside the worker (a strict export is refused instead, below).
-    let mut fonts: Vec<proto::FontCopy> = Vec::new();
-    let mut total = 0usize;
-    // Faces left behind: how many, and the first few families to name.
-    let (mut left, mut named): (usize, Vec<String>) = (0, Vec::new());
-    for (family, style, bytes) in wordcraft_fonts::FontDb::global().runtime_faces() {
-        if fonts.len() >= proto::MAX_FONT_COPIES || total.saturating_add(bytes.len()) > proto::MAX_FONT_TOTAL_BYTES {
-            log::warn!("pdf export: the font copies hit a protocol budget; {family:?} is left to the worker's fallback");
-            left = left.saturating_add(1);
-            if named.len() < 4 && !named.contains(&family) {
-                named.push(family);
-            }
-            continue;
-        }
-        total = total.saturating_add(bytes.len());
-        fonts.push(proto::FontCopy { family, style, bytes: (*bytes).clone() });
+    // faces fall back inside the worker.
+    if batch.left_used > 0 || batch.left_unused > 0 {
+        log::warn!(
+            "pdf export: the font copies hit a protocol budget; {} face(s) the PDF draws in and {} other face(s) are left to the worker's fallback",
+            batch.left_used,
+            batch.left_unused
+        );
     }
-    if strict && left > 0 {
-        let more = if left > named.len() { ", …" } else { "" };
-        return on_reply(Err(format!(
-            "strict: {left} font face(s) are too many to send to the PDF export, and their text would fall back: {}{more}",
-            named.join(", ")
-        )));
-    }
+    let fonts = batch.copies;
     let input_bytes = docx.len();
     let req = proto::PdfRenderRequest { docx, fonts, options };
     if !pdf_worker::ensure(asset_base) {
@@ -276,7 +268,7 @@ impl Exporter {
     /// Take a save or export under `name` when its format is a worker's: `None` leaves it to
     /// the engine. Otherwise the document — as the `.docx` bytes `docx` writes — goes to the
     /// worker, and the finished file is delivered when it answers; `Some(Err)` is a job that
-    /// could not start. `password` encrypts the formats that take one (OpenDocument); a PDF is
+    /// could not start. `used` lists the faces a PDF of the document draws text in. `password` encrypts the formats that take one (OpenDocument); a PDF is
     /// never encrypted.
     pub(crate) fn export(
         &self,
@@ -284,6 +276,7 @@ impl Exporter {
         password: Option<&str>,
         opts: &wordcraft_engine::io::ExportOptions,
         docx: &dyn Fn() -> Result<Vec<u8>, String>,
+        used: &dyn Fn() -> Vec<(String, String)>,
     ) -> Option<Result<(), String>> {
         let route = export_route(name)?;
         let docx = match docx() {
@@ -303,7 +296,7 @@ impl Exporter {
             }
         };
         match route {
-            ExportRoute::Pdf => render_pdf(&self.asset_base, docx, pdf_job_options(opts), opts.strict, done),
+            ExportRoute::Pdf => render_pdf(&self.asset_base, docx, pdf_job_options(opts), opts.strict, used, done),
             ExportRoute::Codec(format) => {
                 let req = proto::ConvertRequest {
                     format,

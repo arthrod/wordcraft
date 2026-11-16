@@ -5793,7 +5793,11 @@ fn web_save_offers_the_host_its_lazy_formats_first() {
             Ok(())
         })),
         lazy_export: Some(Box::new(
-            move |name: &str, password: Option<&str>, _: &wordcraft_engine::io::ExportOptions, docx: &dyn Fn() -> Result<Vec<u8>, String>| {
+            move |name: &str,
+                  password: Option<&str>,
+                  _: &wordcraft_engine::io::ExportOptions,
+                  docx: &dyn Fn() -> Result<Vec<u8>, String>,
+                  _: &dyn Fn() -> Vec<(String, String)>| {
                 if name.ends_with(".broken") {
                     return Some(Err("the module could not start".into()));
                 }
@@ -5842,7 +5846,11 @@ fn web_lazy_pdf_shows_the_fields_as_the_engines_pdf_does() {
     let services = Services {
         download: Some(Box::new(|_: &str, _: &[u8]| Ok(()))),
         lazy_export: Some(Box::new(
-            move |name: &str, _: Option<&str>, _: &wordcraft_engine::io::ExportOptions, docx: &dyn Fn() -> Result<Vec<u8>, String>| {
+            move |name: &str,
+                  _: Option<&str>,
+                  _: &wordcraft_engine::io::ExportOptions,
+                  docx: &dyn Fn() -> Result<Vec<u8>, String>,
+                  _: &dyn Fn() -> Vec<(String, String)>| {
                 if !(name.ends_with(".rtf") || name.ends_with(".pdf")) {
                     return None;
                 }
@@ -5905,7 +5913,11 @@ fn web_lazy_export_hands_the_host_the_commands_export_options() {
     let services = Services {
         download: Some(Box::new(|_: &str, _: &[u8]| Ok(()))),
         lazy_export: Some(Box::new(
-            move |name: &str, _: Option<&str>, opts: &wordcraft_engine::io::ExportOptions, docx: &dyn Fn() -> Result<Vec<u8>, String>| {
+            move |name: &str,
+                  _: Option<&str>,
+                  opts: &wordcraft_engine::io::ExportOptions,
+                  docx: &dyn Fn() -> Result<Vec<u8>, String>,
+                  _: &dyn Fn() -> Vec<(String, String)>| {
                 if !(name.ends_with(".rtf") || name.ends_with(".pdf")) {
                     return None;
                 }
@@ -5949,7 +5961,11 @@ fn web_lazy_pdf_refuses_a_strict_export_as_the_engine_does() {
     let services = Services {
         download: Some(Box::new(|_: &str, _: &[u8]| Ok(()))),
         lazy_export: Some(Box::new(
-            move |name: &str, _: Option<&str>, _: &wordcraft_engine::io::ExportOptions, docx: &dyn Fn() -> Result<Vec<u8>, String>| {
+            move |name: &str,
+                  _: Option<&str>,
+                  _: &wordcraft_engine::io::ExportOptions,
+                  docx: &dyn Fn() -> Result<Vec<u8>, String>,
+                  _: &dyn Fn() -> Vec<(String, String)>| {
                 if !name.ends_with(".pdf") {
                     return None;
                 }
@@ -5980,6 +5996,38 @@ fn web_lazy_pdf_refuses_a_strict_export_as_the_engine_does() {
     // Not strict: the export goes, as the engine's would.
     a.execute("file.exportPdf", json!({"path": "lost.pdf"})).unwrap();
     assert_eq!((calls.get(), packaged.get()), (3, 2));
+}
+
+/// The web host is offered the faces a PDF of the document draws text in, from the engine's
+/// own export layout, so it can send those font copies first and refuse a strict export only
+/// for them; it asks only when it must choose.
+#[test]
+fn web_lazy_pdf_offers_the_faces_its_text_is_drawn_in() {
+    type Seen = std::rc::Rc<std::cell::RefCell<Vec<Vec<(String, String)>>>>;
+    let asked: Seen = Default::default();
+    let seen = asked.clone();
+    let services = Services {
+        download: Some(Box::new(|_: &str, _: &[u8]| Ok(()))),
+        lazy_export: Some(Box::new(
+            move |name: &str,
+                  _: Option<&str>,
+                  _: &wordcraft_engine::io::ExportOptions,
+                  _: &dyn Fn() -> Result<Vec<u8>, String>,
+                  faces: &dyn Fn() -> Vec<(String, String)>| {
+                name.ends_with(".pdf").then(|| {
+                    seen.borrow_mut().push(faces());
+                    Ok(())
+                })
+            },
+        )),
+        ..Default::default()
+    };
+    let mut a = WordApp::new(Session::new(wordcraft_doc::Document::from_text("The quarterly figures look strong.")), services);
+    let params = json!({"path": "a.pdf"});
+    let expected = wordcraft_engine::strict::pdf_faces(&a.session.doc, &wordcraft_engine::cmd::file::export_options(&a.session, &params));
+    assert!(!expected.is_empty());
+    a.execute("file.exportPdf", params).unwrap();
+    assert_eq!(asked.borrow().as_slice(), [expected]);
 }
 
 /// The context menu's spelling suggestions (right-click, Shift+F10) are a proofing command the

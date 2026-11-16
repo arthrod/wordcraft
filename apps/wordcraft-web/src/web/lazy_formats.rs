@@ -164,6 +164,88 @@ pub(crate) fn pdf_job_options(opts: &wordcraft_engine::io::ExportOptions) -> wor
     wordcraft_worker_proto::PdfJobOptions { markup: opts.markup, comments: opts.markup && opts.comments, numeral }
 }
 
+/// How many font copies, and how many of their bytes, one `renderPdf` job may carry.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FontBudget {
+    pub(crate) count: usize,
+    pub(crate) bytes: usize,
+}
+
+/// The protocol's budget ([`wordcraft_worker_proto::MAX_FONT_COPIES`],
+/// [`wordcraft_worker_proto::MAX_FONT_TOTAL_BYTES`]).
+pub(crate) const FONT_BUDGET: FontBudget =
+    FontBudget { count: wordcraft_worker_proto::MAX_FONT_COPIES, bytes: wordcraft_worker_proto::MAX_FONT_TOTAL_BYTES };
+
+/// Families a refusal names before it says "…".
+const NAMED_FACES: usize = 4;
+
+/// The font copies one PDF job carries ([`font_batch`]), and what was left behind.
+#[derive(Debug, Default)]
+pub(crate) struct FontBatch {
+    pub(crate) copies: Vec<wordcraft_worker_proto::FontCopy>,
+    /// Faces the PDF draws text in that did not fit: how many, and the first few families.
+    pub(crate) left_used: usize,
+    pub(crate) left_used_named: Vec<String>,
+    /// Faces the PDF never draws in that did not fit.
+    pub(crate) left_unused: usize,
+}
+
+impl FontBatch {
+    /// A strict export's refusal: some face the PDF draws text in stays behind, so that text
+    /// would fall back in the worker. Faces it never draws in refuse nothing.
+    pub(crate) fn strict_refusal(&self) -> Option<String> {
+        if self.left_used == 0 {
+            return None;
+        }
+        let more = if self.left_used > self.left_used_named.len() { ", …" } else { "" };
+        Some(format!(
+            "strict: {} font face(s) this PDF draws text in are too many to send to the PDF export, and their text would fall back: {}{more}",
+            self.left_used,
+            self.left_used_named.join(", ")
+        ))
+    }
+}
+
+/// The copies of `faces` (`(family, style, file bytes)`, the page's runtime faces) that go with
+/// a PDF job within `budget`. When they all fit they all go, in their own order, and `used` is
+/// never asked (it lays the document out). Otherwise the faces the PDF draws text in (`used`,
+/// `(family, style)`) go first, so the budget leaves out faces the document never draws in
+/// before any it does; within each group the order is kept.
+pub(crate) fn font_batch(
+    faces: Vec<(String, String, std::sync::Arc<Vec<u8>>)>,
+    used: impl FnOnce() -> Vec<(String, String)>,
+    budget: FontBudget,
+) -> FontBatch {
+    let total = faces.iter().map(|f| f.2.len()).fold(0usize, usize::saturating_add);
+    let fits = faces.len() <= budget.count && total <= budget.bytes;
+    let ordered: Vec<(bool, (String, String, std::sync::Arc<Vec<u8>>))> = if fits {
+        faces.into_iter().map(|f| (false, f)).collect()
+    } else {
+        let used: std::collections::HashSet<(String, String)> = used().into_iter().collect();
+        let (mut first, rest): (Vec<_>, Vec<_>) = faces.into_iter().map(|f| (used.contains(&(f.0.clone(), f.1.clone())), f)).partition(|(u, _)| *u);
+        first.extend(rest);
+        first
+    };
+    let mut batch = FontBatch::default();
+    let mut bytes = 0usize;
+    for (is_used, (family, style, data)) in ordered {
+        if batch.copies.len() >= budget.count || bytes.saturating_add(data.len()) > budget.bytes {
+            if is_used {
+                batch.left_used = batch.left_used.saturating_add(1);
+                if batch.left_used_named.len() < NAMED_FACES && !batch.left_used_named.contains(&family) {
+                    batch.left_used_named.push(family);
+                }
+            } else {
+                batch.left_unused = batch.left_unused.saturating_add(1);
+            }
+            continue;
+        }
+        bytes = bytes.saturating_add(data.len());
+        batch.copies.push(wordcraft_worker_proto::FontCopy { family, style, bytes: (*data).clone() });
+    }
+    batch
+}
+
 /// The `convert` request that opens `input`, a file in format `format`, as a Word package. A
 /// file that gives no page size opens on the paper of `region` (the user's), as the engine opens
 /// such a file in its session (`io::open_bytes_in`); the worker has no session to ask.
@@ -709,5 +791,55 @@ mod tests {
             assert_eq!(req.page.map(|p| p.points()), Some(((engine.page_w * 20.0).round() / 20.0, (engine.page_h * 20.0).round() / 20.0)), "{tag}");
             assert_eq!((req.direction, req.password.as_deref(), req.format.as_str()), (ConvertDirection::Import, None, "html"));
         }
+    }
+
+    /// `n` runtime faces of one byte each, families `Family 0`… in order.
+    fn faces(n: usize) -> Vec<(String, String, std::sync::Arc<Vec<u8>>)> {
+        (0..n).map(|i| (format!("Family {i}"), "Regular".to_string(), std::sync::Arc::new(vec![1u8]))).collect()
+    }
+
+    /// The protocol budget bites the machine's spare faces, never the document's: many faces the
+    /// document never draws in leave a strict export alone, and the faces it does draw in go
+    /// first, whatever their place in the font database.
+    #[test]
+    fn the_font_batch_sends_the_documents_faces_first_and_refuses_only_for_them() {
+        // Everything fits: everything goes in its own order, and the document is not laid out.
+        let batch = font_batch(faces(3), || panic!("asked for the document's faces"), FONT_BUDGET);
+        assert_eq!(batch.copies.iter().map(|c| c.family.as_str()).collect::<Vec<_>>(), ["Family 0", "Family 1", "Family 2"]);
+        assert_eq!((batch.left_used, batch.left_unused), (0, 0));
+        assert!(batch.strict_refusal().is_none());
+
+        // More faces than the protocol carries, none of them the document's: a strict export goes.
+        let many = FONT_BUDGET.count + 4;
+        let batch = font_batch(faces(many), Vec::new, FONT_BUDGET);
+        assert_eq!((batch.copies.len(), batch.left_used, batch.left_unused), (FONT_BUDGET.count, 0, 4));
+        assert_eq!(batch.strict_refusal(), None, "faces this PDF never draws in refuse nothing");
+
+        // The document draws in the last face of the database: it goes, an unrelated one stays.
+        let last = format!("Family {}", many - 1);
+        let wanted = last.clone();
+        let batch = font_batch(faces(many), move || vec![(wanted, "Regular".into())], FONT_BUDGET);
+        assert_eq!(batch.copies.first().map(|c| c.family.as_str()), Some(last.as_str()), "the document's face goes first");
+        assert_eq!((batch.left_used, batch.left_unused), (0, 4));
+        assert!(batch.strict_refusal().is_none());
+
+        // The document's own faces are over the budget: refused, naming them.
+        let budget = FontBudget { count: 2, bytes: FONT_BUDGET.bytes };
+        let batch = font_batch(faces(8), || (3..8).map(|i| (format!("Family {i}"), "Regular".to_string())).collect(), budget);
+        assert_eq!(batch.copies.iter().map(|c| c.family.as_str()).collect::<Vec<_>>(), ["Family 3", "Family 4"]);
+        assert_eq!((batch.left_used, batch.left_unused), (3, 3));
+        assert_eq!(
+            batch.strict_refusal().as_deref(),
+            Some(
+                "strict: 3 font face(s) this PDF draws text in are too many to send to the PDF export, and their text would fall back: Family 5, Family 6, Family 7"
+            )
+        );
+
+        // The byte budget counts the same way: a face too large for it stays, smaller ones still go.
+        let mut big = faces(3);
+        big.insert(0, ("Huge".into(), "Regular".into(), std::sync::Arc::new(vec![0u8; 10])));
+        let batch = font_batch(big, || vec![("Huge".into(), "Regular".into())], FontBudget { count: 10, bytes: 5 });
+        assert_eq!(batch.copies.len(), 3);
+        assert_eq!((batch.left_used, batch.left_used_named.as_slice()), (1, ["Huge".to_string()].as_slice()));
     }
 }

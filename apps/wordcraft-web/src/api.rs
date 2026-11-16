@@ -291,7 +291,7 @@ fn attach_doc_helpers(api: &js_sys::Object, queue: Sender<ControlRequest>, ctx: 
             // shared waker set (drained every shell frame by `wake_waiters`, and woken here
             // from the reply closure) completes it.
             let (tx, rx) = std::sync::mpsc::channel::<Result<Vec<u8>, String>>();
-            crate::web::lazy_io::render_pdf(&asset_base, docx, options, false, move |reply| {
+            crate::web::lazy_io::render_pdf(&asset_base, docx, options, false, &Vec::new, move |reply| {
                 let _ = tx.send(reply);
                 wake_waiters();
             });

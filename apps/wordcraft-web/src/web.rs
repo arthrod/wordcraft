@@ -637,9 +637,13 @@ fn listen_for_pasted_pictures(inbox: Inbox, ctx: egui::Context) -> Result<(), St
 
 /// [`wordcraft_ui_egui::Services::lazy_export`] answered by `exporter`.
 fn lazy_export_hook(exporter: lazy_io::Exporter) -> wordcraft_ui_egui::LazyExportFn {
-    Box::new(move |name: &str, password: Option<&str>, opts: &wordcraft_engine::io::ExportOptions, docx: &dyn Fn() -> Result<Vec<u8>, String>| {
-        exporter.export(name, password, opts, docx)
-    })
+    Box::new(
+        move |name: &str,
+              password: Option<&str>,
+              opts: &wordcraft_engine::io::ExportOptions,
+              docx: &dyn Fn() -> Result<Vec<u8>, String>,
+              used: &dyn Fn() -> Vec<(String, String)>| exporter.export(name, password, opts, docx, used),
+    )
 }
 
 /// `dirty` is the flag the `beforeunload` guard reads ([`guard_unload`]).

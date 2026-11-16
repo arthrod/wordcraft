@@ -219,6 +219,52 @@ pub fn pdf_refusal(doc: &Document, opts: &ExportOptions) -> Option<String> {
     (!report.passed()).then(|| report.refusal())
 }
 
+/// Most faces [`pdf_faces`] lists: the font database bounds them already; this bounds the list a
+/// hostile document can make a host hold.
+pub const MAX_PDF_FACES: usize = 4096;
+
+/// The faces a PDF export of `doc` draws text in, as `(typographic family, style)`, each once in
+/// the order first drawn: the faces its fonts ask for and the fallback faces drawn instead, over
+/// the display list the export draws (body, headers, footers, notes, text boxes, tables, charts,
+/// diagrams, equations) and the watermark. Text inside a picture's metafile is not included. For
+/// a host that writes the PDF elsewhere with copies of its faces (the web app's PDF worker) and
+/// must know which copies this document needs. Lays the document out, so a host asks only when
+/// it has to choose. `doc` is the document as printed (`output_fields`).
+pub fn pdf_faces(doc: &Document, opts: &ExportOptions) -> Vec<(String, String)> {
+    use wordcraft_layout::display::{Draw, page_display};
+    let pdf = pdf_options(opts);
+    let lay = wordcraft_layout::layout(doc, &mut LayoutCache::new(), &pdf.layout_options());
+    let display = pdf.display_options();
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    let mut add = |face: &wordcraft_fonts::FaceRef| {
+        if out.len() < MAX_PDF_FACES && seen.insert(face.id()) {
+            let f = face.get();
+            out.push((f.family.clone(), f.style.clone()));
+        }
+    };
+    for page in &lay.pages {
+        // A stack, not recursion: nesting depth comes from the document.
+        let mut stack = page_display(doc, page, &display);
+        while let Some(d) = stack.pop() {
+            match d {
+                Draw::Glyphs { face, .. } => add(&face),
+                Draw::Figure { draws: items, .. } | Draw::Turned { items, .. } | Draw::Rotated { items, .. } | Draw::Clip { items, .. } => {
+                    stack.extend(items.into_iter().rev());
+                }
+                _ => {}
+            }
+        }
+    }
+    if !lay.pages.is_empty()
+        && let Some(wm) = &doc.settings.watermark
+        && let Some((face, _, _)) = wordcraft_layout::watermark_run(wm, wordcraft_pdf::WATERMARK_MAX_CHARS)
+    {
+        add(&face);
+    }
+    out
+}
+
 /// The PDF of `doc`; with `opts.strict`, only if nothing is missing, laid out once for the check
 /// and the export.
 pub(crate) fn export_pdf(doc: &Document, opts: &ExportOptions) -> Result<Vec<u8>, String> {

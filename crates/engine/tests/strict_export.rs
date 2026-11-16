@@ -322,3 +322,24 @@ fn strict_off_gives_the_same_png_as_before_even_with_a_missing_character() {
     assert_eq!(png[0], png[1]);
     std::fs::remove_dir_all(d).unwrap();
 }
+
+/// `pdf_faces` lists the faces a PDF of the document draws its text in, from the export's own
+/// layout: the face each run's font resolves to, once each, and no face it never draws in.
+#[test]
+fn pdf_faces_lists_the_faces_the_text_is_drawn_in() {
+    let opts = wordcraft_engine::io::ExportOptions::default();
+    let mut s = Session::new(Document::from_text("Quarterly figures"));
+    let primary = wordcraft_fonts::word::resolve(&s.doc.settings.minor_font, false, false).face;
+    let drawn = (primary.get().family.clone(), primary.get().style.clone());
+    let faces = wordcraft_engine::strict::pdf_faces(&s.doc, &opts);
+    assert_eq!(faces, std::slice::from_ref(&drawn), "one font, one face");
+    // A second family on part of the text: both are drawn in, each listed once.
+    let other = if drawn.0 == "Source Serif 4" { "Source Sans 3" } else { "Source Serif 4" };
+    s.run("select.text", &json!({"text": "figures"})).unwrap();
+    s.run("format.font", &json!({"name": other})).unwrap();
+    let faces = wordcraft_engine::strict::pdf_faces(&s.doc, &opts);
+    assert!(faces.contains(&drawn) && faces.iter().any(|(f, _)| *f == other), "{faces:?}");
+    assert_eq!(faces.len(), 2, "{faces:?}");
+    // A blank document draws no text.
+    assert_eq!(wordcraft_engine::strict::pdf_faces(&Document::default(), &opts), Vec::<(String, String)>::new());
+}

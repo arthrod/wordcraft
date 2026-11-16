@@ -132,14 +132,24 @@ pub struct Services {
 /// Files delivered asynchronously.
 pub type Inbox = std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>;
 
-/// [`Services::lazy_export`]: `(file name, password, options, docx)`. `docx` writes the document
+/// [`Services::lazy_export`]: `(file name, password, options, docx, faces)`. `docx` writes the document
 /// as an unencrypted Word package, the form the host's module takes; `password` is the
 /// document's, for the formats that are saved with one; `options` are the export options the
 /// command resolved (Print Markup, comments, digits), which a package does not carry, for the
 /// host to apply as the engine's writer would. `docx` already refuses a strict PDF that would
-/// leave something out, with the engine's message. `Some(Err)` is a job that could not start.
-pub type LazyExportFn =
-    Box<dyn Fn(&str, Option<&str>, &wordcraft_engine::io::ExportOptions, &dyn Fn() -> Result<Vec<u8>, String>) -> Option<Result<(), String>>>;
+/// leave something out, with the engine's message. `faces` lists the faces a PDF of the document
+/// draws text in, `(family, style)` ([`wordcraft_engine::strict::pdf_faces`]), for a host that
+/// copies faces to its module and must choose which: it lays the document out, so ask only when
+/// a choice has to be made. `Some(Err)` is a job that could not start.
+pub type LazyExportFn = Box<
+    dyn Fn(
+        &str,
+        Option<&str>,
+        &wordcraft_engine::io::ExportOptions,
+        &dyn Fn() -> Result<Vec<u8>, String>,
+        &dyn Fn() -> Vec<(String, String)>,
+    ) -> Option<Result<(), String>>,
+>;
 
 /// [`Services::host_save`]: `(file name, bytes, save_as)`. An error means the page didn't get
 /// the file, and the save failed.
