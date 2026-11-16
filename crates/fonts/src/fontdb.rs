@@ -26,6 +26,7 @@ mod fallback_data;
 mod lookup;
 mod names;
 
+use catalog::Adding;
 use face::FontBytes;
 pub use face::{FALLBACK_FAMILY, FaceRef, FontFace, bundled, bundled_by_stem};
 #[cfg(not(target_arch = "wasm32"))]

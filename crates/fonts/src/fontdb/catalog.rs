@@ -116,7 +116,7 @@ impl FontDb {
     /// Add a user font (TTF/OTF/TTC bytes). Returns the number of faces added (0 if unparseable or
     /// every face was already present).
     pub fn add_font(&self, bytes: Vec<u8>) -> usize {
-        self.add_fonts(vec![(bytes, None)])
+        self.add_font_faces(vec![(bytes, None)], Adding::Installed).len()
     }
 
     /// Add the faces of several font files at once: lookups see all of them or none, never a
@@ -124,12 +124,14 @@ impl FontDb {
     /// face). A file given a `name` its faces don't go by (a document's font table's, see
     /// [`FontDb::add_document_fonts`]) has them go by that name instead. Faces already present
     /// (same family and style) are skipped. Returns how many were added.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(super) fn add_fonts(&self, files: Vec<(Vec<u8>, Option<String>)>) -> usize {
-        self.add_font_faces(files).len()
+        self.add_font_faces(files, Adding::Loaded).len()
     }
 
-    /// [`FontDb::add_fonts`], answering with the faces it added.
-    pub(super) fn add_font_faces(&self, files: Vec<(Vec<u8>, Option<String>)>) -> Vec<Arc<FontFace>> {
+    /// [`FontDb::add_fonts`], answering with the faces it added. `adding` says what they are,
+    /// and so how they meet a face of the same family and style already in the list.
+    pub(super) fn add_font_faces(&self, files: Vec<(Vec<u8>, Option<String>)>, adding: Adding) -> Vec<Arc<FontFace>> {
         let mut new = Vec::new();
         for (bytes, name) in files {
             let data = Arc::new(bytes);
@@ -137,6 +139,7 @@ impl FontDb {
             for f in enumerate_faces(&data, MAX_FILE_FACES) {
                 if let Some(mut face) = make_face(FontBytes::Owned(data.clone()), f.index, f.family, f.style, f.legacy, f.coords) {
                     face.local_names = f.local;
+                    face.document = adding == Adding::Document;
                     if let Some(n) = name.as_deref().filter(|n| !face.named(n) && !face.local_names.iter().any(|l| l.name.eq_ignore_ascii_case(n))) {
                         face.family = n.to_string();
                         face.legacy_family = n.to_string();
@@ -148,13 +151,19 @@ impl FontDb {
         let mut faces = self.faces.write().unwrap_or_else(std::sync::PoisonError::into_inner);
         // Indexed: a document's fonts may add hundreds of faces to thousands (#3716).
         let key = |f: &FontFace| (f.family.to_ascii_lowercase(), f.style.to_ascii_lowercase());
-        let mut present: std::collections::HashSet<_> = faces.iter().map(|g| key(g)).collect();
-        let mut added = Vec::new();
-        for f in new {
-            if present.insert(key(&f)) {
-                faces.push(f.clone());
-                added.push(f);
-            }
+        let gives_way = |g: &FontFace| adding == Adding::Installed && g.document;
+        let mut present: std::collections::HashSet<_> = faces.iter().filter(|g| !gives_way(g)).map(|g| key(g)).collect();
+        let added: Vec<Arc<FontFace>> = new.into_iter().filter(|f| present.insert(key(f))).collect();
+        let before = faces.len();
+        if adding == Adding::Installed {
+            let taken: std::collections::HashSet<_> = added.iter().map(|f| key(f)).collect();
+            faces.retain(|g| !(g.document && taken.contains(&key(g))));
+        }
+        let took_over = faces.len() != before;
+        faces.extend(added.iter().cloned());
+        drop(faces);
+        if took_over {
+            self.forget_choices();
         }
         added
     }
@@ -273,4 +282,20 @@ impl FontDb {
         p.dedup();
         p
     }
+}
+
+/// What faces being added are ([`FontDb::add_font_faces`]), which decides how they meet a face
+/// of the same family and style already in the list.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Adding {
+    /// Loaded by the database itself (installed fonts found by name, system fallback): skipped.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    Loaded,
+    /// Installed by the user or the host (a font file, a document font kept for the run): skipped,
+    /// except that it takes the place of a face one document added ([`FontFace::document`]),
+    /// which leaves with that document and must not take the family with it.
+    Installed,
+    /// One document's, for as long as it is shown ([`FontDb::add_document_fonts_scoped`]):
+    /// skipped.
+    Document,
 }

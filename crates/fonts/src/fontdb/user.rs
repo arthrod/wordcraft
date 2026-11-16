@@ -482,7 +482,7 @@ impl FontDb {
     /// (`___WRD_EMBED_SUB_46`), and the text asks for it by the table's name (#2240). Returns how
     /// many faces were added.
     pub fn add_document_fonts(&self, files: Vec<(Vec<u8>, String)>) -> usize {
-        let added = self.add_fonts(files.into_iter().map(|(data, name)| (data, Some(name))).collect());
+        let added = self.add_font_faces(files.into_iter().map(|(data, name)| (data, Some(name))).collect(), super::Adding::Installed).len();
         if added > 0 {
             self.fonts_changed();
         }
@@ -494,7 +494,7 @@ impl FontDb {
     /// a font one document embeds then never answers for a later one that only names the family,
     /// and the later one's own subset of a family is not skipped as already present.
     pub fn add_document_fonts_scoped(&self, files: Vec<(Vec<u8>, String)>) -> DocumentFaces {
-        let added = self.add_font_faces(files.into_iter().map(|(data, name)| (data, Some(name))).collect());
+        let added = self.add_font_faces(files.into_iter().map(|(data, name)| (data, Some(name))).collect(), super::Adding::Document);
         if !added.is_empty() {
             self.fonts_changed();
         }
@@ -539,7 +539,7 @@ impl FontDb {
     /// Faces left the list or came back: every fallback choice may be another now. The run cache
     /// is kept by face count, which a withdrawal and a later addition can bring back to the same
     /// number, so it is emptied too.
-    fn forget_choices(&self) {
+    pub(super) fn forget_choices(&self) {
         *self.run_fallbacks.write().unwrap_or_else(|e| e.into_inner()) = RunFallbackCache::default();
         self.fonts_changed();
     }
@@ -642,17 +642,22 @@ impl FontDb {
         new: &[Arc<super::FontFace>],
         admit: impl FnOnce(usize) -> Result<(), UserFontError>,
     ) -> Result<Vec<Arc<super::FontFace>>, UserFontError> {
+        let same = |f: &super::FontFace, g: &super::FontFace| g.family.eq_ignore_ascii_case(&f.family) && g.style.eq_ignore_ascii_case(&f.style);
         let mut faces = self.faces.write().unwrap_or_else(|e| e.into_inner());
-        let fresh: Vec<_> = new
-            .iter()
-            .filter(|f| !faces.iter().any(|g| g.family.eq_ignore_ascii_case(&f.family) && g.style.eq_ignore_ascii_case(&f.style)))
-            .cloned()
-            .collect();
+        // A face one document added gives way ([`FontFace::document`]); any other is kept.
+        let fresh: Vec<_> = new.iter().filter(|f| !faces.iter().any(|g| !g.document && same(f, g))).cloned().collect();
         if fresh.is_empty() {
             return Ok(Vec::new());
         }
         admit(fresh.len())?;
+        let before = faces.len();
+        faces.retain(|g| !(g.document && fresh.iter().any(|f| same(f, g))));
+        let took_over = faces.len() != before;
         faces.extend(fresh.iter().cloned());
+        drop(faces);
+        if took_over {
+            self.forget_choices();
+        }
         Ok(fresh)
     }
 

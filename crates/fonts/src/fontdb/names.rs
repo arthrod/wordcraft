@@ -398,6 +398,7 @@ pub(super) fn make_face(
         hint_draws: Default::default(),
         hint_slow: Default::default(),
         hinting_off: Default::default(),
+        document: false,
         #[cfg(not(target_arch = "wasm32"))]
         hint_strike: HINT_STRIKE,
     })
