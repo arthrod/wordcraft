@@ -5828,6 +5828,88 @@ fn web_save_offers_the_host_its_lazy_formats_first() {
     assert_eq!(downloads.borrow().len(), 1);
 }
 
+/// A PDF the web host writes from the Word package it is handed (`Services::lazy_export`) shows
+/// the fields as the engine's own PDF does: Word fills in the body's SEQ, STYLEREF and REF results
+/// as it prints and exports (`output_fields`), so the package for a PDF carries them. A save in
+/// another format keeps the stored results, as the engine's writers do, and so does the document.
+#[test]
+fn web_lazy_pdf_shows_the_fields_as_the_engines_pdf_does() {
+    type Seen = std::rc::Rc<std::cell::RefCell<Vec<(String, Vec<u8>)>>>;
+    let asked: Seen = Default::default();
+    let seen = asked.clone();
+    let services = Services {
+        download: Some(Box::new(|_: &str, _: &[u8]| Ok(()))),
+        lazy_export: Some(Box::new(move |name: &str, _: Option<&str>, docx: &dyn Fn() -> Result<Vec<u8>, String>| {
+            if !(name.ends_with(".rtf") || name.ends_with(".pdf")) {
+                return None;
+            }
+            Some(docx().map(|bytes| seen.borrow_mut().push((name.to_string(), bytes))))
+        })),
+        ..Default::default()
+    };
+    let mut a = WordApp::new(Session::new(wordcraft_doc::Document::new()), services);
+    for _ in 0..2 {
+        a.run("insert.field", json!({"instr": "SEQ Figure \\* ARABIC", "result": "9"})).unwrap();
+        a.run("text.insert", json!({"text": " "})).unwrap();
+    }
+    // Stored results gone stale, as in a file whose captions were moved without an update.
+    let para = a.session.doc.para_mut(wordcraft_doc::StoryRef::Body, &wordcraft_doc::Path::top(0)).unwrap();
+    for o in &mut para.objects {
+        if let wordcraft_doc::para::InlineObject::Field { result, .. } = o {
+            *result = "9".into();
+        }
+    }
+    para.touch();
+    let seqs = |doc: &wordcraft_doc::Document| {
+        let mut out = Vec::new();
+        doc.objects_in_reading_order(&mut |o| {
+            if let wordcraft_doc::para::InlineObject::Field { instr, result, .. } = o
+                && instr.trim_start().starts_with("SEQ")
+            {
+                out.push(result.clone());
+            }
+        });
+        out
+    };
+    assert_eq!(seqs(&a.session.doc), ["9", "9"], "two stale results");
+    // What the engine's own PDF writer prints (`io_ext::save`, "pdf").
+    let printed = seqs(&wordcraft_engine::cmd::references::output_fields(&a.session.doc).unwrap());
+    assert_eq!(printed, ["1", "2"]);
+    let take = |name: &str| {
+        let (got, bytes) = asked.borrow_mut().pop().unwrap();
+        assert_eq!(got, name);
+        wordcraft_engine::io::open_bytes("document.docx", &bytes).unwrap()
+    };
+    for (id, path) in [("file.exportPdf", "figures.pdf"), ("file.saveAs", "figures as copy.pdf")] {
+        a.execute(id, json!({"path": path})).unwrap();
+        assert_eq!(seqs(&take(path)), printed, "{id}: the host's PDF prints what the engine's PDF prints");
+    }
+    a.execute("file.saveAs", json!({"path": "figures.rtf"})).unwrap();
+    assert_eq!(seqs(&take("figures.rtf")), ["9", "9"], "a save keeps the stored results");
+    assert_eq!(seqs(&a.session.doc), ["9", "9"], "the document keeps its stored results");
+}
+
+/// The context menu's spelling suggestions (right-click, Shift+F10) are a proofing command the
+/// host hears (`Services::on_command`), as when a script or the ribbon asks: on the web that
+/// starts the proofing worker on a document nobody has edited (plan 10.1).
+#[test]
+fn context_menu_suggestions_are_announced_to_the_host() {
+    let heard: std::rc::Rc<std::cell::RefCell<Vec<String>>> = Default::default();
+    let sink = heard.clone();
+    let services = Services { on_command: Some(Box::new(move |id: &str| sink.borrow_mut().push(id.to_string()))), ..Default::default() };
+    let a = WordApp::new(Session::new(wordcraft_doc::Document::from_text("Kilns fire clay.")), services);
+    let mut h = harness(a);
+    h.run_steps(4);
+    h.state_mut().canvas.want_focus = true;
+    h.run_steps(3);
+    assert!(!h.state().session.dirty, "a document nobody has edited");
+    assert!(!heard.borrow().iter().any(|id| id == "review.suggestions"));
+    h.event(egui::Event::Key { key: egui::Key::F10, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::SHIFT });
+    h.run_steps(2);
+    assert!(h.state().canvas.context_menu_open, "Shift+F10 opened the menu");
+    assert!(heard.borrow().iter().any(|id| id == "review.suggestions"), "the host heard the suggestions lookup: {:?}", heard.borrow());
+}
+
 /// A file the web host converts lands in the inbox long after the user asked to open it (plan
 /// 10.2), maybe after more typing or another open. It opens beside a document with work in it,
 /// never in its place: the unsaved text stays, still unsaved, in its own document.
