@@ -7549,6 +7549,7 @@ dependencies = [
  "wordcraft-docx",
  "wordcraft-engine",
  "wordcraft-fonts",
+ "wordcraft-formats",
  "wordcraft-geom",
  "wordcraft-layout",
  "wordcraft-ui-egui",

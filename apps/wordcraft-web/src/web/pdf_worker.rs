@@ -74,14 +74,15 @@ impl PdfWorker {
 
         let handler = inner.clone();
         let onerror = Closure::<dyn FnMut(web_sys::ErrorEvent)>::new(move |event: web_sys::ErrorEvent| {
-            let pending = {
+            let (pending, ready) = {
                 let mut inner = handler.borrow_mut();
                 inner.failed = true;
                 inner.queued.clear();
-                inner.pending.drain().collect::<Vec<_>>()
+                (inner.pending.drain().collect::<Vec<_>>(), inner.ready)
             };
             log::warn!("pdf worker failed: {}", super::worker_error_text(&event));
-            fail_pending(pending, "the pdf worker stopped");
+            // As the codec client: not loaded before `ready`, stopped while working after it.
+            fail_pending(pending, &super::worker_failure("pdf", ready));
         });
         worker.set_onerror(Some(onerror.as_ref().unchecked_ref()));
 
@@ -212,12 +213,18 @@ fn on_message(inner: &Rc<RefCell<Inner>>, data: &wasm_bindgen::JsValue) {
 
 impl Drop for PdfWorker {
     fn drop(&mut self) {
-        // Detach first so a message that races the drop can't touch freed state, then stop the
-        // worker itself.
-        let inner = self.inner.borrow();
-        inner.worker.set_onmessage(None);
-        inner.worker.set_onerror(None);
-        inner.worker.terminate();
+        // Complete the outstanding requests (a worker stopped for a deadline must not leave the
+        // jobs behind it waiting forever), detach so a message that races the drop can't touch
+        // freed state, then stop the worker itself.
+        let (worker, pending) = {
+            let mut inner = self.inner.borrow_mut();
+            inner.queued.clear();
+            (inner.worker.clone(), inner.pending.drain().collect::<Vec<_>>())
+        };
+        worker.set_onmessage(None);
+        worker.set_onerror(None);
+        worker.terminate();
+        fail_pending(pending, "the pdf worker was stopped");
     }
 }
 
@@ -232,13 +239,14 @@ thread_local! {
 pub(crate) fn ensure(asset_base: &str) -> bool {
     // A worker that errored at runtime is dead weight: drop it (its `Drop` terminates the JS
     // worker) and start fresh below. `WORKER_FAILED` stays reserved for `start` failures.
-    let alive = WORKER.with(|w| {
+    let (alive, dropped) = WORKER.with(|w| {
         let mut slot = w.borrow_mut();
-        if slot.as_ref().is_some_and(|worker| worker.inner.borrow().failed) {
-            *slot = None;
-        }
-        slot.is_some()
+        let dropped = if slot.as_ref().is_some_and(|worker| worker.inner.borrow().failed) { slot.take() } else { None };
+        (slot.is_some(), dropped)
     });
+    // Dropped outside the slot's borrow: its `Drop` completes waiting requests, whose
+    // continuations may ask for the worker again.
+    drop(dropped);
     if alive {
         return true;
     }
@@ -256,6 +264,14 @@ pub(crate) fn ensure(asset_base: &str) -> bool {
             false
         }
     }
+}
+
+/// Stop the shared worker (one stuck past a job's deadline): its waiting requests fail, and the
+/// next [`ensure`] starts a fresh one. Dropped outside the slot's borrow, so a request's
+/// continuation may start the next job.
+pub(crate) fn stop() {
+    let stopped = WORKER.with(|w| w.borrow_mut().take());
+    drop(stopped);
 }
 
 /// Run `f` on the shared worker when it is up (after [`ensure`]).

@@ -116,6 +116,12 @@ impl Bridge {
         let _ = self.host.post_failed(error, None);
     }
 
+    /// A file the host stores that does not become the document's file (`saveAs: false`): an
+    /// on-demand worker's export, delivered after the save command returned.
+    pub(crate) fn post_copy(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
+        self.post_save(path, bytes, false)
+    }
+
     fn post_save(&self, path: &str, bytes: &[u8], save_as: bool) -> Result<(), String> {
         let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string());
         self.host.post_save(&name, bytes, None, save_as)

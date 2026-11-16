@@ -48,3 +48,10 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlCollection", "HtmlElement", "HtmlCanvasElement", "HtmlAnchorElement", "HtmlIFrameElement", "HtmlInputElement", "HtmlTextAreaElement", "Blob", "BlobPropertyBag", "Url", "Location", "History", "CssStyleDeclaration", "Event", "EventTarget", "BeforeUnloadEvent", "ClipboardEvent", "DataTransfer", "FileList", "File", "DomStringList", "IdbFactory", "IdbOpenDbRequest", "IdbRequest", "IdbDatabase", "IdbObjectStore", "IdbTransaction", "IdbTransactionMode", "MediaQueryList", "Storage", "MessageEvent", "UrlSearchParams", "CustomEvent", "CustomEventInit", "Response", "Request", "RequestInit", "Headers", "Worker", "WorkerOptions", "WorkerType", "ErrorEvent"] }
+
+[dev-dependencies]
+# The routing tests (`src/web/lazy_formats.rs`) check the on-demand workers' format tables against
+# the readers and writers the codecs worker calls, and make an encrypted Word package with our own
+# encryptor. Test builds only: the browser build keeps leaving the extra formats out.
+wordcraft-docx = { workspace = true }
+wordcraft-formats = { workspace = true, features = ["all-formats"] }
