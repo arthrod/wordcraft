@@ -580,6 +580,28 @@ try {
       check("password then unreadable replacement: the old form sends nothing for the restored document", stale.posted === restored.posted && stale.error === null && stale.edit, JSON.stringify({ before: restored.posted, ...stale }));
       check("password then unreadable replacement: no uncaught errors", back.log.uncaught.length === 0, back.log.uncaught.join(" | "));
       await back.page.close();
+      // The password form is up when an empty open() is refused: that call rejects saying
+      // why, and the page goes on stating the protected document's own state (its notice,
+      // its error flag, its form).
+      const asking = await open(browser, base, "/");
+      await waitAttr(asking.page, "data-wordcraft-painted", "true");
+      await asking.page.evaluate((bytes) => window.wordcraftViewer.open(new Uint8Array(bytes)).catch(() => {}), locked);
+      await asking.page.waitForFunction(() => (document.querySelector("#wordcraft_viewer_password")?.getClientRects().length ?? 0) > 0, { timeout: 20000 }).catch(() => {});
+      const emptied = await asking.page.evaluate(async () => {
+        const got = await window.wordcraftViewer.open(new Uint8Array(0)).then(() => "resolved", (e) => `rejected: ${e.message}`);
+        return {
+          got,
+          notice: document.querySelector("#wordcraft_viewer_notice")?.hidden === false ? document.querySelector("#wordcraft_viewer_notice").innerText : null,
+          error: document.documentElement.getAttribute("data-wordcraft-error"),
+          form: (document.querySelector("#wordcraft_viewer_password")?.getClientRects().length ?? 0) > 0,
+        };
+      });
+      check(
+        "password asked, then an empty open(): rejected saying so, the protected document's notice and flag unchanged",
+        /empty/i.test(emptied.got) && /protected|password/i.test(emptied.notice ?? "") && !/empty/i.test(emptied.notice ?? "") && emptied.error === "password-required" && emptied.form,
+        JSON.stringify(emptied),
+      );
+      await asking.page.close();
     }
 
     const prot = await open(browser, base, "/");

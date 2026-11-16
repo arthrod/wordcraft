@@ -1423,12 +1423,16 @@ fn build_api(page: &Rc<Page>) -> js_sys::Object {
         }
         // Refused before the worker beside a document in play (open, opening, or waiting for
         // its password): only this call fails. That document, its waiting `open()` and the
-        // lock on editing stay as they are.
+        // lock on editing stay as they are, and so does what the page says about it: the
+        // reason goes in the notice only when the notice is not stating that document's error
+        // (its password asked for), and the rejection says it in any case.
         let password = password.as_string();
         if let Some(why) = refusal(bytes.length(), password.as_deref())
             && p.state.borrow().handover.holds_document()
         {
-            say(&p, why);
+            if !html(&p).is_some_and(|h| h.has_attribute("data-wordcraft-error")) {
+                say(&p, why);
+            }
             return js_sys::Promise::reject(&js_error(why));
         }
         let page = p.clone();
