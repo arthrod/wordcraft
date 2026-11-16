@@ -16,7 +16,7 @@ use std::rc::Rc;
 use wasm_bindgen::JsCast as _;
 use wasm_bindgen_futures::JsFuture;
 
-use crate::font_pack_manifest::{ManifestEntry, entries_for_families, parse_manifest, style_matches, waiter_records_file};
+use crate::font_pack_manifest::{BatchNotice, ManifestEntry, batch_notice, entries_for_families, parse_manifest, style_matches, waiter_records_file};
 
 /// The manifest entry implements the crate's face-like trait, so the matching rule is
 /// [`wordcraft_fonts::packs::pick_pack_face`]'s alone (family, italic, weight closest to the
@@ -167,8 +167,10 @@ fn is_installed(entry: &ManifestEntry) -> bool {
 }
 
 /// Fetch, decode and install `entries` in one task turn: one repaint per batch, not per face
-/// (`WordApp::watch_fonts` lays out once on the generation bump the installs cause).
-fn fetch_and_install(entries: Vec<ManifestEntry>, ctx: egui::Context) {
+/// (`WordApp::watch_fonts` lays out once on the generation bump the installs cause). `manual` is
+/// a batch the reader asked for: it ends with a line saying what was installed, where an
+/// automatic one speaks only of failures ([`batch_notice`]).
+fn fetch_and_install(entries: Vec<ManifestEntry>, ctx: egui::Context, manual: bool) {
     let files: BTreeSet<String> = entries.iter().map(|e| e.file.clone()).collect();
     IN_FLIGHT.with(|s| s.borrow_mut().extend(files.clone()));
     ATTEMPTED.with(|s| s.borrow_mut().extend(files));
@@ -198,8 +200,15 @@ fn fetch_and_install(entries: Vec<ManifestEntry>, ctx: egui::Context) {
             }
             IN_FLIGHT.with(|s| s.borrow_mut().remove(&entry.file));
         }
-        if failed > 0 {
-            status(wordcraft_ui_egui::i18n::t("Some fonts could not be downloaded.").to_string());
+        use wordcraft_ui_egui::i18n::{fmt, t};
+        match batch_notice(manual, entries.len().saturating_sub(failed), failed) {
+            Some(BatchNotice::Installed(count)) => status(fmt(t("Installed {count} fonts from the font packs."), &[("count", &count.to_string())])),
+            Some(BatchNotice::Partly { installed, failed }) => status(fmt(
+                t("Installed {count} fonts; {failed} could not be downloaded."),
+                &[("count", &installed.to_string()), ("failed", &failed.to_string())],
+            )),
+            Some(BatchNotice::Failed) => status(t("The fonts could not be downloaded.").to_string()),
+            None => {}
         }
         ctx.request_repaint();
         flush_waiters();
@@ -301,7 +310,7 @@ pub(crate) fn drain_wanted(ctx: &egui::Context) {
         .filter(|e| !attempted(&e.file) && !in_flight(&e.file) && !is_installed(e))
         .collect();
     if !needed.is_empty() {
-        fetch_and_install(needed, ctx.clone());
+        fetch_and_install(needed, ctx.clone(), false);
     }
     // Wanted faces may have settled with nothing to fetch; re-check waiters every frame.
     flush_waiters();
@@ -337,7 +346,7 @@ pub(crate) fn install_families(families: Vec<String>, ctx: egui::Context) {
         flush_waiters();
         return;
     }
-    fetch_and_install(needed, ctx);
+    fetch_and_install(needed, ctx, true);
 }
 
 /// `installFonts(families?)` on the JavaScript API: resolves when no pack fetch is in flight.

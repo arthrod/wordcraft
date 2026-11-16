@@ -114,6 +114,48 @@ pub(crate) fn style_matches(style: &str, entry: &ManifestEntry) -> bool {
     weight == entry.weight && italic == entry.italic
 }
 
+/// What a finished batch of pack downloads tells the reader. `manual` is a batch the reader
+/// asked for (Install Font Packs): it always gets an answer, so a click is never met with
+/// silence. An automatic batch (faces a document wanted) speaks only when something failed.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum BatchNotice {
+    /// Every file of a manual batch installed: say how many.
+    Installed(usize),
+    /// Some installed and some failed.
+    Partly { installed: usize, failed: usize },
+    /// Nothing installed.
+    Failed,
+}
+
+pub(crate) fn batch_notice(manual: bool, installed: usize, failed: usize) -> Option<BatchNotice> {
+    match (installed, failed) {
+        (0, 0) => None,
+        (_, 0) => manual.then_some(BatchNotice::Installed(installed)),
+        (0, _) => Some(BatchNotice::Failed),
+        _ => Some(BatchNotice::Partly { installed, failed }),
+    }
+}
+
+/// What Load System Installed Fonts tells the reader once the browser answered with `listed`
+/// faces of which `loaded` were new.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SystemFontsNotice {
+    /// The browser listed nothing: it has no fonts to give or the reader refused access. It is
+    /// not "all fonts are already available".
+    NoneListed,
+    /// Faces were listed and every one was already available (or unusable).
+    NothingNew,
+    Loaded(usize),
+}
+
+pub(crate) fn system_fonts_notice(listed: usize, loaded: usize) -> SystemFontsNotice {
+    match (listed, loaded) {
+        (0, _) => SystemFontsNotice::NoneListed,
+        (_, 0) => SystemFontsNotice::NothingNew,
+        _ => SystemFontsNotice::Loaded(loaded),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,5 +248,25 @@ mod tests {
         assert!(style_matches("Bold", &entry));
         assert!(!style_matches("Regular", &entry));
         assert!(!style_matches("Bold Italic", &entry));
+    }
+
+    #[test]
+    fn a_manual_install_is_always_answered() {
+        // The reader clicked Install Font Packs: success is said, with the count.
+        assert_eq!(batch_notice(true, 9, 0), Some(BatchNotice::Installed(9)));
+        assert_eq!(batch_notice(true, 7, 2), Some(BatchNotice::Partly { installed: 7, failed: 2 }));
+        assert_eq!(batch_notice(true, 0, 3), Some(BatchNotice::Failed));
+        // Faces a document wanted arrive quietly; only a failure is worth a line.
+        assert_eq!(batch_notice(false, 2, 0), None);
+        assert_eq!(batch_notice(false, 1, 1), Some(BatchNotice::Partly { installed: 1, failed: 1 }));
+        assert_eq!(batch_notice(false, 0, 1), Some(BatchNotice::Failed));
+        assert_eq!(batch_notice(true, 0, 0), None);
+    }
+
+    #[test]
+    fn an_empty_local_font_list_is_not_reported_as_all_available() {
+        assert_eq!(system_fonts_notice(0, 0), SystemFontsNotice::NoneListed);
+        assert_eq!(system_fonts_notice(120, 0), SystemFontsNotice::NothingNew);
+        assert_eq!(system_fonts_notice(120, 37), SystemFontsNotice::Loaded(37));
     }
 }
