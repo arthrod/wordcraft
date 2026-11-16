@@ -25,6 +25,7 @@ use wasm_bindgen::closure::Closure;
 use wordcraft_worker_proto as proto;
 
 use crate::cache::{Arrival, PageCache, PageKey};
+use crate::download;
 use crate::handover::{self, Action, Event, Handover, Phase, Reason};
 use crate::mode::Mode;
 use crate::pages::{self, Sheet};
@@ -48,6 +49,9 @@ const EDITOR_START_FAILURE: &str = "WordCraft failed to start";
 const SAMPLE_FILE: &str = "samples/welcome.docx";
 /// This module's own page API object.
 const VIEWER_GLOBAL: &str = "wordcraftViewer";
+/// What the reader is told about a document past the viewer's limit, from its declared length
+/// or its bytes.
+const TOO_LARGE: &str = "The document is too large for this viewer.";
 /// Pixels kept in painted pages outside the window, in bytes of RGBA.
 const CACHE_BUDGET_BYTES: u64 = 192 << 20;
 /// Where the document comes from.
@@ -619,6 +623,11 @@ async fn fetch_same_origin(page: &Rc<Page>, url: &str) -> Result<js_sys::Uint8Ar
     if !response.ok() {
         return Err(failed());
     }
+    // Refused before the body is read when its declared length is past the limit; without a
+    // `Content-Length` the body is read and `open_document` judges its size.
+    if download::declared_too_large(response.headers().get("content-length").ok().flatten().as_deref()) {
+        return Err(TOO_LARGE.to_string());
+    }
     let buffer = wasm_bindgen_futures::JsFuture::from(response.array_buffer().map_err(|_| failed())?).await.map_err(|_| failed())?;
     Ok(js_sys::Uint8Array::new(&buffer))
 }
@@ -629,7 +638,7 @@ fn open_document(page: &Rc<Page>, bytes: js_sys::Uint8Array, password: Option<St
     let length = bytes.length();
     let prefix = match proto::view_open_request_prefix(password.as_deref(), length as usize) {
         Ok(prefix) => prefix,
-        Err(proto::ProtoError::TooLarge { .. }) => return show_error(page, "document-failed", "The document is too large for this viewer."),
+        Err(proto::ProtoError::TooLarge { .. }) => return show_error(page, "document-failed", TOO_LARGE),
         Err(_) => return show_error(page, "document-failed", "The document is empty."),
     };
     let Ok(prefix_len) = u32::try_from(prefix.len()) else { return };
@@ -688,7 +697,7 @@ fn on_opened(page: &Rc<Page>, generation: u32, env: &proto::Envelope, payload: &
     match reply.code {
         proto::ErrorCode::PasswordRequired => ask_password(page, "password-required", "This document is protected with a password."),
         proto::ErrorCode::WrongPassword => ask_password(page, "wrong-password", "That password does not open this document."),
-        proto::ErrorCode::TooLarge => show_error(page, "document-failed", "The document is too large for this viewer."),
+        proto::ErrorCode::TooLarge => show_error(page, "document-failed", TOO_LARGE),
         _ => show_error(page, "document-failed", "This file is not a Word document this viewer can read."),
     }
 }

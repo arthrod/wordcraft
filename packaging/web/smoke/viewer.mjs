@@ -23,7 +23,7 @@
 //   AC6  served with the deployed Content-Security-Policy (`_headers`, plus the inline
 //        bootstrap's hash as `package.sh` adds it), nothing is refused
 //   and the three modes a host can choose (view, viewer-first, edit), an edit action while
-//   the document still downloads, a protected document (the password asked in the page), a
+//   the document still downloads, a document declared past the size limit, a protected document (the password asked in the page), a
 //   font installed just before another document opens, and the editor's parent bridge
 //   (?host=parent).
 //
@@ -364,6 +364,26 @@ try {
     check("slow document: the editor shows that document", typeof handed === "string" && handed.includes(SAMPLE_TEXT), JSON.stringify(String(handed).slice(0, 60)));
     check("slow document: no uncaught errors", slow.log.uncaught.length === 0, slow.log.uncaught.join(" | "));
     await slow.page.close();
+  }
+
+  // ---- a document whose declared length is past the viewer's limit ----
+  {
+    // 100 MiB declared, 1 KiB sent, and the rest never: refused before the body is read, so
+    // the notice comes at once instead of after (or never after) a full download.
+    fixtures.set("/__fixture/oversized.docx", (res) => {
+      unfinished.push(res);
+      res.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Length": String(100 * 1024 * 1024) });
+      res.write(Buffer.alloc(1024));
+    });
+    const big = await open(browser, base, "/?doc=/__fixture/oversized.docx");
+    await waitAttr(big.page, "data-wordcraft-error", "document-failed", 15000).catch(() => {});
+    const state = await big.page.evaluate(() => ({
+      error: document.documentElement.getAttribute("data-wordcraft-error"),
+      notice: document.querySelector("#wordcraft_viewer_notice")?.hidden === false ? document.querySelector("#wordcraft_viewer_notice").innerText : null,
+    }));
+    check("oversized Content-Length: refused before the body with the too-large notice", state.error === "document-failed" && /too large/i.test(state.notice ?? ""), JSON.stringify(state));
+    check("oversized Content-Length: no uncaught errors", big.log.uncaught.length === 0, big.log.uncaught.join(" | "));
+    await big.page.close();
   }
 
   // ---- a protected document: the password is asked for in the page ----
