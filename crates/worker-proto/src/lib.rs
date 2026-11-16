@@ -402,6 +402,11 @@ pub struct PdfJobOptions {
     pub comments: bool,
     /// How digits look.
     pub numeral: Numeral,
+    /// A strict export: the page already checked that nothing would be left out with its own
+    /// faces, so the worker fails the job when a font copy it could not install is one the text
+    /// asks for, or a character then has no face to draw it, rather than let that text fall
+    /// back. Off, such a copy is skipped and the export runs. An older worker ignores it.
+    pub strict: bool,
 }
 
 /// The digits a PDF shows (the Numeral setting, with `System` already resolved by the client).
@@ -1053,7 +1058,7 @@ mod tests {
                 FontCopy { family: "Inter".into(), style: "Regular".into(), bytes: vec![0, 1, 0, 0, 9] },
                 FontCopy { family: "Liter".into(), style: "Italic".into(), bytes: vec![0, 1, 0, 0, 8, 8, 8] },
             ],
-            options: PdfJobOptions { markup: true, comments: true, numeral: Numeral::Context },
+            options: PdfJobOptions { markup: true, comments: true, numeral: Numeral::Context, strict: false },
         };
         let bytes = encode_pdf_request(&req).unwrap();
         let parts = unpack_binary(&bytes).unwrap();
@@ -1075,14 +1080,15 @@ mod tests {
     fn pdf_request_carries_its_options() {
         for options in [
             PdfJobOptions::default(),
-            PdfJobOptions { markup: true, comments: false, numeral: Numeral::Arabic },
-            PdfJobOptions { markup: true, comments: true, numeral: Numeral::Hindi },
-            PdfJobOptions { markup: false, comments: true, numeral: Numeral::Context },
+            PdfJobOptions { markup: true, comments: false, numeral: Numeral::Arabic, strict: false },
+            PdfJobOptions { markup: true, comments: true, numeral: Numeral::Hindi, strict: true },
+            PdfJobOptions { markup: false, comments: true, numeral: Numeral::Context, strict: false },
         ] {
             let req = PdfRenderRequest { docx: b"PK".to_vec(), fonts: Vec::new(), options };
             let bytes = encode_pdf_request(&req).unwrap();
             let meta: serde_json::Value = serde_json::from_slice(unpack_binary(&bytes).unwrap()[0]).unwrap();
             assert_eq!(meta["options"]["markup"], options.markup);
+            assert_eq!(meta["options"]["strict"], options.strict);
             assert_eq!(decode_pdf_request(&bytes).unwrap().options, options);
         }
         let meta: serde_json::Value = serde_json::from_slice(
@@ -1123,7 +1129,7 @@ mod tests {
             &encode_pdf_request(&PdfRenderRequest {
                 docx: b"PK".to_vec(),
                 fonts: Vec::new(),
-                options: PdfJobOptions { markup: true, comments: true, numeral: Numeral::Hindi },
+                options: PdfJobOptions { markup: true, comments: true, numeral: Numeral::Hindi, strict: true },
             })
             .unwrap(),
         )

@@ -282,7 +282,8 @@ fn attach_doc_helpers(api: &js_sys::Object, queue: Sender<ControlRequest>, ctx: 
             // The package does not carry Print Markup: the job does. This API has no session to
             // read Track Changes Options or the Numeral setting from, so `markup` shows the
             // comments as those options do by default, with Western digits.
-            let options = wordcraft_worker_proto::PdfJobOptions { markup, comments: markup, numeral: wordcraft_worker_proto::Numeral::Arabic };
+            let options =
+                wordcraft_worker_proto::PdfJobOptions { markup, comments: markup, numeral: wordcraft_worker_proto::Numeral::Arabic, strict: false };
             let res = execute_command(q, c, "doc.exportDocx", params).await?;
             let b64 = res.get("docxBase64").and_then(Value::as_str).ok_or_else(|| js_err("missing docxBase64"))?;
             let docx = base64_decode(b64).ok_or_else(|| js_err("invalid docxBase64"))?;
@@ -291,7 +292,7 @@ fn attach_doc_helpers(api: &js_sys::Object, queue: Sender<ControlRequest>, ctx: 
             // shared waker set (drained every shell frame by `wake_waiters`, and woken here
             // from the reply closure) completes it.
             let (tx, rx) = std::sync::mpsc::channel::<Result<Vec<u8>, String>>();
-            crate::web::lazy_io::render_pdf(&asset_base, docx, options, false, &Vec::new, move |reply| {
+            crate::web::lazy_io::render_pdf(&asset_base, docx, options, &Vec::new, move |reply| {
                 let _ = tx.send(reply);
                 wake_waiters();
             });

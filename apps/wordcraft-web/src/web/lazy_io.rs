@@ -138,14 +138,13 @@ pub(crate) fn convert(asset_base: &str, req: &proto::ConvertRequest, on_reply: i
 /// every face beyond its compiled-in set goes along as a copy (user fonts, pack faces, fonts
 /// embedded in the document), within the protocol's budgets ([`font_batch`]). When they do not
 /// all fit, the faces the PDF draws text in (`used`, which lays the document out and is asked
-/// only then) go first; a `strict` export, already checked against this page's faces, is
+/// only then) go first; a strict export (`options.strict`), already checked against this page's faces, is
 /// refused only when one of those would be left behind, since its text would then fall back in
 /// the PDF. `on_reply` runs exactly once, as for [`convert`].
 pub(crate) fn render_pdf(
     asset_base: &str,
     docx: Vec<u8>,
     options: proto::PdfJobOptions,
-    strict: bool,
     used: &dyn Fn() -> Vec<(String, String)>,
     on_reply: impl FnOnce(Result<Vec<u8>, String>) + 'static,
 ) {
@@ -156,7 +155,9 @@ pub(crate) fn render_pdf(
         return on_reply(Err(format!("the document is too large to export as PDF in the browser ({} bytes)", docx.len())));
     }
     let batch = font_batch(wordcraft_fonts::FontDb::global().runtime_faces(), used, FONT_BUDGET);
-    if strict && let Some(refusal) = batch.strict_refusal() {
+    if options.strict
+        && let Some(refusal) = batch.strict_refusal()
+    {
         return on_reply(Err(refusal));
     }
     // What does not fit the budgets is left out with a log, and the export still runs: those
@@ -296,7 +297,7 @@ impl Exporter {
             }
         };
         match route {
-            ExportRoute::Pdf => render_pdf(&self.asset_base, docx, pdf_job_options(opts), opts.strict, used, done),
+            ExportRoute::Pdf => render_pdf(&self.asset_base, docx, pdf_job_options(opts), used, done),
             ExportRoute::Codec(format) => {
                 let req = proto::ConvertRequest {
                     format,
