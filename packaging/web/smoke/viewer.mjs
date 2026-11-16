@@ -621,6 +621,29 @@ try {
     }
   }
 
+  // ---- the host's buffer after open(): changed or transferred, the editor still gets the
+  // document the reader sees ----
+  for (const [what, spoil] of [
+    ["changed", "bytes.fill(0)"],
+    ["transferred", "structuredClone(bytes.buffer, { transfer: [bytes.buffer] })"],
+  ]) {
+    const kept = await open(browser, base, "/");
+    await waitAttr(kept.page, "data-wordcraft-painted", "true");
+    const opened = await kept.page.evaluate(async (spoil) => {
+      const bytes = new Uint8Array(await (await fetch("samples/welcome.docx")).arrayBuffer());
+      const got = await window.wordcraftViewer.open(bytes).then((a) => a.pageCount, (e) => `rejected: ${e.message}`);
+      new Function("bytes", spoil)(bytes);
+      return { got, left: bytes.length };
+    }, spoil);
+    await kept.page.click("#wordcraft_viewer_edit");
+    await waitAttr(kept.page, "data-wordcraft-phase", "editing", 120000).catch(() => {});
+    const handed = await kept.page.evaluate(() => Promise.resolve(window.wordcraft?.getMarkdown?.()).catch(() => null));
+    const state = { opened, phase: await attr(kept.page, "data-wordcraft-phase"), notice: await attr(kept.page, "data-wordcraft-notice") };
+    check(`host buffer ${what} after open(): the editor gets the document the viewer showed`, typeof handed === "string" && handed.includes(SAMPLE_TEXT), JSON.stringify(state));
+    check(`host buffer ${what} after open(): no uncaught errors`, kept.log.uncaught.length === 0, kept.log.uncaught.join(" | "));
+    await kept.page.close();
+  }
+
   // ---- open() against the startup download, another open(), and the worker's replies ----
   {
     // Two blank documents with page breaks: 6 pages, and 41 (long enough to scroll away).

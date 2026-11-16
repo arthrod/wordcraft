@@ -186,15 +186,25 @@ fn str_prop(obj: &JsValue, key: &str) -> Result<Option<String>, JsValue> {
     }
 }
 
-/// The bytes a host passed: a `Uint8Array` as it is, an `ArrayBuffer` viewed.
+/// The bytes a host passed: a `Uint8Array` as it is, an `ArrayBuffer` viewed. A detached buffer
+/// is no bytes (viewing or copying one throws).
 fn bytes_of(val: &JsValue) -> Option<js_sys::Uint8Array> {
     if val.is_instance_of::<js_sys::Uint8Array>() {
-        val.clone().dyn_into().ok()
-    } else if val.is_instance_of::<js_sys::ArrayBuffer>() {
-        Some(js_sys::Uint8Array::new(val))
-    } else {
-        None
+        return val.clone().dyn_into().ok();
     }
+    val.dyn_ref::<js_sys::ArrayBuffer>()
+        .map(|buffer| if buffer.byte_length() == 0 { js_sys::Uint8Array::new_with_length(0) } else { js_sys::Uint8Array::new(buffer) })
+}
+
+/// A copy of a document a host passed ([`bytes_of`]). The page keeps it for the hand-over, so it
+/// must be the page's own: a host that changes, transfers or detaches its buffer after `open()`
+/// would otherwise hand the editor other bytes than the ones the reader sees. The one long-lived
+/// copy on the page (the frame sent to the worker is transferred away).
+fn document_of(val: &JsValue) -> Option<js_sys::Uint8Array> {
+    bytes_of(val).map(|bytes| match bytes.length() {
+        0 => js_sys::Uint8Array::new_with_length(0),
+        n => bytes.slice(0, n),
+    })
 }
 
 fn normalize_asset_base(base: &str) -> String {
@@ -248,7 +258,7 @@ fn launch(options: &JsValue, auto: bool) -> Result<JsValue, JsValue> {
     let asset_base = str_prop(options, "assetBase")?.map(|b| normalize_asset_base(&b)).unwrap_or_else(|| default_asset_base(&document));
     let given = prop(options, "document");
     let source = if !(given.is_undefined() || given.is_null()) {
-        Source::Bytes(bytes_of(&given).ok_or_else(|| js_error("start(options): `document` must be a Uint8Array or an ArrayBuffer"))?)
+        Source::Bytes(document_of(&given).ok_or_else(|| js_error("start(options): `document` must be a Uint8Array or an ArrayBuffer"))?)
     } else if let Some(url) = str_prop(options, "url")?.or_else(|| query_get("doc")) {
         Source::Url(url)
     } else {
@@ -1318,7 +1328,7 @@ fn build_api(page: &Rc<Page>) -> js_sys::Object {
 
     let p = page.clone();
     let open = Closure::<dyn Fn(JsValue, JsValue) -> js_sys::Promise>::new(move |bytes: JsValue, password: JsValue| {
-        let Some(bytes) = bytes_of(&bytes) else {
+        let Some(bytes) = document_of(&bytes) else {
             return js_sys::Promise::reject(&js_error("open(bytes): expected a Uint8Array or an ArrayBuffer"));
         };
         if p.state.borrow().worker.is_none() {
