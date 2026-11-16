@@ -454,31 +454,18 @@ fn check_first_load_budget(page: &WasmReport, viewer_worker: Option<&WasmReport>
     errs
 }
 
-/// `html` with every `<!-- ... -->` comment removed (an unterminated comment runs to the end).
-fn without_comments(html: &str) -> String {
-    let mut out = String::with_capacity(html.len());
-    let mut rest = html;
-    while let Some(start) = rest.find("<!--") {
-        out.push_str(rest.get(..start).unwrap_or_default());
-        let after = rest.get(start..).unwrap_or_default();
-        rest = after.find("-->").and_then(|end| after.get(end.saturating_add(3)..)).unwrap_or_default();
-    }
-    out.push_str(rest);
-    out
-}
-
 /// The [`ON_DEMAND_STEMS`] the first-load page names outside a comment. Any hit means a first
 /// visit fetches, preloads or at least points at a file that should load on demand: the page
 /// module names those files at run time, from its own code, never from the page.
 pub fn on_demand_files_named_by_page(html: &str) -> Vec<&'static str> {
-    let live = without_comments(html);
+    let live = crate::web_page::without_comments(html);
     ON_DEMAND_STEMS.iter().copied().filter(|stem| live.contains(stem)).collect()
 }
 
 /// The local files `html` names in `href`, `src` or a quoted `./` path of its inline module
 /// script, comments excluded, sorted and without duplicates.
 pub fn files_named_by_page(html: &str) -> Vec<String> {
-    let live = without_comments(html);
+    let live = crate::web_page::without_comments(html);
     let mut names: Vec<String> = Vec::new();
     for (i, _) in live.match_indices("./") {
         let tail = live.get(i.saturating_add(2)..).unwrap_or_default();
