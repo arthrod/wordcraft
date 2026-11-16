@@ -23,6 +23,9 @@
 //!     is now that file; the next Save sends its name with `false`.
 //!   - Save As or Export to a format that doesn't (PDF, Markdown, plain text), Export as PDF and
 //!     Export Page as PNG: `false`. They are copies; the document's file stays the same.
+//!   - A format the browser build writes in an on-demand worker (`.rtf`, `.odt`, `.html`, PDF…;
+//!     `web/lazy_io.rs`): `false`, sent when the worker has written it, after the command
+//!     returned. Such a save is a copy, whatever the format keeps.
 //! - `wordcraft:dirty` whenever unsaved changes appear or go away, `wordcraft:failed` when the
 //!   app couldn't start.
 //!

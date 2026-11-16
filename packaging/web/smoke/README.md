@@ -77,7 +77,13 @@ when a flow fails and prints `PASS`/`FAIL` per flow on stderr.
 | `missing` | the static server answers 404 for the codecs and PDF worker loaders; one open, one PDF export and one Save As are tried | each failure is said in plain words (`Couldn't open fixture.rtf: …`), nothing throws or panics, nothing is downloaded and the document's text is unchanged |
 
 Downloads are read in the page (the save picker is switched off there, so a save takes the
-anchor-download path and its blob is kept); fixture text is written in `lazy.mjs`.
+anchor-download path and its blob is kept; a worker's export takes that path in every browser);
+fixture text is written in `lazy.mjs`. A scripted `file.saveAs` or `file.exportPdf` to a
+worker's format answers `{"exporting": name, "pending": true}` before the file exists, so the
+flows wait for the download (or the `Couldn't export …` line), never for the command's answer.
+`?proof-worker` prints its lines only once the proofing worker starts (the first edit or
+proofing command); `edit` types before waiting for them, as `drive.mjs`'s fixture page does.
+Limits of the worker jobs are listed in `packaging/web/README.md` ("Worker jobs").
 
 ## JavaScript exception
 
