@@ -703,6 +703,8 @@ fn services(
         print: Some(Box::new(print_pdf)),
         inbox: Some(inbox),
         on_dirty: Some(Box::new(move |d| dirty.set(d))),
+        // The proofing worker starts on the first proofing command too, heard as it runs (plan 10.1).
+        on_command: Some(Box::new(crate::proof_squiggles::observe_command)),
         animations_enabled: Some(animations_enabled()),
         store_font: Some(Box::new(font_store::store)),
         forget_font: Some(Box::new(font_store::forget)),

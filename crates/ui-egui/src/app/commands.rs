@@ -120,9 +120,17 @@ impl WordApp {
         Some(lazy(name, password, &docx)?.map(|()| json!({"exporting": name, "pending": true})))
     }
 
+    /// Tell the host the command `id` is about to run ([`Services::on_command`]).
+    fn announce_command(&self, id: &str) {
+        if let Some(seen) = &self.services.on_command {
+            seen(id);
+        }
+    }
+
     /// Run a command for a script or an agent (control channel, MCP bridge): never asks first.
     /// UI-level commands (`ui.*`) are handled here, the rest by the engine.
     pub fn execute(&mut self, id: &str, params: Value) -> Result<Value, String> {
+        self.announce_command(id);
         self.clear_command_targets(id);
         if let Some(error) = self.document_required_error(id) {
             return Err(error);
