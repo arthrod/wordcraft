@@ -457,6 +457,11 @@ fn check_first_load_budget(page: &WasmReport, viewer_worker: Option<&WasmReport>
 /// The [`ON_DEMAND_STEMS`] the first-load page names outside a comment. Any hit means a first
 /// visit fetches, preloads or at least points at a file that should load on demand: the page
 /// module names those files at run time, from its own code, never from the page.
+///
+/// Only HTML comments are set aside. A name inside a `<script>` or `<style>` block counts even
+/// in a `//` or `/* */` comment there: telling such a comment from a string or a URL takes a
+/// script parser, and a check that guards the first load should fail on a doubtful page, not
+/// pass it. Notes about the lazy files belong in HTML comments, where the page keeps them.
 pub fn on_demand_files_named_by_page(html: &str) -> Vec<&'static str> {
     let live = crate::web_page::without_comments(html);
     ON_DEMAND_STEMS.iter().copied().filter(|stem| live.contains(stem)).collect()
@@ -1166,6 +1171,9 @@ await init({ module_or_path: './wordcraft-viewer-web-7858_bg.wasm' });</script>
             let html = format!("{clean}{tag}");
             assert_eq!(on_demand_files_named_by_page(&html), [stem], "{tag}");
         }
+        // A script or style comment is not set aside: the check fails closed on those.
+        assert_eq!(on_demand_files_named_by_page("<script>// see wordcraft-worker-pdf_loader.js\n</script>"), ["wordcraft-worker-pdf"]);
+        assert_eq!(on_demand_files_named_by_page("<style>/* wordcraft-web.js */</style>"), ["wordcraft-web"]);
         // A comment that never closes hides nothing before it and cannot panic.
         assert_eq!(on_demand_files_named_by_page(r#"<script src="wordcraft-web.js"></script><!-- open"#), ["wordcraft-web"]);
         assert!(on_demand_files_named_by_page("<!-- wordcraft-web.js").is_empty());
