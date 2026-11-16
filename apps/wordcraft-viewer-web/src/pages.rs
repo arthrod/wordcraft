@@ -23,6 +23,12 @@ pub const PAGE_PIXEL_BUDGET: u64 = 16_000_000;
 
 const _: () = assert!(PAGE_PIXEL_BUDGET <= MAX_VIEW_PIXELS);
 
+/// Most pages mounted (a canvas each) and asked for at once. A portrait 4K screen with half a
+/// window above and below spans about 7,700 CSS pixels: 128 pages fill it at 60 pixels a page,
+/// shorter than a business card (192 pixels at 100%). A window taller than that, which only a
+/// host page can make, gets the pages at its top.
+pub const MAX_MOUNTED_PAGES: usize = 128;
+
 /// The size a page with an unusable size is drawn at: US Letter.
 const FALLBACK_PAGE: (f64, f64) = (612.0, 792.0);
 /// The largest side a page is laid out with, in points (about 35 m).
@@ -95,6 +101,44 @@ pub fn visible(sheet: &Sheet, scroll_top: f64, viewport_height: f64, overscan: f
     let start = sheet.pages.partition_point(|p| p.top + p.height <= low);
     let end = sheet.pages.partition_point(|p| p.top < high);
     start..end.max(start)
+}
+
+/// The pages to mount and paint for a window: those in it, then those within half a window above
+/// and below.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Wanted {
+    /// The pages in the window.
+    pub seen: Range<usize>,
+    /// A run of pages that holds `seen`.
+    pub near: Range<usize>,
+}
+
+impl Wanted {
+    /// Most wanted first: the pages in the window, then the ones above it, then below.
+    pub fn order(&self) -> impl Iterator<Item = usize> {
+        self.seen.clone().chain(self.near.start..self.seen.start).chain(self.seen.end..self.near.end)
+    }
+
+    pub fn contains(&self, page: usize) -> bool {
+        self.near.contains(&page)
+    }
+}
+
+/// The pages a window `viewport_height` CSS pixels tall at `scroll_top` wants: at most
+/// [`MAX_MOUNTED_PAGES`], the window's own first (from its top), the rest shared between above
+/// and below.
+pub fn wanted(sheet: &Sheet, scroll_top: f64, viewport_height: f64) -> Wanted {
+    let seen = visible(sheet, scroll_top, viewport_height, 0.0);
+    let near = visible(sheet, scroll_top, viewport_height, viewport_height / 2.0);
+    // `visible` gives `near` around `seen`; min and max keep it so whatever the numbers.
+    let start = seen.start.max(near.start).min(near.end);
+    let end = seen.end.max(start).min(near.end).min(start.saturating_add(MAX_MOUNTED_PAGES));
+    let room = MAX_MOUNTED_PAGES.saturating_sub(end.saturating_sub(start));
+    let (space_above, space_below) = (start.saturating_sub(near.start), near.end.saturating_sub(end));
+    let below = space_below.min(room.saturating_sub(room / 2));
+    let above = space_above.min(room.saturating_sub(below));
+    let below = space_below.min(room.saturating_sub(above));
+    Wanted { seen: start..end, near: start.saturating_sub(above)..end.saturating_add(below) }
 }
 
 /// The scale to paint a page at, in pixels per point: zoom times the device pixel ratio, so a

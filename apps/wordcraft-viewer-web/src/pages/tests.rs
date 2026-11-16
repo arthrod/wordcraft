@@ -134,3 +134,50 @@ fn the_render_scale_stays_inside_the_protocol_and_the_pixel_budget() {
     }
     assert_eq!(render_scale(1.0, 64.0, &LETTER), render_scale(1.0, MAX_DEVICE_PIXEL_RATIO, &LETTER), "a ratio past the cap is the cap");
 }
+
+#[test]
+fn a_window_taller_than_the_document_mounts_a_bounded_run_of_pages() {
+    // The most pages the protocol allows, each at the smallest zoom, in a window as tall as a
+    // host page can make it: no more than the cap is mounted or asked for.
+    let sheet = lay_out(&letters(wordcraft_worker_proto::MAX_VIEW_PAGES), 1.0);
+    for (top, height) in [(0.0, 1e9), (1e6, 1e9), (f64::NAN, f64::INFINITY), (-1e9, 1e12)] {
+        let w = wanted(&sheet, top, height);
+        let order: Vec<usize> = w.order().collect();
+        assert!(order.len() <= MAX_MOUNTED_PAGES, "{top} {height}: {} pages", order.len());
+        assert!(w.near.len() <= MAX_MOUNTED_PAGES);
+        assert!(order.iter().all(|i| w.contains(*i) && *i < sheet.pages.len()));
+        assert_eq!(order.len(), w.near.len(), "each page once");
+    }
+}
+
+#[test]
+fn the_wanted_pages_are_the_window_first_then_around_it() {
+    let sheet = lay_out(&letters(40), 1400.0);
+    let (top, height) = (5.0 * (1056.0 + PAGE_GAP), 900.0);
+    let w = wanted(&sheet, top, height);
+    let seen = visible(&sheet, top, height, 0.0);
+    let near = visible(&sheet, top, height, height / 2.0);
+    let order: Vec<usize> = w.order().collect();
+    // Under the cap, it is every page in or near the window, the window's first.
+    let mut expected: Vec<usize> = seen.clone().collect();
+    expected.extend(near.clone().filter(|i| !seen.contains(i)));
+    assert_eq!(order, expected);
+    for i in 0..40 {
+        assert_eq!(w.contains(i), near.contains(&i), "{i}");
+    }
+}
+
+#[test]
+fn a_capped_run_keeps_the_window_and_shares_the_rest_above_and_below() {
+    // Tiny pages: hundreds in the window and around it.
+    let tiny = vec![ViewPageSize { width: 612.0, height: 1.0 }; 2000];
+    let sheet = lay_out(&tiny, 1400.0);
+    let row = sheet.pages[1].top - sheet.pages[0].top;
+    let (top, height) = (1000.0 * row, 100.0 * row);
+    let w = wanted(&sheet, top, height);
+    let seen = visible(&sheet, top, height, 0.0);
+    assert_eq!(w.seen, seen, "the window itself fits the cap");
+    assert_eq!(w.near.len(), MAX_MOUNTED_PAGES);
+    let (above, below) = (seen.start - w.near.start, w.near.end - seen.end);
+    assert!(above.abs_diff(below) <= 1, "{above} above, {below} below");
+}

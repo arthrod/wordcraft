@@ -832,14 +832,13 @@ fn schedule_refresh(page: &Rc<Page>) {
 }
 
 /// The pages in the window, the ones the reader sees first, then the half window above and
-/// below.
-fn wanted_pages(page: &Page, sheet: &Sheet) -> Vec<u32> {
-    let top = f64::from(page.scroller.scroll_top());
-    let height = f64::from(page.scroller.client_height());
-    let seen = pages::visible(sheet, top, height, 0.0);
-    let near = pages::visible(sheet, top, height, height / 2.0);
-    let index = |i: usize| u32::try_from(i).ok();
-    seen.clone().chain(near.filter(|i| !seen.contains(i))).filter_map(index).collect()
+/// below; at most [`pages::MAX_MOUNTED_PAGES`].
+fn wanted_pages(page: &Page, sheet: &Sheet) -> pages::Wanted {
+    pages::wanted(sheet, f64::from(page.scroller.scroll_top()), f64::from(page.scroller.client_height()))
+}
+
+fn page_indices(wanted: &pages::Wanted) -> Vec<u32> {
+    wanted.order().filter_map(|i| u32::try_from(i).ok()).collect()
 }
 
 /// Ask the worker for the pages the window shows and does not have, and release the canvases
@@ -851,7 +850,8 @@ fn refresh(page: &Rc<Page>) {
         return;
     }
     let ratio = page.window.device_pixel_ratio();
-    let near = wanted_pages(page, &state.sheet);
+    let around = wanted_pages(page, &state.sheet);
+    let near = page_indices(&around);
     let mut wanted = Vec::with_capacity(near.len());
     for index in &near {
         let (Some(size), Some(at)) = (state.sizes.get(*index as usize), state.sheet.pages.get(*index as usize)) else { continue };
@@ -867,7 +867,7 @@ fn refresh(page: &Rc<Page>) {
     }
     let cache = &state.cache;
     state.canvases.retain(|index, canvas| {
-        let keep = near.contains(index) || cache.painted(*index).is_some();
+        let keep = around.contains(*index as usize) || cache.painted(*index).is_some();
         if !keep {
             canvas.el.remove();
         }
@@ -918,7 +918,7 @@ fn on_page(page: &Rc<Page>, generation: u32, key: PageKey, env: &proto::Envelope
                 false
             }
             Some(header) => {
-                let keep = wanted_pages(page, &state.sheet);
+                let keep = page_indices(&wanted_pages(page, &state.sheet));
                 let pixels = payload.length().saturating_sub(proto::VIEW_PAGE_TRAILER_BYTES as u32);
                 match state.cache.arrived(key, u64::from(pixels), &keep) {
                     Arrival::Stale => false,
