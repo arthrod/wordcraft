@@ -545,13 +545,19 @@ fn hide_notice(page: &Page) {
 
 /// The document, or the viewer itself, failed: say so in the notice line.
 fn show_error(page: &Page, code: &str, text: &str) {
-    page.notice.set_inner_text(text);
-    page.notice.set_hidden(false);
     page.status.set_inner_text("");
     if let Some(html) = html(page) {
         let _ = html.set_attribute("data-wordcraft-error", code);
     }
     remove_skeleton(page);
+    notify(page, text);
+}
+
+/// Say `text` in the notice line and reject the waiting `open()` calls with it. Alone, for a
+/// request refused beside an open document, which stays as it is (no error flag, its status).
+fn notify(page: &Page, text: &str) {
+    page.notice.set_inner_text(text);
+    page.notice.set_hidden(false);
     let waiters = std::mem::take(&mut page.state.borrow_mut().open_waiters);
     for (_, reject) in waiters {
         let _ = reject.call1(&JsValue::NULL, &js_error(text));
@@ -566,10 +572,11 @@ fn document_failed(page: &Rc<Page>, code: &str, text: &str) {
     dispatch(page, Event::DocumentFailed);
 }
 
-/// Bytes refused before they were sent to the worker: a document already open stays open.
+/// Bytes refused before they were sent to the worker: a document already open stays open, as
+/// it was (no error flag, its status), and only the notice says why.
 fn refused(page: &Rc<Page>, text: &str) {
     if page.state.borrow().handover.document_open() {
-        show_error(page, "document-failed", text);
+        notify(page, text);
     } else {
         document_failed(page, "document-failed", text);
     }
@@ -597,9 +604,11 @@ fn start_viewer(page: &Rc<Page>) {
             return;
         }
     }
+    // Read now, not at the first poll: a host's `open()` in this same task comes first.
+    let opens = page.state.borrow().opens;
     let page = page.clone();
     wasm_bindgen_futures::spawn_local(async move {
-        match document_bytes(&page, true).await {
+        match document_bytes(&page, true, opens).await {
             Ok(Some(bytes)) => {
                 let password = page.state.borrow().password.clone();
                 open_document(&page, bytes, password);
@@ -612,14 +621,18 @@ fn start_viewer(page: &Rc<Page>) {
 
 /// The document's bytes: the ones already held, else fetched from where the host said. With
 /// nothing said, the viewer gets the built-in sample and the editor gets nothing. `None` too when
-/// a host's `open()` came while they were fetched: that document is the one shown.
-async fn document_bytes(page: &Rc<Page>, for_viewer: bool) -> Result<Option<js_sys::Uint8Array>, String> {
-    let (source, opens) = {
+/// a host's `open()` came after the caller read `opens` (before or during a fetch): that document
+/// is the one shown, and it is already open or opening.
+async fn document_bytes(page: &Rc<Page>, for_viewer: bool, opens: u32) -> Result<Option<js_sys::Uint8Array>, String> {
+    let source = {
         let state = page.state.borrow();
+        if state.opens != opens {
+            return Ok(None);
+        }
         if let Some(docx) = &state.docx {
             return Ok(Some(docx.clone()));
         }
-        (state.source.clone(), state.opens)
+        state.source.clone()
     };
     let bytes = match source {
         Source::Bytes(bytes) => Ok(bytes),
@@ -663,10 +676,11 @@ async fn fetch_same_origin(page: &Rc<Page>, url: &str) -> Result<js_sys::Uint8Ar
 /// only the few bytes of framing come from this module.
 fn open_document(page: &Rc<Page>, bytes: js_sys::Uint8Array, password: Option<String>) {
     // A password past what the protocol carries is the password's problem, not the document's:
-    // an open document stays, otherwise the password is asked for again in the page.
+    // an open document stays untouched (the notice says why, the open() rejects), otherwise the
+    // password is asked for again in the page.
     if password.as_deref().is_some_and(|p| p.len() > proto::MAX_PASSWORD_BYTES) {
         if page.state.borrow().handover.document_open() {
-            return show_error(page, "password-too-long", PASSWORD_TOO_LONG);
+            return notify(page, PASSWORD_TOO_LONG);
         }
         let stale = forget_pages(page);
         {
@@ -914,7 +928,11 @@ fn refresh(page: &Rc<Page>) {
             place(&canvas, Some(at), state.sheet.zoom);
             state.canvases.insert(*index, canvas);
         }
-        if let Some(scale) = pages::render_scale(state.sheet.zoom, ratio, size) {
+        // Only a page with a canvas is asked for: an answer with nowhere to go is dropped and
+        // asked again (`on_page`), which for a canvas that cannot be made would never end.
+        if state.canvases.contains_key(index)
+            && let Some(scale) = pages::render_scale(state.sheet.zoom, ratio, size)
+        {
             wanted.push(PageKey::new(*index, scale));
         }
     }
@@ -1183,10 +1201,11 @@ async fn call_editor(api: &JsValue, name: &str, args: &js_sys::Array) -> Result<
 /// File › Home (`execute("ui.backstage", {value: false})`), which a command run through the
 /// API does not do by itself.
 fn hand_over(page: &Rc<Page>) {
+    let opens = page.state.borrow().opens;
     let page = page.clone();
     wasm_bindgen_futures::spawn_local(async move {
         let outcome = async {
-            let Some(bytes) = document_bytes(&page, false).await? else { return Ok(()) };
+            let Some(bytes) = document_bytes(&page, false, opens).await? else { return Ok(()) };
             let (api, _) = editor_load_fn(&page).ok_or("the editor's page API is gone")?;
             let password = page.state.borrow().password.clone().map_or(JsValue::UNDEFINED, |p| JsValue::from_str(&p));
             let args = js_sys::Array::of2(&bytes, &password);

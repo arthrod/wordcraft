@@ -61,8 +61,9 @@ function check(name, ok, detail = "") {
 // `noWebGl` makes every canvas refuse a WebGL context; `rootAttrs` are set on
 // #wordcraft_viewer as the parser inserts it, before the page module starts. `hooks` lets a case
 // hold the workers' replies (`window.__hold`, delivered in order by `window.__release()`) and make
-// `postMessage` throw (`window.__failPost`); `holdFromStart` holds from the first one, `ready`.
-async function open(browser, base, path, { blocked = null, stalled = null, noWebGl = false, rootAttrs = null, hooks = false, holdFromStart = false, width = 1280, height = 800 } = {}) {
+// `postMessage` throw (`window.__failPost`), and record each request's header (`window.__posted`);
+// `holdFromStart` holds from the first reply, `ready`. `init` is `[fn, ...args]` run before the page.
+async function open(browser, base, path, { blocked = null, stalled = null, noWebGl = false, rootAttrs = null, hooks = false, holdFromStart = false, init = null, width = 1280, height = 800 } = {}) {
   const page = await browser.newPage();
   await page.setViewport({ width, height, deviceScaleFactor: 1 });
   const log = { requests: [], consoleErrors: [], uncaught: [] };
@@ -103,6 +104,7 @@ async function open(browser, base, path, { blocked = null, stalled = null, noWeb
       window.__hold = hold;
       window.__held = [];
       window.__failPost = false;
+      window.__posted = [];
       window.__release = () => {
         window.__hold = false;
         for (const deliver of window.__held.splice(0)) deliver();
@@ -121,10 +123,12 @@ async function open(browser, base, path, { blocked = null, stalled = null, noWeb
       const post = Worker.prototype.postMessage;
       Worker.prototype.postMessage = function (...a) {
         if (window.__failPost) throw new DOMException("refused by the test", "DataCloneError");
+        window.__posted.push(String(a[0]?.[0] ?? ""));
         return post.apply(this, a);
       };
     }, holdFromStart);
   }
+  if (init) await page.evaluateOnNewDocument(...init);
   if (noWebGl) {
     await page.evaluateOnNewDocument(() => {
       const real = HTMLCanvasElement.prototype.getContext;
@@ -636,6 +640,48 @@ try {
       return { first: await first, second: await second };
     }, long, six);
     check("two open() calls: the superseded one rejects, the other resolves with its own count", String(both.first).startsWith("rejected:") && both.second === 6 && (await shown(slow.page)).count === 6, JSON.stringify(both));
+    // open() with a password too long while a document is open: rejected, and the open document
+    // keeps its status line, Edit, and no error flag.
+    const beside = await slow.page.evaluate(async (doc) => {
+      const status = () => document.querySelector("#wordcraft_viewer [role=status]")?.innerText ?? "";
+      const before = status();
+      const got = await window.wordcraftViewer.open(new Uint8Array(doc), "x".repeat(300)).then(() => "resolved", (e) => `rejected: ${e.message}`);
+      return {
+        got,
+        before,
+        status: status(),
+        error: document.documentElement.getAttribute("data-wordcraft-error"),
+        notice: document.querySelector("#wordcraft_viewer_notice")?.hidden === false ? document.querySelector("#wordcraft_viewer_notice").innerText : null,
+        count: window.wordcraftViewer.pageCount(),
+        edit: (document.querySelector("#wordcraft_viewer_edit")?.getClientRects().length ?? 0) > 0,
+      };
+    }, long);
+    check(
+      "open() with a password too long beside an open document: rejected, the document untouched",
+      /^rejected: .*password/i.test(beside.got) && beside.error === null && beside.status === beside.before && beside.status.length > 0 && beside.count === 6 && beside.edit && /password/i.test(beside.notice ?? ""),
+      JSON.stringify(beside),
+    );
+    // open() of a document past the size limit while one is open: the same, and the notice
+    // says it is too large.
+    const tooBig = await slow.page.evaluate(async () => {
+      const status = () => document.querySelector("#wordcraft_viewer [role=status]")?.innerText ?? "";
+      const before = status();
+      const got = await window.wordcraftViewer.open(new Uint8Array(64 * 1024 * 1024 + 1)).then(() => "resolved", (e) => `rejected: ${e.message}`);
+      return {
+        got,
+        before,
+        status: status(),
+        error: document.documentElement.getAttribute("data-wordcraft-error"),
+        notice: document.querySelector("#wordcraft_viewer_notice")?.hidden === false ? document.querySelector("#wordcraft_viewer_notice").innerText : null,
+        count: window.wordcraftViewer.pageCount(),
+        edit: (document.querySelector("#wordcraft_viewer_edit")?.getClientRects().length ?? 0) > 0,
+      };
+    });
+    check(
+      "open() of a document too large beside an open document: rejected, the document untouched",
+      /^rejected: .*too large/i.test(tooBig.got) && tooBig.error === null && tooBig.status === tooBig.before && tooBig.status.length > 0 && tooBig.count === 6 && tooBig.edit && /too large/i.test(tooBig.notice ?? ""),
+      JSON.stringify(tooBig),
+    );
     check("open() races: no uncaught errors", slow.log.uncaught.length === 0, slow.log.uncaught.join(" | "));
     await slow.page.close();
 
@@ -685,6 +731,56 @@ try {
     check("a queued request that cannot be posted ends in an error, with Edit offered", told.error === "viewer-failed" && told.edit, JSON.stringify(told));
     check("a queued request that cannot be posted: no uncaught errors", refused.log.uncaught.length === 0, refused.log.uncaught.join(" | "));
     await refused.page.close();
+
+    // start() and open() in the same task: the startup opens nothing of its own, so the host's
+    // document is sent to the worker once.
+    const sameTask = await open(browser, base, "/", {
+      hooks: true,
+      init: [
+        (doc) =>
+          addEventListener("TrunkApplicationStarted", () => {
+            window.wasmBindings.start({ installGlobal: true });
+            window.__hostOpen = window.wordcraftViewer.open(new Uint8Array(doc)).then((a) => a.pageCount, (e) => `rejected: ${e.message}`);
+          }),
+        six,
+      ],
+    });
+    await sameTask.page.waitForFunction(() => window.__hostOpen, { timeout: 30000 });
+    const once = await sameTask.page.evaluate(async () => {
+      const opened = await window.__hostOpen;
+      await new Promise((r) => setTimeout(r, 1500));
+      return { opened, count: window.wordcraftViewer.pageCount(), viewOpens: window.__posted.filter((h) => h.includes('"viewOpen"')).length };
+    });
+    check("start() then open() in one task: the host's document is opened once", once.opened === 6 && once.count === 6 && once.viewOpens === 1, JSON.stringify(once));
+    check("start() then open() in one task: no uncaught errors", sameTask.log.uncaught.length === 0, sameTask.log.uncaught.join(" | "));
+    await sameTask.page.close();
+
+    // A page whose canvas cannot be made is not asked of the worker in a loop.
+    const noCanvas = await open(browser, base, "/", {
+      hooks: true,
+      height: 2400,
+      init: [
+        () => {
+          const append = Node.prototype.appendChild;
+          Node.prototype.appendChild = function (child) {
+            if (child instanceof HTMLCanvasElement && child.dataset.page === window.__noCanvasFor) throw new DOMException("refused by the test");
+            return append.call(this, child);
+          };
+        },
+      ],
+    });
+    await waitAttr(noCanvas.page, "data-wordcraft-painted", "true");
+    const quiet = await noCanvas.page.evaluate(async (doc) => {
+      window.__noCanvasFor = "1";
+      await window.wordcraftViewer.open(new Uint8Array(doc));
+      await new Promise((r) => setTimeout(r, 2000));
+      const renders = () => window.__posted.filter((h) => h.includes('"viewRender"')).length;
+      const before = renders();
+      await new Promise((r) => setTimeout(r, 1000));
+      return { rendersInASecond: renders() - before, page0: document.querySelector('#wordcraft_viewer canvas[data-page="0"]')?.hasAttribute("data-scale") ?? false };
+    }, long);
+    check("a page whose canvas cannot be made is not rendered in a loop", quiet.rendersInASecond === 0 && quiet.page0, JSON.stringify(quiet));
+    await noCanvas.page.close();
   }
 
   // ---- the modes a host can choose ----
