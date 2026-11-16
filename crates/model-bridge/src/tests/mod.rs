@@ -1,5 +1,6 @@
 //! The typed mapping against the JSON bridge it replaced, on a corpus that sets every member.
 
+mod depth;
 mod json_bridge;
 mod sample;
 mod samples;
@@ -272,7 +273,7 @@ fn numbers_that_are_not_finite_convert_as_they_did() {
         let mut shared = wm::Document::new();
         shared.last_section.page_w = bad;
         assert!(read_both("page width", &shared).is_none(), "{bad}: a page width is refused");
-        assert_eq!(from_shared(shared).err(), Some(crate::NotFinite));
+        assert_eq!(from_shared(shared).err(), Some(crate::Error::NotFinite));
 
         // An optional one: dropped.
         let mut shared = wm::Document::from_text("a");

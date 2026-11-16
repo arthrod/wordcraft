@@ -10,13 +10,15 @@
 //!
 //! It replaced a bridge that sent every leaf value through `serde_json`. What that bridge did
 //! with a value is kept, including where it was strict: a number that is not finite is an error
-//! ([`NotFinite`]) unless it is optional, in which case it becomes `None`.
+//! ([`Error::NotFinite`]) unless it is optional, in which case it becomes `None`. A document nested
+//! deeper than the conversion can recurse is an error too ([`Error::TooDeep`]; see `nesting.rs`).
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 // `convert_types!` walks members one at a time; the widest structs here have more than sixty.
 #![recursion_limit = "256"]
 
 mod json;
 mod mapping;
+mod nesting;
 mod session;
 mod stories;
 
@@ -44,40 +46,59 @@ impl Floats for Bridge {
     }
 }
 
-/// A number that is not finite was in a place where it cannot be dropped or replaced.
+/// Why a conversion was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NotFinite;
+pub enum Error {
+    /// A number that is not finite was in a place where it cannot be dropped or replaced.
+    NotFinite,
+    /// Tables, groups or equation structures nest deeper than the conversion takes.
+    TooDeep,
+}
 
-impl std::fmt::Display for NotFinite {
+impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("shared model conversion: a number is not finite")
+        f.write_str(match self {
+            Error::NotFinite => "shared model conversion: a number is not finite",
+            Error::TooDeep => "shared model conversion: tables, groups or equations are nested too deep",
+        })
     }
 }
 
-impl std::error::Error for NotFinite {}
+impl std::error::Error for Error {}
 
 /// A document read by a shared format crate, as WordCraft's. The source is consumed: text and
 /// formatting are moved, and pictures and opaque parts keep their buffers.
 ///
 /// `fit_state` is left empty; it is not part of the shared model (`wordcraft-docx` reads it from
 /// a custom XML part).
-pub fn from_shared(source: craft_wordmodel::Document) -> Result<wordcraft_doc::Document, NotFinite> {
+///
+/// A document nested deeper than the limits in `nesting.rs` is refused, and taken apart without
+/// recursing.
+pub fn from_shared(source: craft_wordmodel::Document) -> Result<wordcraft_doc::Document, Error> {
+    if !nesting::shared::within(&source) {
+        nesting::shared::dismantle(source);
+        return Err(Error::TooDeep);
+    }
     session::checked(|| stories::document_from_shared(source))
 }
 
 /// WordCraft's document for a shared format crate to write. Pictures and opaque parts share
-/// their buffers with `source`.
-pub fn to_shared(source: &wordcraft_doc::Document) -> Result<craft_wordmodel::Document, NotFinite> {
+/// their buffers with `source`. A document nested deeper than the limits in `nesting.rs` is
+/// refused.
+pub fn to_shared(source: &wordcraft_doc::Document) -> Result<craft_wordmodel::Document, Error> {
+    if !nesting::own::within(source) {
+        return Err(Error::TooDeep);
+    }
     session::checked(|| stories::document_to_shared(source))
 }
 
 /// A chart's description, for the shared crate to draw or write.
-pub fn chart_to_shared(spec: &wordcraft_doc::chart::ChartSpec) -> Result<craft_wordmodel::chart::ChartSpec, NotFinite> {
+pub fn chart_to_shared(spec: &wordcraft_doc::chart::ChartSpec) -> Result<craft_wordmodel::chart::ChartSpec, Error> {
     session::checked(|| ConvertRef::<_, Bridge>::convert_ref(spec))
 }
 
 /// A SmartArt description, for the shared crate to draw.
-pub fn smart_art_to_shared(spec: &wordcraft_doc::smart_art::SmartArtSpec) -> Result<craft_wordmodel::smart_art::SmartArtSpec, NotFinite> {
+pub fn smart_art_to_shared(spec: &wordcraft_doc::smart_art::SmartArtSpec) -> Result<craft_wordmodel::smart_art::SmartArtSpec, Error> {
     session::checked(|| ConvertRef::<_, Bridge>::convert_ref(spec))
 }
 
@@ -87,12 +108,12 @@ pub fn theme_to_shared(theme: &[wordcraft_doc::Rgb]) -> Vec<craft_wordmodel::pro
 }
 
 /// What the shared crate drew for a chart or SmartArt.
-pub fn graphic_items_from_shared(items: Vec<craft_wordmodel::graphic::GraphicItem>) -> Result<Vec<wordcraft_doc::graphic::GraphicItem>, NotFinite> {
+pub fn graphic_items_from_shared(items: Vec<craft_wordmodel::graphic::GraphicItem>) -> Result<Vec<wordcraft_doc::graphic::GraphicItem>, Error> {
     session::checked(|| Convert::<_, Bridge>::convert(items))
 }
 
 /// Bibliography sources read by the shared crate.
-pub fn sources_from_shared(sources: Vec<craft_wordmodel::Source>) -> Result<Vec<wordcraft_doc::Source>, NotFinite> {
+pub fn sources_from_shared(sources: Vec<craft_wordmodel::Source>) -> Result<Vec<wordcraft_doc::Source>, Error> {
     session::checked(|| Convert::<_, Bridge>::convert(sources))
 }
 
