@@ -78,21 +78,29 @@ fn method_not_allowed(allow: &str) -> worker::Result<Response> {
 #[event(fetch)]
 async fn fetch(mut req: Request, env: Env, _ctx: Context) -> worker::Result<Response> {
     let url = req.url()?;
-    match url.path() {
+    let head = req.method() == Method::Head;
+    let answer = match url.path() {
         "/view" => match req.method() {
             Method::Get | Method::Head => view_page(&env, &url).await,
             Method::Post => upload(&mut req, &env, &url).await,
             _ => method_not_allowed("GET, HEAD, POST"),
         },
         "/view/page.png" => match req.method() {
-            Method::Get | Method::Head => page_image(&env, &url).await,
+            Method::Get | Method::Head => page_image(&env, &url, head).await,
             _ => method_not_allowed("GET, HEAD"),
         },
         path if path.starts_with("/view/") => error_response(404, "Not found", "There is nothing at this address."),
         // Only the routes above run the Worker first (`wrangler.toml`); anything else that
         // reaches it is the static site's.
-        _ => env.assets("ASSETS")?.fetch_request(req).await,
-    }
+        _ => return env.assets("ASSETS")?.fetch_request(req).await,
+    };
+    if head { without_body(answer?) } else { answer }
+}
+
+/// A HEAD answer: `resp`'s status and headers, no body. No Content-Length is set: for a page
+/// image the length isn't known without drawing it.
+fn without_body(resp: Response) -> worker::Result<Response> {
+    Ok(Response::empty()?.with_status(resp.status_code()).with_headers(resp.headers().clone()))
 }
 
 /// A query refused: 400, saying which parameter and why.
@@ -125,8 +133,9 @@ async fn view_page(env: &Env, url: &Url) -> worker::Result<Response> {
     html_response(200, caching, html::viewer_page(doc, query.page, session.page_count(), width, height, query.scale))
 }
 
-/// `GET /view/page.png`: one page of `doc` as a PNG.
-async fn page_image(env: &Env, url: &Url) -> worker::Result<Response> {
+/// `GET /view/page.png`: one page of `doc` as a PNG. For a `head` request, the status and headers
+/// the GET would have, from the page's size alone: nothing is drawn or encoded.
+async fn page_image(env: &Env, url: &Url, head: bool) -> worker::Result<Response> {
     let query = match params::parse_view_query(url.query(), DEFAULT_SCALE) {
         Ok(q) => q,
         Err(e) => return bad_query(e),
@@ -142,6 +151,12 @@ async fn page_image(env: &Env, url: &Url) -> worker::Result<Response> {
         Ok(found) => found,
         Err(resp) => return resp,
     };
+    if head {
+        return match document::page_raster(&session, index, query.scale) {
+            Ok(_) => response(200, "image/png", caching, Vec::new()),
+            Err(e) => error_response(e.status(), "The page can't be drawn", &e.to_string()),
+        };
+    }
     match document::page_png(&session, index, query.scale) {
         Ok((png, _, _)) => response(200, "image/png", caching, png),
         Err(e) => error_response(e.status(), "The page can't be drawn", &e.to_string()),

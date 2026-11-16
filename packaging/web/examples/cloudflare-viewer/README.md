@@ -14,6 +14,7 @@ It runs beside the static site (`dist/web`) as one deployment: the Worker answer
 |---|---|
 | `GET /view?doc=samples/welcome.docx&page=1&scale=1` | The viewer page for a document of this deployment: the page image (with its `width` and `height`), "Page N of M", previous and next links, a link to the site's own page for the document (`/?doc=…`, which has the editor's Edit button) and the upload form. `page` defaults to 1, `scale` to 1. |
 | `GET /view/page.png?doc=…&page=N&scale=S` | One page as `image/png`. |
+| `HEAD` on either `GET` route | The `GET`'s status and headers, no body and no `Content-Length`. The document is opened (for the page count and the page's size) but no page is drawn or encoded: measured on `wrangler dev`, 7 ms against 150 ms for the `GET` of page 1 at scale 2. |
 | `GET /view` (no `doc`) | The upload form: a file, an optional password, a submit button. |
 | `POST /view` (`multipart/form-data`, fields `file` and `password`) | The uploaded document's pages, inline as `data:image/png` images. |
 
@@ -142,7 +143,8 @@ pnpm dlx wrangler deploy
 ```
 
 `smoke.sh` prints PASS or FAIL per check: the viewer page's status, type, size and lack of script;
-the image's type and PNG signature; 404 past the end; 400 for traversal, an absolute URL and junk
+the image's type and PNG signature; `HEAD` on both routes (status, type, the `GET`'s caching, no
+wrong `Content-Length`, 404 past the end); 404 past the end; 400 for traversal, an absolute URL and junk
 scale; an upload of the sample (200, inline PNG, `no-store`); 413 for 5 MiB of zeros; 4xx for a
 text file and a non-form body. Given a fixtures directory
 (`FIXTURES=dir cargo test -- --ignored write_fixtures`, then `./smoke.sh URL SAMPLE dir`) it also

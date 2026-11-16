@@ -67,6 +67,30 @@ check "page image is 200 (got $status)" [ "$status" = 200 ]
 check "page image is image/png" has_type png '^image/png'
 check "page image has the PNG signature" [ "$signature" = 89504e470d0a1a0a ]
 
+# 2b. HEAD: the GET's status and headers, no body, and no Content-Length the body wouldn't have.
+head_of() { # head_of <name> <url>: headers to $work/<name>.head; prints the status code
+  curl -sS -I -o /dev/null -D "$work/$1.head" -w '%{http_code}' "$2"
+}
+length_absent_or() { # length_absent_or <name> <bytes>
+  local len
+  len=$(header "$1" Content-Length)
+  [ -z "$len" ] || [ "$len" = "$2" ]
+}
+status=$(head_of headpng "$base$img")
+check "HEAD on the page image is 200 (got $status)" [ "$status" = 200 ]
+check "HEAD on the page image is image/png" has_type headpng '^image/png'
+check "HEAD on the page image has the GET's Cache-Control" [ "$(header headpng Cache-Control)" = "$(header png Cache-Control)" ]
+check "HEAD on the page image has no wrong Content-Length ($(header headpng Content-Length))" length_absent_or headpng "$png_bytes"
+status=$(head_of headview "$base/view?doc=samples/welcome.docx&page=1")
+check "HEAD on the viewer page is 200 (got $status)" [ "$status" = 200 ]
+check "HEAD on the viewer page is HTML" has_type headview '^text/html'
+check "HEAD on the viewer page has no wrong Content-Length ($(header headview Content-Length))" length_absent_or headview "$view_bytes"
+status=$(head_of headp999 "$base/view/page.png?doc=samples/welcome.docx&page=999")
+check "HEAD on page 999's image is 404 (got $status)" [ "$status" = 404 ]
+big="$base/view/page.png?doc=samples/welcome.docx&page=1&scale=2"
+get_time=$(curl -sS -o /dev/null -w '%{time_total}' "$big")
+head_time=$(curl -sS -I -o /dev/null -w '%{time_total}' "$big")
+
 # 3. Out of range and hostile parameters.
 status=$(fetch p999 "$base/view?doc=samples/welcome.docx&page=999")
 check "page 999 is 404 (got $status)" [ "$status" = 404 ]
@@ -123,6 +147,7 @@ fi
 echo
 echo "viewer HTML: $view_bytes bytes; page 1 PNG: $png_bytes bytes; total: $((view_bytes + png_bytes)) bytes"
 echo "upload result for the sample: $(wc -c < "$work/up.body" | tr -d ' ') bytes"
+echo "page 1 at scale 2: GET ${get_time}s, HEAD ${head_time}s"
 
 [ "$failures" -eq 0 ] || { echo "$failures check(s) failed"; exit 1; }
 echo "all checks passed"
