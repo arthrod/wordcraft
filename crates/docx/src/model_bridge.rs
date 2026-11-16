@@ -1,29 +1,9 @@
-//! Bounded conversion between craft-wordmodel and WordCraft's document model.
+//! WordCraft's document to and from the shared model: `wordcraft-model-bridge` converts the model,
+//! and the Fit One Page budget, which only WordCraft's model has, travels in a custom XML part.
 
 use std::sync::Arc;
 
 use craft_docx::DocxError;
-use serde::Serialize;
-use serde::de::DeserializeOwned;
-
-pub(crate) fn convert<T, U>(value: T) -> Result<U, DocxError>
-where
-    T: Serialize,
-    U: DeserializeOwned,
-{
-    let bytes = serde_json::to_vec(&value).map_err(|error| DocxError::Xml(format!("shared model conversion: {error}")))?;
-    drop(value);
-    serde_json::from_slice(&bytes).map_err(|error| DocxError::Xml(format!("shared model conversion: {error}")))
-}
-
-pub(crate) fn convert_ref<T, U>(value: &T) -> Result<U, DocxError>
-where
-    T: Serialize + ?Sized,
-    U: DeserializeOwned,
-{
-    let bytes = serde_json::to_vec(value).map_err(|error| DocxError::Xml(format!("shared model conversion: {error}")))?;
-    serde_json::from_slice(&bytes).map_err(|error| DocxError::Xml(format!("shared model conversion: {error}")))
-}
 
 /// Converts the shared reader's model without copying the full document or its embedded media.
 pub fn from_shared_model(mut source: craft_wordmodel::Document) -> Result<wordcraft_doc::Document, DocxError> {
