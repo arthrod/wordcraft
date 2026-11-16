@@ -787,7 +787,11 @@ fn load_system_fonts(ctx: egui::Context, messages: Rc<RefCell<Vec<String>>>) {
         let query_fn = match js_sys::Reflect::get(&window, &wasm_bindgen::JsValue::from_str("queryLocalFonts")) {
             Ok(val) if val.is_function() => js_sys::Function::from(val),
             _ => {
-                messages.borrow_mut().push(wordcraft_ui_egui::i18n::t("Local font access is not supported by your browser.").to_string());
+                // Firefox and Safari have no Local Font Access API. Say what does work there.
+                messages.borrow_mut().push(
+                    wordcraft_ui_egui::i18n::t("This browser cannot list installed fonts (Chrome and Edge can). Use Add Font… to load a font file.")
+                        .to_string(),
+                );
                 ctx.request_repaint();
                 return;
             }
@@ -859,12 +863,19 @@ fn load_system_fonts(ctx: egui::Context, messages: Rc<RefCell<Vec<String>>>) {
                 Err(e) => log::warn!("local font {name} skipped: {e}"),
             }
         }
-        if loaded > 0 {
-            let msg = wordcraft_ui_egui::i18n::fmt(wordcraft_ui_egui::i18n::t("Loaded {count} system fonts."), &[("count", &loaded.to_string())]);
-            messages.borrow_mut().push(msg);
-        } else {
-            messages.borrow_mut().push(wordcraft_ui_egui::i18n::t("All system fonts are already available.").to_string());
-        }
+        use crate::font_pack_manifest::{SystemFontsNotice, system_fonts_notice};
+        let msg = match system_fonts_notice(len as usize, loaded) {
+            SystemFontsNotice::Loaded(count) => {
+                wordcraft_ui_egui::i18n::fmt(wordcraft_ui_egui::i18n::t("Loaded {count} system fonts."), &[("count", &count.to_string())])
+            }
+            SystemFontsNotice::NothingNew => wordcraft_ui_egui::i18n::t("All system fonts are already available.").to_string(),
+            // A browser that was refused access answers with an empty list, not an error.
+            SystemFontsNotice::NoneListed => wordcraft_ui_egui::i18n::t(
+                "The browser listed no installed fonts. Allow font access for this site, or use Add Font… to load a font file.",
+            )
+            .to_string(),
+        };
+        messages.borrow_mut().push(msg);
         ctx.request_repaint();
     });
 }
