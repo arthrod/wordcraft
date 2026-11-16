@@ -89,6 +89,19 @@ stage_complete() {
 # Copy the hashed Trunk static build into the stage under the un-hashed names a
 # `--filehash=false` build emits. The glue resolves `wordcraft-web_bg.wasm`
 # (un-hashed) at runtime, so renaming is byte-safe.
+# The file name of the first path given that exists. Called with a glob: a pattern that
+# matches nothing stays as it is, names no file, and so prints nothing.
+first_name() {
+  local path
+  for path in "$@"; do
+    if [ -e "$path" ]; then
+      basename "$path"
+      return 0
+    fi
+  done
+  return 1
+}
+
 seed_stage_from_static() {
   local src="$STATIC_DIST" dest="$SMOKE_DIST/npm"
   rm -rf "$dest"
@@ -100,9 +113,9 @@ seed_stage_from_static() {
     /bin/cp -f "$src/wordcraft-web.js" "$src/wordcraft-web_bg.wasm" "$src/wordcraft-web.d.ts" "$dest/"
   else
     local glue wasm dts
-    glue="$(basename "$(ls "$src"/wordcraft-web-*.js | grep -v '\.d\.ts$' | head -n1)")"
-    wasm="$(basename "$(ls "$src"/wordcraft-web-*_bg.wasm | head -n1)")"
-    dts="$(basename "$(ls "$src"/wordcraft-web-*.d.ts | head -n1)")"
+    glue="$(first_name "$src"/wordcraft-web-*.js)"
+    wasm="$(first_name "$src"/wordcraft-web-*_bg.wasm)"
+    dts="$(first_name "$src"/wordcraft-web-*.d.ts)"
     /bin/cp -f "$src/$glue" "$dest/wordcraft-web.js"
     /bin/cp -f "$src/$wasm" "$dest/wordcraft-web_bg.wasm"
     /bin/cp -f "$src/$dts" "$dest/wordcraft-web.d.ts"
@@ -168,7 +181,8 @@ prepare_tarball() {
 }
 
 build_fixture() {
-  local name="$1" dir="$FIXTURES_DIR/$name"
+  local name="$1"
+  local dir="$FIXTURES_DIR/$name"
   echo "=== fixture: $name"
   # --allow-build: pnpm 12 makes unapproved dependency build scripts a hard error; esbuild's
   # postinstall is the only one the matrix pulls (its platform binary; the settings files in
