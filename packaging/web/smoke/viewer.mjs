@@ -59,6 +59,7 @@ async function open(browser, base, path, { blocked = null, stalled = null, noWeb
   const page = await browser.newPage();
   await page.setViewport({ width, height, deviceScaleFactor: 1 });
   const log = { requests: [], consoleErrors: [], uncaught: [] };
+  const held = [];
   // Every Content-Security-Policy violation on the page (AC6).
   await page.evaluateOnNewDocument(() => {
     window.__cspViolations = [];
@@ -86,7 +87,8 @@ async function open(browser, base, path, { blocked = null, stalled = null, noWeb
       const path = new URL(r.url()).pathname;
       if (blocked?.test(path)) r.respond({ status: 404, body: "not found" });
       else if (!stalled?.test(path)) r.continue();
-      // A stalled request is left unanswered.
+      else held.push(r); // unanswered until the case releases it
+
     });
   }
   if (noWebGl) {
@@ -98,7 +100,7 @@ async function open(browser, base, path, { blocked = null, stalled = null, noWeb
     });
   }
   await page.goto(`${base}${path}`, { waitUntil: "load" });
-  return { page, log };
+  return { page, log, held };
 }
 
 const attr = (page, name) => page.evaluate((n) => document.documentElement.getAttribute(n), name);
@@ -303,6 +305,19 @@ try {
     console.log(`editor wasm stalled (wait ${waitMs} ms, gave up after ${waited} ms):`, JSON.stringify(state));
     check("AC5 editor download stalls: the wait ends in the viewer with a notice", state.phase === "viewer-only" && state.reason === "timed-out" && state.painted > 0 && state.notice.length > 0);
     check("AC5 editor download stalls: not before the wait", waited >= waitMs - 100, `${waited} ms`);
+    // The download then finishes: the late editor takes over instead of running unseen.
+    for (const r of stall.held.splice(0)) await r.continue();
+    await waitAttr(stall.page, "data-wordcraft-phase", "editing", 120000).catch(() => {});
+    const late = await stall.page.evaluate(async () => ({
+      phase: document.documentElement.getAttribute("data-wordcraft-phase"),
+      notice: document.documentElement.getAttribute("data-wordcraft-notice"),
+      viewer: !!document.querySelector("#wordcraft_viewer"),
+      // An editor running hidden with no document rejects: report that, not a crash.
+      markdown: await Promise.resolve(window.wordcraft?.getMarkdown?.()).catch((e) => `rejected: ${e?.message ?? e}`),
+    }));
+    console.log("editor download answered late:", JSON.stringify({ ...late, markdown: String(late.markdown).slice(0, 40) }));
+    check("AC5 editor download answered late: the editor takes over, notice cleared, viewer gone", late.phase === "editing" && late.notice === null && !late.viewer, JSON.stringify({ ...late, markdown: undefined }));
+    check("AC5 editor download answered late: it shows the same document", typeof late.markdown === "string" && late.markdown.includes(SAMPLE_TEXT));
     check("AC5 editor download stalls: no uncaught error", stall.log.uncaught.length === 0, stall.log.uncaught.join(" | "));
     await stall.page.close();
   }
@@ -335,6 +350,8 @@ try {
     }, locked);
     const ask = () =>
       prot.page.evaluate(() => ({
+        edit: (document.querySelector("#wordcraft_viewer_edit")?.getClientRects().length ?? 0) > 0,
+        notice: document.querySelector("#wordcraft_viewer_notice")?.hidden === false ? document.querySelector("#wordcraft_viewer_notice").innerText : null,
         error: document.documentElement.getAttribute("data-wordcraft-error"),
         // Shown, not merely without the attribute: the form must take no space when hidden.
         form: (document.querySelector("#wordcraft_viewer_password")?.getClientRects().length ?? 0) > 0,
@@ -345,6 +362,24 @@ try {
     console.log("protected document:", opened, JSON.stringify(first));
     check("password: open() of a protected document rejects", opened.startsWith("rejected:"), opened);
     check("password: the in-page form is shown and focused", first.error === "password-required" && first.form && first.focused === "wordcraft_viewer_password_input", JSON.stringify(first));
+    // No edit action while the password is asked for: Edit is gone, and a double click,
+    // Enter, F2 and edit() do nothing (no editor file is fetched).
+    const before = prot.log.requests.length;
+    await prot.page.click("#wordcraft_viewer [role=document]", { clickCount: 2 });
+    await prot.page.focus("#wordcraft_viewer [role=document]");
+    await prot.page.keyboard.press("Enter");
+    await prot.page.keyboard.press("F2");
+    await prot.page.evaluate(() => window.wordcraftViewer.edit());
+    await new Promise((r) => setTimeout(r, 1500));
+    const lockedState = await ask();
+    check("password: no edit action while it is asked for", !lockedState.edit && (await attr(prot.page, "data-wordcraft-phase")) === "viewing" && !prot.log.requests.slice(before).some((p) => EDITOR.test(p)), JSON.stringify(lockedState));
+    // Cancel: the form goes, the notice says the document is protected, editing stays withdrawn.
+    await prot.page.click("#wordcraft_viewer_password_cancel");
+    const cancelled = await ask();
+    check("password: Cancel leaves a 'protected' notice and no Edit", !cancelled.form && /protected/i.test(cancelled.notice ?? "") && !cancelled.edit, JSON.stringify(cancelled));
+    // Opened again, it asks again.
+    await prot.page.evaluate((bytes) => window.wordcraftViewer.open(new Uint8Array(bytes)).catch(() => {}), locked);
+    await prot.page.waitForFunction(() => (document.querySelector("#wordcraft_viewer_password")?.getClientRects().length ?? 0) > 0, { timeout: 20000 }).catch(() => {});
     await prot.page.type("#wordcraft_viewer_password_input", "guess");
     await prot.page.keyboard.press("Enter");
     await waitAttr(prot.page, "data-wordcraft-error", "wrong-password", 20000).catch(() => {});
@@ -357,6 +392,7 @@ try {
       .catch(() => {});
     const right = await ask();
     check("password: the right password shows the document and hides the form", right.error === null && !right.form && right.painted > 0, JSON.stringify(right));
+    check("password: Edit comes back once the document is open", right.edit, JSON.stringify(right));
     check("password: no browser dialog was used", (await prot.page.evaluate(() => window.__prompts.length)) === 0);
     // The editor gets the document with its password.
     await prot.page.click("#wordcraft_viewer_edit");

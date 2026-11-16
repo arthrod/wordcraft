@@ -107,9 +107,9 @@ without it the byte-for-byte page comparison is skipped and says so.
 | AC2 first page | page 0's canvas is not blank and holds exactly the RGBA the core returns for that page at the canvas's scale |
 | AC3 edit action | the Edit control fetches the editor, which shows the same document, takes typing, and the viewer is gone |
 | AC4 sizes | raw / gzip -9 / Brotli q11 of every file in the first load and in the edit step |
-| AC5 no editor | without WebGL, with the editor's glue or wasm answered 404, or with its wasm download never answered (a 3 s `data-editor-wait-ms`), the viewer stays with a notice and nothing is thrown uncaught |
+| AC5 no editor | without WebGL, with the editor's glue or wasm answered 404, or with its wasm download never answered (a 3 s `data-editor-wait-ms`), the viewer stays with a notice and nothing is thrown uncaught; that download answered late, the editor takes over (notice cleared, same document) |
 | AC6 CSP | no `securitypolicyviolation` on the page under `_headers`' policy |
-| password | a document the editor encrypted (`file.encrypt`, `exportDocx`): `open()` rejects, the in-page form asks (focused), a wrong password asks again, the right one shows the pages, no `window.prompt`, and the editor opens it on Edit |
+| password | a document the editor encrypted (`file.encrypt`, `exportDocx`): `open()` rejects, the in-page form asks (focused) and Edit, double click, Enter, F2 and `edit()` do nothing, Cancel leaves a "protected" notice, a wrong password asks again, the right one shows the pages, no `window.prompt`, and the editor opens it on Edit |
 | modes | `?mode=view` never offers or loads the editor; `?mode=edit` loads it at once; `?mode=edit` without WebGL falls back to the viewer |
 | `?host=parent` | in a same-origin iframe the editor announces `wordcraft:ready` and owns the frame; without WebGL it is still fetched and posts `wordcraft:failed`; neither fetches the viewer worker or a sample |
 
