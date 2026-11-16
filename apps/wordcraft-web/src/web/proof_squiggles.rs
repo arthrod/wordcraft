@@ -390,6 +390,10 @@ mod tests {
         session.run("edit.undo", &serde_json::json!({})).unwrap();
         assert_eq!(session.doc.para(StoryRef::Body, &path).unwrap().text, "aaa");
         SCHED.with(|s| s.borrow_mut().ticks = PATHS_REFRESH - 1);
+        let (_, sends) = pump(&session);
+        assert!(sends.iter().any(|(_, req, _, _, _)| req.text == "aaa"), "the restored text was not re-checked");
+    }
+
     /// Pumps until the single-paragraph document's check is sent, queues a clean reply for it
     /// and pumps once more to apply it, leaving the tracked entry complete (not pending).
     /// Returns the paragraph's path and the request that went out.
