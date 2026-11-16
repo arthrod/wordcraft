@@ -84,6 +84,13 @@ function startServer(distDir, pkgDir) {
   });
 }
 
+// The executable basenames a puppeteer cache install can hold: `chrome` and
+// `chrome-headless-shell` on Linux, and `Google Chrome for Testing` inside the
+// macOS app bundle (`…/Google Chrome for Testing.app/Contents/MacOS/`).
+export function isChromeExecutable(path) {
+  return /(?:^|\/)(?:chrome|chrome-headless-shell|Google Chrome for Testing)$/.test(path);
+}
+
 function findChrome() {
   const candidates = [process.env.CHROME_PATH];
   if (process.platform === "darwin") {
@@ -103,7 +110,7 @@ function findChrome() {
       const base = join(cache, dir);
       const found = readdirSync(base, { recursive: true })
         .map((f) => join(base, f.toString()))
-        .find((f) => /(?:^|\/)(?:chrome|chrome-headless-shell)$/.test(f.toString()));
+        .find((f) => isChromeExecutable(f.toString()));
       if (found && existsSync(found)) return found;
     }
   }
