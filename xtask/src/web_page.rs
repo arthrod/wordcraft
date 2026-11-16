@@ -29,13 +29,19 @@ pub(crate) fn without_comments(html: &str) -> String {
 
 /// The glue module the page's inline bootstrap imports (`import init, * as bindings from
 /// './NAME.js'`), as a path relative to the page. Comments are skipped: the page's own notes
-/// quote the editor's `import init from './wordcraft-web.js'`, which is not the bootstrap.
+/// quote the editor's `import init from './wordcraft-web.js'`, which is not the bootstrap. The
+/// `from` clause is read as JavaScript reads it, not as Trunk happens to print it: any
+/// whitespace or none before the quote (`from"./x.js"`, as a minifier writes it), either quote.
 fn main_glue(html: &str) -> Option<String> {
     let live = without_comments(html);
     let at = live.find("import init")?;
     let rest = live.get(at..)?;
-    let from = rest.find(" from ")?;
-    let quoted = rest.get(from.saturating_add(" from ".len())..)?.trim_start();
+    let quoted = rest.match_indices("from").find_map(|(i, _)| {
+        let before = rest.get(..i)?.chars().next_back();
+        let after = rest.get(i.saturating_add("from".len())..)?.trim_start();
+        let keyword = !before.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$');
+        (keyword && after.starts_with(['\'', '"'])).then_some(after)
+    })?;
     let quote = quoted.chars().next().filter(|c| *c == '\'' || *c == '"')?;
     let inner = quoted.get(1..)?;
     let end = inner.find(quote)?;
@@ -121,6 +127,26 @@ mod tests {
         assert_eq!(main_glue("<script>import init from \"./a.js\";</script>").as_deref(), Some("a.js"));
         assert_eq!(main_glue("<html></html>"), None);
         assert_eq!(main_glue("import init from x"), None);
+    }
+
+    #[test]
+    fn the_bootstrap_is_found_however_the_from_clause_is_spaced() {
+        // What a minifier or a hand edit may write: no space before the quote, either quote, any
+        // whitespace, and a binding name that contains `from`.
+        for (html, want) in [
+            ("<script type=\"module\">import init,*as bindings from\"./page-1.js\";</script>", "page-1.js"),
+            ("<script>import init from'./page-2.js'</script>", "page-2.js"),
+            ("<script>import init from \"./page-3.js\"</script>", "page-3.js"),
+            ("<script>import init, * as bindings\n\tfrom\n\t'./page-4.js';</script>", "page-4.js"),
+            ("<script>import init, * as fromage from './page-5.js';</script>", "page-5.js"),
+            ("<script>import init,{from as f}from\"./page-6.js\"</script>", "page-6.js"),
+        ] {
+            assert_eq!(main_glue(html).as_deref(), Some(want), "{html}");
+        }
+        // `from` with no quoted path after it is no bootstrap.
+        for html in ["import init from", "import init from x", "import init, * as from_x", "import initfrom'./a.js'"] {
+            assert_eq!(main_glue(html), None, "{html}");
+        }
     }
 
     #[test]
