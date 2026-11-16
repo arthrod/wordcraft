@@ -16,11 +16,13 @@
 //   AC3  after the edit action the editor is fetched, shows the same document and
 //        accepts typing; the viewer is gone
 //   AC4  transfer sizes (raw, gzip -9, Brotli q11) of the first load and of the edit step
-//   AC5  without WebGL, or with the editor's glue missing, the viewer stays, a notice
+//   AC5  without WebGL, with the editor's glue or wasm missing, or with its download stalled
+//        past the wait (editorWaitMs / data-editor-wait-ms), the viewer stays, a notice
 //        shows, and nothing is thrown uncaught
 //   AC6  served with the deployed Content-Security-Policy (`_headers`, plus the inline
 //        bootstrap's hash as `package.sh` adds it), nothing is refused
-//   and the three modes a host can choose (view, viewer-first, edit).
+//   and the three modes a host can choose (view, viewer-first, edit), a protected document
+//   (the password asked in the page), and the editor's parent bridge (?host=parent).
 //
 // Tooling-script JavaScript, like drive.mjs (see README.md).
 
@@ -50,8 +52,10 @@ function check(name, ok, detail = "") {
 }
 
 // A page with its network log, console errors and uncaught errors recorded. `blocked`
-// answers matching URLs with 404; `noWebGl` makes every canvas refuse a WebGL context.
-async function open(browser, base, path, { blocked = null, noWebGl = false, width = 1280, height = 800 } = {}) {
+// answers matching URLs with 404; `stalled` never answers them (a download that hangs);
+// `noWebGl` makes every canvas refuse a WebGL context; `rootAttrs` are set on
+// #wordcraft_viewer as the parser inserts it, before the page module starts.
+async function open(browser, base, path, { blocked = null, stalled = null, noWebGl = false, rootAttrs = null, width = 1280, height = 800 } = {}) {
   const page = await browser.newPage();
   await page.setViewport({ width, height, deviceScaleFactor: 1 });
   const log = { requests: [], consoleErrors: [], uncaught: [] };
@@ -59,13 +63,31 @@ async function open(browser, base, path, { blocked = null, noWebGl = false, widt
   await page.evaluateOnNewDocument(() => {
     window.__cspViolations = [];
     addEventListener("securitypolicyviolation", (e) => window.__cspViolations.push(`${e.effectiveDirective} ${e.blockedURI}`));
+    // The viewer must never block on a browser dialog: record any call.
+    window.__prompts = [];
+    window.prompt = (...a) => (window.__prompts.push(a.join(" ")), null);
   });
+  if (rootAttrs) {
+    await page.evaluateOnNewDocument((attrs) => {
+      new MutationObserver((_, observer) => {
+        const root = document.getElementById("wordcraft_viewer");
+        if (!root) return;
+        for (const [k, v] of Object.entries(attrs)) root.setAttribute(k, v);
+        observer.disconnect();
+      }).observe(document, { childList: true, subtree: true });
+    }, rootAttrs);
+  }
   page.on("request", (r) => log.requests.push(new URL(r.url()).pathname));
   page.on("console", (m) => m.type() === "error" && log.consoleErrors.push(m.text()));
   page.on("pageerror", (e) => log.uncaught.push(String(e?.message ?? e)));
-  if (blocked) {
+  if (blocked || stalled) {
     await page.setRequestInterception(true);
-    page.on("request", (r) => (blocked.test(new URL(r.url()).pathname) ? r.respond({ status: 404, body: "not found" }) : r.continue()));
+    page.on("request", (r) => {
+      const path = new URL(r.url()).pathname;
+      if (blocked?.test(path)) r.respond({ status: 404, body: "not found" });
+      else if (!stalled?.test(path)) r.continue();
+      // A stalled request is left unanswered.
+    });
   }
   if (noWebGl) {
     await page.evaluateOnNewDocument(() => {
@@ -159,6 +181,7 @@ try {
   check("AC1 viewer worker fetched", ["_loader.js", ".js", "_bg.wasm"].every((s) => firstLoad.includes(`/wordcraft-worker-viewer${s}`)));
   check("AC1 no editor file fetched", !firstLoad.some((p) => EDITOR.test(p)), firstLoad.filter((p) => EDITOR.test(p)).join(" "));
   check("AC1 no proof, codecs or pdf worker fetched", !firstLoad.some((p) => OTHER_WORKERS.test(p)));
+  check("AC1 the password form takes no space until a document asks for one", await first.page.evaluate(() => document.querySelector("#wordcraft_viewer_password")?.getClientRects().length === 0));
   check("AC1 phase is viewing", (await attr(first.page, "data-wordcraft-phase")) === "viewing");
   check("AC1 no console or uncaught errors", first.log.consoleErrors.length + first.log.uncaught.length === 0, [...first.log.consoleErrors, ...first.log.uncaught].join(" | "));
   const firstViolations = await violations(first.page);
@@ -262,6 +285,89 @@ try {
     await miss.page.close();
   }
 
+  // The editor's download never finishes: the bounded wait ends in the notice.
+  {
+    const waitMs = 3000;
+    const stall = await open(browser, base, "/", { stalled: /\/wordcraft-web_bg\.wasm$/, rootAttrs: { "data-editor-wait-ms": String(waitMs) } });
+    await waitAttr(stall.page, "data-wordcraft-painted", "true");
+    const t0 = Date.now();
+    await stall.page.click("#wordcraft_viewer_edit");
+    await waitAttr(stall.page, "data-wordcraft-phase", "viewer-only", 30000).catch(() => {});
+    const waited = Date.now() - t0;
+    const state = await stall.page.evaluate(() => ({
+      phase: document.documentElement.getAttribute("data-wordcraft-phase"),
+      reason: document.documentElement.getAttribute("data-wordcraft-notice"),
+      notice: document.querySelector("#wordcraft_viewer_notice")?.innerText ?? "",
+      painted: document.querySelectorAll("#wordcraft_viewer canvas[data-scale]").length,
+    }));
+    console.log(`editor wasm stalled (wait ${waitMs} ms, gave up after ${waited} ms):`, JSON.stringify(state));
+    check("AC5 editor download stalls: the wait ends in the viewer with a notice", state.phase === "viewer-only" && state.reason === "timed-out" && state.painted > 0 && state.notice.length > 0);
+    check("AC5 editor download stalls: not before the wait", waited >= waitMs - 100, `${waited} ms`);
+    check("AC5 editor download stalls: no uncaught error", stall.log.uncaught.length === 0, stall.log.uncaught.join(" | "));
+    await stall.page.close();
+  }
+
+  // ---- a protected document: the password is asked for in the page ----
+  {
+    // The fixture: the sample, encrypted by the editor itself (file.encrypt, then exportDocx).
+    const PASSWORD = "open sesame";
+    const maker = await open(browser, base, "/?mode=edit");
+    await waitAttr(maker.page, "data-wordcraft-phase", "editing");
+    const locked = await maker.page.evaluate(async (password) => {
+      const sample = new Uint8Array(await (await fetch("samples/welcome.docx")).arrayBuffer());
+      await window.wordcraft.execute("file.new", {});
+      await window.wordcraft.loadDocx(sample);
+      await window.wordcraft.execute("file.encrypt", { password });
+      return Array.from(await window.wordcraft.exportDocx());
+    }, PASSWORD);
+    await maker.page.close();
+    check("password fixture: the editor wrote an encrypted package", locked.length > 0 && locked[0] === 0xd0 && locked[1] === 0xcf, `${locked.length} bytes`);
+
+    const prot = await open(browser, base, "/");
+    await waitAttr(prot.page, "data-wordcraft-painted", "true");
+    const opened = await prot.page.evaluate(async (bytes) => {
+      try {
+        await window.wordcraftViewer.open(new Uint8Array(bytes));
+        return "resolved";
+      } catch (e) {
+        return `rejected: ${e.message}`;
+      }
+    }, locked);
+    const ask = () =>
+      prot.page.evaluate(() => ({
+        error: document.documentElement.getAttribute("data-wordcraft-error"),
+        // Shown, not merely without the attribute: the form must take no space when hidden.
+        form: (document.querySelector("#wordcraft_viewer_password")?.getClientRects().length ?? 0) > 0,
+        focused: document.activeElement?.id ?? "",
+        painted: document.querySelectorAll("#wordcraft_viewer canvas[data-scale]").length,
+      }));
+    const first = await ask();
+    console.log("protected document:", opened, JSON.stringify(first));
+    check("password: open() of a protected document rejects", opened.startsWith("rejected:"), opened);
+    check("password: the in-page form is shown and focused", first.error === "password-required" && first.form && first.focused === "wordcraft_viewer_password_input", JSON.stringify(first));
+    await prot.page.type("#wordcraft_viewer_password_input", "guess");
+    await prot.page.keyboard.press("Enter");
+    await waitAttr(prot.page, "data-wordcraft-error", "wrong-password", 20000).catch(() => {});
+    const wrong = await ask();
+    check("password: a wrong password asks again", wrong.error === "wrong-password" && wrong.form, JSON.stringify(wrong));
+    await prot.page.type("#wordcraft_viewer_password_input", PASSWORD);
+    await prot.page.keyboard.press("Enter");
+    await prot.page
+      .waitForFunction(() => !document.documentElement.hasAttribute("data-wordcraft-error") && document.querySelectorAll("#wordcraft_viewer canvas[data-scale]").length > 0, { timeout: 30000 })
+      .catch(() => {});
+    const right = await ask();
+    check("password: the right password shows the document and hides the form", right.error === null && !right.form && right.painted > 0, JSON.stringify(right));
+    check("password: no browser dialog was used", (await prot.page.evaluate(() => window.__prompts.length)) === 0);
+    // The editor gets the document with its password.
+    await prot.page.click("#wordcraft_viewer_edit");
+    await waitAttr(prot.page, "data-wordcraft-phase", "editing", 120000).catch(() => {});
+    const handed = await prot.page.evaluate(() => window.wordcraft?.getMarkdown?.() ?? null);
+    const phase = await attr(prot.page, "data-wordcraft-phase");
+    check("password: the editor opens the protected document", phase === "editing" && typeof handed === "string" && handed.includes(SAMPLE_TEXT), `${phase} ${JSON.stringify(String(handed).slice(0, 60))}`);
+    check("password: no uncaught errors", prot.log.uncaught.length === 0, prot.log.uncaught.join(" | "));
+    await prot.page.close();
+  }
+
   // ---- the modes a host can choose ----
   const viewOnly = await open(browser, base, "/?mode=view");
   await waitAttr(viewOnly.page, "data-wordcraft-painted", "true");
@@ -281,6 +387,53 @@ try {
   await waitAttr(editorFirstNoGl.page, "data-wordcraft-painted", "true");
   check("mode=edit without WebGL mounts the viewer with the notice", (await attr(editorFirstNoGl.page, "data-wordcraft-notice")) === "no-webgl" && !editorFirstNoGl.log.requests.some((p) => EDITOR.test(p)) && editorFirstNoGl.log.uncaught.length === 0);
   await editorFirstNoGl.page.close();
+
+  // ---- the editor's parent bridge (?host=parent) is the editor's page ----
+  // A same-origin parent frames the app. As before the viewer existed: with WebGL the editor
+  // announces itself and owns the frame; without it the editor is still fetched and tells the
+  // parent it failed. Either way no sample is opened.
+  const frameApp = (page) =>
+    page.evaluate(
+      () =>
+        new Promise((done) => {
+          const seen = [];
+          addEventListener("message", (e) => {
+            seen.push(e.data?.type ?? String(e.data));
+            if (/^wordcraft:(failed|ready)$/.test(e.data?.type ?? "")) done(seen);
+          });
+          const frame = document.createElement("iframe");
+          frame.src = "/?host=parent";
+          frame.style.cssText = "width:1000px;height:700px;border:0";
+          document.body.append(frame);
+          setTimeout(() => done(seen), 60000);
+        }),
+    );
+  {
+    const parent = await open(browser, base, "/i18n/manifest.json");
+    const heard = await frameApp(parent.page);
+    const frame = parent.page.frames().find((f) => f !== parent.page.mainFrame());
+    await frame?.waitForFunction(() => document.documentElement.getAttribute("data-wordcraft-phase") === "editing", { timeout: 60000 }).catch(() => {});
+    const phase = await frame?.evaluate(() => document.documentElement.getAttribute("data-wordcraft-phase"));
+    await idle(parent.page);
+    const reqs = parent.log.requests;
+    console.log("?host=parent, the parent heard:", JSON.stringify(heard), "frame phase:", phase);
+    check("host=parent: the editor announces itself and owns the frame", heard.includes("wordcraft:ready") && phase === "editing", `${JSON.stringify(heard)} ${phase}`);
+    check("host=parent: no viewer worker and no sample", !reqs.some((p) => p.includes("wordcraft-worker-viewer") || p.includes("/samples/")));
+    check("host=parent: no uncaught errors", parent.log.uncaught.length === 0, parent.log.uncaught.join(" | "));
+    await parent.page.close();
+  }
+  {
+    const parent = await open(browser, base, "/i18n/manifest.json", { noWebGl: true });
+    const heard = await frameApp(parent.page);
+    await idle(parent.page);
+    const reqs = parent.log.requests;
+    console.log("?host=parent without WebGL, the parent heard:", JSON.stringify(heard));
+    check("host=parent without WebGL: the editor tells the parent it failed", heard.includes("wordcraft:failed"), JSON.stringify(heard));
+    check("host=parent: the editor is fetched and the viewer is not", reqs.some((p) => EDITOR.test(p)) && !reqs.some((p) => p.includes("wordcraft-worker-viewer")), reqs.filter((p) => /wordcraft-(web|worker-viewer)/.test(p)).join(" "));
+    check("host=parent: no sample is opened", !reqs.some((p) => p.includes("/samples/")));
+    check("host=parent without WebGL: no uncaught errors", parent.log.uncaught.length === 0, parent.log.uncaught.join(" | "));
+    await parent.page.close();
+  }
 } finally {
   await browser.close();
   server.close();
