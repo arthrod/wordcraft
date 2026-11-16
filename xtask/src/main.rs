@@ -27,6 +27,9 @@ commands:
   wasm            cargo check --target wasm32-unknown-unknown for the wasm-safe crates (one call)
   wasm-budget [--report-only]
                   check that dist/web/wordcraft-web*_bg.wasm meets the size and symbol budget
+  wasm-budget --viewer [--wasm <path>] [--report-only]
+                  check the view-only module alone (wordcraft-viewer_bg.wasm: size ceilings and
+                  forbidden crates); needs no web build
   wasm-attr [--wasm <path>] [--top <N> [--bucket <name>]] [--trait-impls]
                   attribute the wordcraft-web wasm code section per crate (decides cold-code
                   splitting); writes docs/plans/wasm-attribution.md. --top lists the N largest
@@ -62,6 +65,7 @@ fn main() -> ExitCode {
         Some("assets") => assets::run(&root()),
         Some("layers") => cmd_layers(),
         Some("wasm") => cmd_wasm(),
+        Some("wasm-budget") if rest.contains(&"--viewer") => wasm_budget::run_viewer(&root(), &rest),
         Some("wasm-budget") => wasm_budget::run(&root(), rest.contains(&"--report-only")),
         Some("wasm-attr") => wasm_attr::run(&root(), &rest),
         Some("brotli") => brotli::run(&rest),
