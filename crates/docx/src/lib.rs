@@ -43,7 +43,10 @@ pub struct ReadOptions<'a> {
 
 /// Read a package into WordCraft's document model.
 pub fn read(bytes: &[u8]) -> Result<wordcraft_doc::Document, DocxError> {
-    read_with(bytes, &Default::default())
+    // No options, so no chunk importer: reading straight through keeps the write direction of
+    // the model bridge (`to_shared_model`, which `read_with` holds for imported chunks) out of
+    // a build that only reads, such as the PDF export worker.
+    from_shared_model(craft_docx::read_with(bytes, &craft_docx::ReadOptions::default())?)
 }
 
 /// Read a package with a password.
