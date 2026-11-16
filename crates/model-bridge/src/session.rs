@@ -12,7 +12,7 @@ use craft_convert::Convert;
 use craft_wordmodel as wm;
 use wordcraft_doc as doc;
 
-use crate::{Bridge, NotFinite};
+use crate::{Bridge, Error};
 
 thread_local! {
     static NOT_FINITE: Cell<bool> = const { Cell::new(false) };
@@ -28,11 +28,11 @@ pub(crate) fn not_finite() {
 
 /// Run a conversion and refuse its result if a number that is not finite went through
 /// [`Bridge`]'s `Floats` meanwhile.
-pub(crate) fn checked<T>(convert: impl FnOnce() -> T) -> Result<T, NotFinite> {
+pub(crate) fn checked<T>(convert: impl FnOnce() -> T) -> Result<T, Error> {
     let before = NOT_FINITE.try_with(|seen| seen.replace(false)).unwrap_or(false);
     let value = convert();
     let seen = NOT_FINITE.try_with(|seen| seen.replace(before)).unwrap_or(false);
-    if seen { Err(NotFinite) } else { Ok(value) }
+    if seen { Err(Error::NotFinite) } else { Ok(value) }
 }
 
 /// Keeps one converted copy of each graphic while it lives.

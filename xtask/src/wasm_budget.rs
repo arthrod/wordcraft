@@ -132,8 +132,10 @@ pub const VIEWER_STEM: &str = "wordcraft-viewer";
 /// bin since. Measured again 2026-11-16 after `wordcraft_docx::read_with_password` stopped
 /// linking the write direction of the model bridge: 6,809,726 raw / 3,106,857 gzip /
 /// 2,486,942 Brotli q11. Measured again 2026-11-16 after the model bridge stopped going through
-/// JSON (`wordcraft-model-bridge`; the same build read 6,809,172 / 3,106,872 before it):
-/// 5,804,744 raw / 2,770,514 gzip / 2,272,553 Brotli q11. Ceilings ratchet down; raising one is a
+/// JSON (`wordcraft-model-bridge`): 5,804,744 raw / 2,770,514 gzip / 2,272,553 Brotli q11. The
+/// baseline for that change was a fresh build of the tree just before it, 6,809,172 raw /
+/// 3,106,872 gzip: the same tree as the 6,809,726 / 3,106,857 measurement, built again, and two
+/// builds of one tree differ by a few hundred bytes. Ceilings ratchet down; raising one is a
 /// recorded decision in the plan.
 pub const VIEWER_CEILING: WorkerCeiling = WorkerCeiling { name: VIEWER_STEM, max_raw: 5_980_000, max_gzip: 2_881_000 };
 
