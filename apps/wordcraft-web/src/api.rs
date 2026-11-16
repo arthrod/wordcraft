@@ -125,6 +125,13 @@ fn byte_view(val: &JsValue) -> Option<js_sys::Uint8Array> {
     }
 }
 
+/// Whether the page's string `s` holds a character no base64 has
+/// ([`crate::lazy_formats::not_base64_pattern`]), found by the browser's own `RegExp` on the
+/// string where it is: nothing is copied into this module.
+fn has_non_base64(s: &js_sys::JsString) -> bool {
+    s.search(&js_sys::RegExp::new(&crate::lazy_formats::not_base64_pattern(), "")) >= 0
+}
+
 fn json_to_js(v: &Value) -> JsValue {
     js_sys::JSON::parse(&v.to_string()).unwrap_or(JsValue::NULL)
 }
@@ -182,9 +189,14 @@ fn attach_doc_helpers(api: &js_sys::Object, queue: Sender<ControlRequest>, ctx: 
         let q = queue.clone();
         let c = ctx.clone();
         future_to_promise(async move {
-            // Bounded before any copy, with `doc.loadDocx`'s own refusal.
+            // Bounded before any copy, with `doc.loadDocx`'s own refusals: a string past the
+            // bound, or with a character no base64 has (so the copy is one byte per unit).
             let b64 = if let Some(s) = val.dyn_ref::<js_sys::JsString>() {
-                if let Some(refused) = crate::lazy_formats::load_docx_error(s.length() as usize) {
+                let not_base64 = crate::lazy_formats::load_docx_not_base64();
+                let units = s.length() as usize;
+                if let Some(refused) =
+                    crate::lazy_formats::base64_string_error(units, crate::lazy_formats::load_docx_error, || has_non_base64(s), &not_base64)
+                {
                     return Err(js_err(&refused));
                 }
                 String::from(s)
@@ -252,9 +264,16 @@ fn attach_doc_helpers(api: &js_sys::Object, queue: Sender<ControlRequest>, ctx: 
             let format = if direction == wordcraft_worker_proto::ConvertDirection::Import { from } else { to };
             let data = js_sys::Reflect::get(&val, &JsValue::from_str("data")).unwrap_or(JsValue::UNDEFINED);
             let input = if let Some(s) = data.dyn_ref::<js_sys::JsString>() {
-                // Bounded by its length before it is copied here or decoded, with the
-                // conversion's own refusal; then the exact cap on the decoded bytes.
-                if let Some(refused) = crate::lazy_formats::convert_base64_error(s.length() as usize) {
+                // Bounded by its length, and refused with a character no base64 has, before it
+                // is copied here or decoded, with the conversion's own refusals; then the exact
+                // cap on the decoded bytes.
+                let units = s.length() as usize;
+                if let Some(refused) = crate::lazy_formats::base64_string_error(
+                    units,
+                    crate::lazy_formats::convert_base64_error,
+                    || has_non_base64(s),
+                    crate::lazy_formats::CONVERT_NOT_BASE64,
+                ) {
                     return fail(&reject, refused);
                 }
                 match crate::lazy_formats::decode_convert_base64(&String::from(s)) {

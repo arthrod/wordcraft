@@ -311,6 +311,52 @@ pub(crate) fn convert_input_error(len: usize) -> Option<String> {
     (len > wordcraft_worker_proto::MAX_CONVERT_BYTES).then(|| format!("the document is too large to convert in the browser ({len} bytes)"))
 }
 
+/// Every character the engine's base64 decoder takes (`wordcraft_engine::cmd::insert::
+/// base64_decode`): the standard and URL-safe alphabets, padding, and the whitespace it skips.
+/// All ASCII, so a string of only these has as many UTF-16 units as UTF-8 bytes.
+pub(crate) const BASE64_CHARS: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-/_= \n\r\t";
+
+/// The source of a JavaScript `RegExp` that finds the first character outside [`BASE64_CHARS`]
+/// in a page's string, which the browser runs on the string where it is, copying nothing.
+pub(crate) fn not_base64_pattern() -> String {
+    let mut class = String::from("[^");
+    for c in BASE64_CHARS.chars() {
+        match c {
+            '\n' => class.push_str("\\n"),
+            '\r' => class.push_str("\\r"),
+            '\t' => class.push_str("\\t"),
+            '-' | '/' | '\\' | ']' | '^' => {
+                class.push('\\');
+                class.push(c);
+            }
+            c => class.push(c),
+        }
+    }
+    class.push(']');
+    class
+}
+
+/// `convertDocument`'s refusal for a `data` string that is not base64.
+pub(crate) const CONVERT_NOT_BASE64: &str = "convertDocument: `data` is not valid base64";
+
+/// The page API's refusal for a base64 string of `units` UTF-16 units, before it is copied:
+/// `too_long(units)` when that is past the bound, else `not_base64` when `has_other` (asked
+/// only then; [`not_base64_pattern`]) finds a character no base64 has. A string that passes
+/// is ASCII, one unit per byte, so the copy is exactly as long as the bound allows.
+pub(crate) fn base64_string_error(
+    units: usize,
+    too_long: impl FnOnce(usize) -> Option<String>,
+    has_other: impl FnOnce() -> bool,
+    not_base64: &str,
+) -> Option<String> {
+    too_long(units).or_else(|| has_other().then(|| not_base64.to_string()))
+}
+
+/// `doc.loadDocx`'s own refusal for a `docxBase64` that is not base64, word for word.
+pub(crate) fn load_docx_not_base64() -> String {
+    wordcraft_engine::CmdError::Params("invalid base64 in `docxBase64`".into()).to_string()
+}
+
 /// A conversion's refusal for a base64 string of `len` characters, before it is copied or
 /// decoded: its shortest decoding (`len / 4 * 3 - 2` bytes, every character in the alphabet,
 /// two of padding) past [`wordcraft_worker_proto::MAX_CONVERT_BYTES`], with the conversion's
@@ -326,7 +372,7 @@ pub(crate) fn decode_convert_base64(s: &str) -> Result<Vec<u8>, String> {
     if let Some(refused) = convert_base64_error(s.len()) {
         return Err(refused);
     }
-    let bytes = wordcraft_engine::cmd::insert::base64_decode(s).ok_or("convertDocument: `data` is not valid base64")?;
+    let bytes = wordcraft_engine::cmd::insert::base64_decode(s).ok_or(CONVERT_NOT_BASE64)?;
     match convert_input_error(bytes.len()) {
         Some(refused) => Err(refused),
         None => Ok(bytes),
@@ -1386,5 +1432,40 @@ mod tests {
         assert_eq!(decode_convert_base64(&base64_encode(b"{\\rtf1 x}")), Ok(b"{\\rtf1 x}".to_vec()));
         assert_eq!(decode_convert_base64("not base64!"), Err("convertDocument: `data` is not valid base64".to_string()));
         assert_eq!(decode_convert_base64(&base64_encode(&[0u8; 7])).map(|v| v.len()), Ok(7));
+    }
+
+    /// Review finding (gate 3, F7): `loadDocx` measured its string in UTF-16 units against the
+    /// engine's UTF-8 byte cap, so a string of 64 M two- or three-byte characters passed and was
+    /// copied at up to three times the bound. A string is now also refused, before the copy,
+    /// when it holds a character no base64 has (found where it is, by the browser), so what is
+    /// copied is ASCII: one unit per byte, exactly within the bound. Such a string is refused
+    /// with the engine's own words for invalid base64; the decoder takes exactly these characters.
+    #[test]
+    fn a_base64_string_that_is_not_ascii_is_refused_before_it_is_copied() {
+        use wordcraft_engine::cmd::insert::base64_decode;
+        let max = wordcraft_engine::cmd::file::MAX_DOCX_BASE64_BYTES;
+        // 64 M two-byte characters: within the bound in units, twice it in bytes.
+        let wide = "é".repeat(1024);
+        assert_eq!((wide.encode_utf16().count(), wide.len()), (1024, 2048));
+        let other = |s: &str| s.chars().any(|c| !BASE64_CHARS.contains(c));
+        let refused = base64_string_error(max, load_docx_error, || other(&wide), &load_docx_not_base64());
+        assert_eq!(refused, Some(load_docx_not_base64()), "refused before the copy, as the engine would after it");
+        let engine = wordcraft_engine::Session::new(wordcraft_doc::Document::default())
+            .run("doc.loadDocx", &serde_json::json!({"docxBase64": wide}))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(load_docx_not_base64(), engine);
+        // The length is judged first, and the scan is not run for a string already refused.
+        assert_eq!(base64_string_error(max + 1, load_docx_error, || panic!("scanned"), "x"), load_docx_error(max + 1));
+        // Base64 passes; so does the same for a conversion, whose refusal is its own.
+        assert_eq!(base64_string_error(8, load_docx_error, || other("QUJD\r\nRA=="), "x"), None);
+        assert_eq!(base64_string_error(4, convert_base64_error, || other("é"), CONVERT_NOT_BASE64).as_deref(), Some(CONVERT_NOT_BASE64));
+        // The characters are exactly the decoder's, all ASCII, so a passing string is one unit per byte.
+        assert!(BASE64_CHARS.is_ascii());
+        for c in (0..=0x10FFFFu32).filter_map(char::from_u32) {
+            assert_eq!(BASE64_CHARS.contains(c), base64_decode(&c.to_string()).is_some(), "{c:?}");
+        }
+        // The pattern the browser runs is the class of exactly those characters.
+        assert_eq!(not_base64_pattern(), "[^ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+\\-\\/_= \\n\\r\\t]");
     }
 }
