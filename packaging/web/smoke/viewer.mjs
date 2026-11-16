@@ -534,6 +534,15 @@ try {
     await waitAttr(prot.page, "data-wordcraft-error", "wrong-password", 20000).catch(() => {});
     const wrong = await ask();
     check("password: a wrong password asks again", wrong.error === "wrong-password" && wrong.form, JSON.stringify(wrong));
+    // Past the 256 bytes a password may have: said in the form, which stays, never as a document
+    // problem; and open() with one rejects saying so.
+    await prot.page.type("#wordcraft_viewer_password_input", "x".repeat(300));
+    await prot.page.keyboard.press("Enter");
+    await waitAttr(prot.page, "data-wordcraft-error", "password-too-long", 10000).catch(() => {});
+    const tooLong = await ask();
+    check("password: one too long keeps the form and says so", tooLong.error === "password-too-long" && tooLong.form && /password/i.test(tooLong.notice ?? "") && !/too large/i.test(tooLong.notice ?? ""), JSON.stringify(tooLong));
+    const tooLongOpen = await prot.page.evaluate((bytes) => window.wordcraftViewer.open(new Uint8Array(bytes), "x".repeat(300)).then(() => "resolved", (e) => `rejected: ${e.message}`), locked);
+    check("password: open() with one too long rejects saying so", /^rejected: .*password/i.test(tooLongOpen) && !/too large/i.test(tooLongOpen), tooLongOpen);
     await prot.page.type("#wordcraft_viewer_password_input", PASSWORD);
     await prot.page.keyboard.press("Enter");
     await prot.page

@@ -52,6 +52,8 @@ const VIEWER_GLOBAL: &str = "wordcraftViewer";
 /// What the reader is told about a document past the viewer's limit, from its declared length
 /// or its bytes.
 const TOO_LARGE: &str = "The document is too large for this viewer.";
+/// What the reader is told about a password longer than the viewer takes.
+const PASSWORD_TOO_LONG: &str = "That password is too long.";
 /// Pixels kept in painted pages outside the window, in bytes of RGBA.
 const CACHE_BUDGET_BYTES: u64 = 192 << 20;
 /// Where the document comes from. Kept after the viewer reads it: if the viewer fails, the
@@ -660,6 +662,21 @@ async fn fetch_same_origin(page: &Rc<Page>, url: &str) -> Result<js_sys::Uint8Ar
 /// Send `bytes` to the worker as the document to show. The bytes stay in JavaScript's memory:
 /// only the few bytes of framing come from this module.
 fn open_document(page: &Rc<Page>, bytes: js_sys::Uint8Array, password: Option<String>) {
+    // A password past what the protocol carries is the password's problem, not the document's:
+    // an open document stays, otherwise the password is asked for again in the page.
+    if password.as_deref().is_some_and(|p| p.len() > proto::MAX_PASSWORD_BYTES) {
+        if page.state.borrow().handover.document_open() {
+            return show_error(page, "password-too-long", PASSWORD_TOO_LONG);
+        }
+        let stale = forget_pages(page);
+        {
+            let mut state = page.state.borrow_mut();
+            state.docx = Some(bytes);
+            state.opens = state.opens.wrapping_add(1);
+        }
+        drop(stale);
+        return ask_password(page, "password-too-long", PASSWORD_TOO_LONG);
+    }
     let length = bytes.length();
     let prefix = match proto::view_open_request_prefix(password.as_deref(), length as usize) {
         Ok(prefix) => prefix,
