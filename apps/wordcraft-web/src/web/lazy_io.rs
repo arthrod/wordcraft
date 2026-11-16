@@ -24,8 +24,8 @@ use wordcraft_worker_proto as proto;
 
 use super::{codec_worker, pdf_worker};
 use crate::lazy_formats::{
-    ExportRoute, FONT_BUDGET, JobKind, JobQueue, NO_ANSWER, Once, export_route, failure_message, font_batch, import_format, job_budget_ms,
-    open_request, opened_name, pdf_job_options,
+    ApiExports, ExportRoute, FONT_BUDGET, JobKind, JobQueue, NO_ANSWER, Once, export_route, failure_message, font_batch, import_format,
+    job_budget_ms, open_request, opened_name, pdf_job_options,
 };
 
 /// Status-bar lines waiting for the shell's next frame.
@@ -44,6 +44,23 @@ thread_local! {
     /// Save As / Export jobs between the request and the delivery: the leave-page guard asks
     /// while there are any ([`exports_in_flight`]).
     static EXPORTS_IN_FLIGHT: Cell<usize> = const { Cell::new(0) };
+    /// PDF exports the page API asked for, by the name its `file.exportPdf` runs under.
+    static API_EXPORTS: RefCell<ApiExports<ApiSink>> = RefCell::new(ApiExports::default());
+}
+
+/// Where a page-API export's bytes (or the reason there are none) go.
+pub(crate) type ApiSink = Box<dyn FnOnce(Result<Vec<u8>, String>)>;
+
+/// Claim an export name for the page API ([`ApiExports`]): the app's own `file.exportPdf` run
+/// under it hands its result to `sink` instead of delivering it. `None` when too many wait.
+pub(crate) fn claim_api_export(sink: ApiSink) -> Option<String> {
+    API_EXPORTS.with(|c| c.borrow_mut().claim(sink))
+}
+
+/// Give up the claim on `name` (its command failed, so no export will answer it).
+pub(crate) fn release_api_export(name: &str) {
+    let released = API_EXPORTS.with(|c| c.borrow_mut().take(name));
+    drop(released);
 }
 
 /// Exports requested and not yet delivered or failed.
@@ -290,6 +307,11 @@ impl Exporter {
         let (messages, ctx, name, deliver) = (self.messages.clone(), self.ctx.clone(), name.to_string(), self.deliver.clone());
         let done = move |reply: Result<Vec<u8>, String>| {
             EXPORTS_IN_FLIGHT.with(|n| n.set(n.get().saturating_sub(1)));
+            // The page API's export goes back to its promise, not to a download.
+            let claimed = API_EXPORTS.with(|c| c.borrow_mut().take(&name));
+            if let Some(sink) = claimed {
+                return sink(reply);
+            }
             let delivered = reply.and_then(|bytes| deliver(&name, &bytes).map(|()| bytes.len()));
             match delivered {
                 Ok(bytes) => say(&messages, &ctx, format!("Exported {name} ({bytes} bytes)")),

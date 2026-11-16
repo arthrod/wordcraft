@@ -247,6 +247,55 @@ pub(crate) fn font_batch(
     batch
 }
 
+/// Most page-API PDF exports waiting at once ([`ApiExports`]).
+pub(crate) const MAX_API_EXPORTS: usize = 16;
+
+/// The PDF exports the page API (`exportPdf`) asked for, waiting on the app's own export: the
+/// API runs `file.exportPdf` under a name claimed here, so the document, the options, the
+/// strict check and the font copies are the command's, and the finished bytes go back to the
+/// API's promise (`sink`) instead of a download.
+pub(crate) struct ApiExports<S> {
+    next: u64,
+    waiting: Vec<(String, S)>,
+}
+
+impl<S> Default for ApiExports<S> {
+    fn default() -> Self {
+        ApiExports { next: 0, waiting: Vec::new() }
+    }
+}
+
+impl<S> ApiExports<S> {
+    /// A fresh export name for `sink`, unlike any a user picks or another claim holds; `None`
+    /// when [`MAX_API_EXPORTS`] are already waiting.
+    pub(crate) fn claim(&mut self, sink: S) -> Option<String> {
+        if self.waiting.len() >= MAX_API_EXPORTS {
+            return None;
+        }
+        self.next = self.next.wrapping_add(1);
+        let name = format!("wordcraft-api-export-{}.pdf", self.next);
+        self.waiting.push((name.clone(), sink));
+        Some(name)
+    }
+
+    /// The sink waiting on the export named `name`, taken: once only. `None` for a name no
+    /// claim holds (a user's own export).
+    pub(crate) fn take(&mut self, name: &str) -> Option<S> {
+        let at = self.waiting.iter().position(|(n, _)| n == name)?;
+        Some(self.waiting.swap_remove(at).1)
+    }
+}
+
+/// The `file.exportPdf` parameters for a page-API export under `name`: `markup` as the API
+/// call gave it, else what File › Print's Print Markup says, as the command decides.
+pub(crate) fn api_pdf_params(name: &str, markup: Option<bool>) -> serde_json::Value {
+    let mut params = serde_json::json!({"path": name});
+    if let Some(markup) = markup {
+        params["markup"] = serde_json::json!(markup);
+    }
+    params
+}
+
 /// What a worker client does with one message from its worker ([`inbound`]).
 #[derive(Debug, PartialEq)]
 pub(crate) enum Inbound {
@@ -927,5 +976,38 @@ mod tests {
         for junk in [None, Some("not json"), Some("{}"), Some(header(3, Kind::RenderPdf).as_str())] {
             assert!(matches!(inbound(junk, Some(10)), Inbound::Drop(_)), "{junk:?}");
         }
+    }
+
+    /// Review finding (the API's PDF options): the page API's export claims a name, runs the
+    /// app's own `file.exportPdf` under it, and gets the bytes back once; a user's export of
+    /// any name is not taken, and the claims are bounded.
+    #[test]
+    fn an_api_export_claims_its_own_name_once() {
+        let mut claims: ApiExports<u32> = ApiExports::default();
+        let a = claims.claim(1).unwrap();
+        let b = claims.claim(2).unwrap();
+        assert_ne!(a, b);
+        assert!(a.ends_with(".pdf") && export_route(&a) == Some(ExportRoute::Pdf), "the command routes it to the PDF worker");
+        assert_eq!(claims.take("report.pdf"), None, "a user's export is delivered, not claimed");
+        assert_eq!(claims.take(&b), Some(2));
+        assert_eq!(claims.take(&b), None, "once");
+        assert_eq!(claims.take(&a), Some(1));
+        for n in 0..MAX_API_EXPORTS {
+            assert!(claims.claim(n as u32).is_some());
+        }
+        assert_eq!(claims.claim(99), None, "bounded");
+        // The parameters are the command's own: the same export options the app's File › Export
+        // resolves for the same `markup`, the Print Markup setting deciding when none is given.
+        let mut s = wordcraft_engine::Session::new(wordcraft_doc::Document::from_text("Figures"));
+        s.prefs.print_markup = true;
+        for markup in [None, Some(true), Some(false)] {
+            let api = wordcraft_engine::cmd::file::export_options(&s, &api_pdf_params(&a, markup));
+            let mut user = serde_json::json!({"path": "report.pdf"});
+            if let Some(m) = markup {
+                user["markup"] = serde_json::json!(m);
+            }
+            assert_eq!(api, wordcraft_engine::cmd::file::export_options(&s, &user), "{markup:?}");
+        }
+        assert!(wordcraft_engine::cmd::file::export_options(&s, &api_pdf_params(&a, None)).markup);
     }
 }

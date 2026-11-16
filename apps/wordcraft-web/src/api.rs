@@ -261,41 +261,39 @@ fn attach_doc_helpers(api: &js_sys::Object, queue: Sender<ControlRequest>, ctx: 
     let _ = js_sys::Reflect::set(api, &JsValue::from_str("convertDocument"), convert_document.as_ref().unchecked_ref());
     convert_document.forget();
 
-    // PDF export through the dedicated worker (plan §3.4): the document crosses as the same
-    // `.docx` interchange package `exportDocx` writes, with the non-bundled font faces as copies
-    // (user fonts, pack faces, fonts embedded in the document) so the worker lays out with
-    // exactly the faces the page shows — its bundled four are compiled in. The worker starts
-    // lazily here, never on page load. Resolves to the PDF bytes as a `Uint8Array`; rejects
-    // with an `Error` carrying the worker's message (a password-protected session exports an
-    // encrypted package the worker cannot read, and its error says so).
-    let asset_base_pdf = asset_base.clone();
+    // PDF export through the dedicated worker (plan §3.4), as the app's own File › Export runs
+    // it: the API runs `file.exportPdf` under a name it claims (`lazy_io::claim_api_export`), so
+    // the document as printed, the export options (Print Markup, comments, digits), the strict
+    // check and the font copies are the command's, and the finished bytes come back here
+    // instead of a download. `markup` overrides Print Markup, as the command's own parameter.
+    // The worker starts lazily, never on page load. Resolves to the PDF bytes as a
+    // `Uint8Array`; rejects with an `Error` carrying the reason there are none.
     let export_pdf = wasm_bindgen::closure::Closure::<dyn Fn(JsValue) -> js_sys::Promise>::new(move |val: JsValue| {
         let q = queue_for_pdf.clone();
         let c = ctx_for_pdf.clone();
-        let asset_base = asset_base_pdf.clone();
         future_to_promise(async move {
-            let mut params = json!({});
-            let markup = js_sys::Reflect::get(&val, &JsValue::from_str("markup")).ok().and_then(|v| v.as_bool()) == Some(true);
-            if markup {
-                params["markup"] = json!(true);
-            }
-            // The package does not carry Print Markup: the job does. This API has no session to
-            // read Track Changes Options or the Numeral setting from, so `markup` shows the
-            // comments as those options do by default, with Western digits.
-            let options =
-                wordcraft_worker_proto::PdfJobOptions { markup, comments: markup, numeral: wordcraft_worker_proto::Numeral::Arabic, strict: false };
-            let res = execute_command(q, c, "doc.exportDocx", params).await?;
-            let b64 = res.get("docxBase64").and_then(Value::as_str).ok_or_else(|| js_err("missing docxBase64"))?;
-            let docx = base64_decode(b64).ok_or_else(|| js_err("invalid docxBase64"))?;
-            // The same job the app's own Export runs (`lazy_io`): font copies, the worker
-            // started on first use, one answer. The reply lands on a later task turn; the
-            // shared waker set (drained every shell frame by `wake_waiters`, and woken here
-            // from the reply closure) completes it.
+            let markup = js_sys::Reflect::get(&val, &JsValue::from_str("markup")).ok().and_then(|v| v.as_bool());
+            // The reply lands on a later task turn; the shared waker set (drained every shell
+            // frame by `wake_waiters`, and woken here from the reply closure) completes it.
             let (tx, rx) = std::sync::mpsc::channel::<Result<Vec<u8>, String>>();
-            crate::web::lazy_io::render_pdf(&asset_base, docx, options, &Vec::new, move |reply| {
+            let name = crate::web::lazy_io::claim_api_export(Box::new(move |reply| {
                 let _ = tx.send(reply);
                 wake_waiters();
-            });
+            }))
+            .ok_or_else(|| js_err("too many PDF exports are waiting"))?;
+            let params = crate::lazy_formats::api_pdf_params(&name, markup);
+            match execute_command(q, c, "file.exportPdf", params).await {
+                // The worker has the job (or already answered it).
+                Ok(res) if res.get("pending").and_then(Value::as_bool) == Some(true) => {}
+                Ok(_) => {
+                    crate::web::lazy_io::release_api_export(&name);
+                    return Err(js_err("the PDF export did not run in the PDF worker"));
+                }
+                Err(e) => {
+                    crate::web::lazy_io::release_api_export(&name);
+                    return Err(e);
+                }
+            }
             let bytes = ChannelFuture(rx).await.map_err(|e| js_err(&e))?;
             Ok(wasm_bindgen::JsValue::from(js_sys::Uint8Array::from(bytes.as_slice())))
         })
