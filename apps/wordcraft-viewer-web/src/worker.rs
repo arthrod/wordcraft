@@ -38,7 +38,7 @@ struct Inner {
 pub(crate) struct ViewerWorker {
     inner: Rc<RefCell<Inner>>,
     _onmessage: Closure<dyn FnMut(web_sys::MessageEvent)>,
-    _onerror: Closure<dyn FnMut(web_sys::ErrorEvent)>,
+    _onerror: Closure<dyn FnMut(web_sys::Event)>,
 }
 
 impl ViewerWorker {
@@ -66,7 +66,7 @@ impl ViewerWorker {
         worker.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
 
         let handler = inner.clone();
-        let onerror = Closure::<dyn FnMut(web_sys::ErrorEvent)>::new(move |event: web_sys::ErrorEvent| {
+        let onerror = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
             // Handled here: the page shows a notice, the console is not given an uncaught error.
             event.prevent_default();
             let pending = {
@@ -78,7 +78,10 @@ impl ViewerWorker {
                 inner.queued.clear();
                 inner.pending.drain().collect::<Vec<_>>()
             };
-            let message = event.message();
+            // A script that cannot be fetched arrives as a plain `Event` with no `message`; only a
+            // script that throws sends an `ErrorEvent`. So the text is read as a property that may
+            // be missing, never through `ErrorEvent::message`, which fails on `undefined`.
+            let message = js_sys::Reflect::get(&event, &"message".into()).ok().and_then(|m| m.as_string()).unwrap_or_default();
             fail_pending(pending, "the viewer worker stopped");
             on_failure(if message.is_empty() { format!("{LOADER_FILE} could not be loaded") } else { message });
         });
