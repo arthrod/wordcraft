@@ -1052,6 +1052,10 @@ version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=41fb227542efb8a7748caa1c659f271d8605303c#41fb227542efb8a7748caa1c659f271d8605303c"
 
 [[package]]
+name = "craft-convert"
+version = "0.1.0"
+
+[[package]]
 name = "craft-doc-binary"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=41fb227542efb8a7748caa1c659f271d8605303c#41fb227542efb8a7748caa1c659f271d8605303c"
@@ -7446,6 +7450,18 @@ dependencies = [
  "wordcraft-doc",
  "wordcraft-engine",
  "wordcraft-render",
+]
+
+[[package]]
+name = "wordcraft-model-bridge"
+version = "0.18.1"
+dependencies = [
+ "craft-convert",
+ "craft-docx",
+ "craft-wordmodel",
+ "serde",
+ "serde_json",
+ "wordcraft-doc",
 ]
 
 [[package]]
