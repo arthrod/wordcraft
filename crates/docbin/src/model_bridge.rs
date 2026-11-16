@@ -8,6 +8,9 @@ use crate::DocbinError;
 ///
 /// WordCraft-only fit state is left empty: a `.doc` file has none.
 pub fn from_shared_model(source: craft_wordmodel::Document) -> Result<wordcraft_doc::Document, DocbinError> {
+    // The bridge carries `missing_pictures`, which the code before it dropped for a `.doc`. The
+    // `.doc` reader never fills it today, so nothing changes yet; once it reports missing
+    // pictures, they surface here.
     wordcraft_model_bridge::from_shared(source).map_err(|error| DocbinError::Malformed(error.to_string()))
 }
 
