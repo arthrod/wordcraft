@@ -674,6 +674,50 @@ try {
     }
   }
 
+  // ---- a document address that redirects: same-origin hops are followed, another site's never ----
+  // Served without the deployed policy, whose `connect-src 'self'` would stop the cross-site hop
+  // by itself: a host page without it must still never fetch from another site. The other site
+  // is a second server (another port is another origin) that would serve the sample to anyone.
+  {
+    const sample = readFileSync(join(dist, "samples/welcome.docx"));
+    const away = await startServer(dist, dist);
+    let awayHits = 0;
+    away.server.removeAllListeners("request");
+    away.server.on("request", (req, res) => {
+      awayHits++;
+      res.writeHead(200, { "Content-Type": "application/octet-stream", "Access-Control-Allow-Origin": "*" }).end(sample);
+    });
+    const plain = await startServer(dist, dist);
+    const [serveStatic] = plain.server.listeners("request");
+    plain.server.removeAllListeners("request");
+    plain.server.on("request", (req, res) => {
+      const path = new URL(req.url ?? "/", "http://localhost").pathname;
+      if (path === "/__fixture/away.docx") res.writeHead(302, { Location: `http://127.0.0.1:${away.port}/welcome.docx` }).end();
+      else if (path === "/__fixture/moved.docx") res.writeHead(302, { Location: "/samples/welcome.docx" }).end();
+      else serveStatic(req, res);
+    });
+    try {
+      const plainBase = `http://127.0.0.1:${plain.port}`;
+      const moved = await open(browser, plainBase, "/?doc=__fixture/moved.docx");
+      await moved.page.waitForFunction(() => document.querySelector("#wordcraft_viewer canvas[data-scale]") || document.documentElement.hasAttribute("data-wordcraft-error"), { timeout: 30000 }).catch(() => {});
+      check("a same-origin redirect is followed and its document shown", (await attr(moved.page, "data-wordcraft-error")) === null && (await moved.page.evaluate(() => document.querySelectorAll("#wordcraft_viewer canvas[data-scale]").length)) > 0);
+      await moved.page.close();
+      const off = await open(browser, plainBase, "/?doc=__fixture/away.docx");
+      await off.page.waitForFunction(() => document.querySelector("#wordcraft_viewer canvas[data-scale]") || document.documentElement.hasAttribute("data-wordcraft-error"), { timeout: 30000 }).catch(() => {});
+      const state = {
+        error: await attr(off.page, "data-wordcraft-error"),
+        painted: await off.page.evaluate(() => document.querySelectorAll("#wordcraft_viewer canvas[data-scale]").length),
+        awayHits,
+      };
+      check("a redirect to another site is not followed: nothing is fetched from it and nothing is shown", state.error === "document-failed" && state.painted === 0 && awayHits === 0, JSON.stringify(state));
+      check("a redirect to another site: no uncaught errors", off.log.uncaught.length === 0, off.log.uncaught.join(" | "));
+      await off.page.close();
+    } finally {
+      plain.server.close();
+      away.server.close();
+    }
+  }
+
   // ---- a replacement the worker cannot read: the document shown stays, and Edit hands it over ----
   {
     const kept = await open(browser, base, "/");

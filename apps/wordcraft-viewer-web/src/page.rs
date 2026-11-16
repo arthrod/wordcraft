@@ -702,7 +702,9 @@ async fn document_bytes(page: &Rc<Page>, for_viewer: bool, opens: u32) -> Result
 }
 
 /// Fetch `url` (relative to the page) as bytes. Only this origin: a document address comes
-/// from the page's URL, which anyone can write.
+/// from the page's URL, which anyone can write. The address is checked first, and the request
+/// is made in `same-origin` mode, so a redirect to another site ends the fetch with a network
+/// error (Fetch, "main fetch") instead of being followed.
 async fn fetch_same_origin(page: &Rc<Page>, url: &str) -> Result<js_sys::Uint8Array, String> {
     let base = page.document.base_uri().ok().flatten().unwrap_or_default();
     let resolved = web_sys::Url::new_with_base(url, &base).map_err(|_| "The document's address is not valid.".to_string())?;
@@ -710,7 +712,9 @@ async fn fetch_same_origin(page: &Rc<Page>, url: &str) -> Result<js_sys::Uint8Ar
         return Err("The document is on another site, which this viewer does not open.".to_string());
     }
     let failed = || "The document could not be downloaded.".to_string();
-    let response = wasm_bindgen_futures::JsFuture::from(page.window.fetch_with_str(&resolved.href())).await.map_err(|_| failed())?;
+    let init = web_sys::RequestInit::new();
+    init.set_mode(web_sys::RequestMode::SameOrigin);
+    let response = wasm_bindgen_futures::JsFuture::from(page.window.fetch_with_str_and_init(&resolved.href(), &init)).await.map_err(|_| failed())?;
     let response: web_sys::Response = response.dyn_into().map_err(|_| failed())?;
     if !response.ok() {
         return Err(failed());
