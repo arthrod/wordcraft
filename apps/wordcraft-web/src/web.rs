@@ -411,7 +411,10 @@ fn launch_with_config(config: StartConfig) -> js_sys::Promise {
         if let Some(el) = document.get_element_by_id(LOADING_ID) {
             match &result {
                 Ok(()) => el.remove(),
-                Err(e) => el.set_inner_html(&format!("<p>WordCraft failed to start: {e:?}</p><p>A browser with WebGPU or WebGL2 is required.</p>")),
+                Err(e) => el.set_inner_html(&format!(
+                    "<p>WordCraft failed to start: {e:?}</p><p>A browser with {} is required.</p>",
+                    if cfg!(feature = "wgpu") { "WebGPU or WebGL2" } else { "WebGL2" }
+                )),
             }
         }
 
