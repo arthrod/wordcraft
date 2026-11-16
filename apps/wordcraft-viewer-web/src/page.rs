@@ -927,7 +927,11 @@ fn refresh(page: &Rc<Page>) {
             place(&canvas, Some(at), state.sheet.zoom);
             state.canvases.insert(*index, canvas);
         }
-        if let Some(scale) = pages::render_scale(state.sheet.zoom, ratio, size) {
+        // Only a page with a canvas is asked for: an answer with nowhere to go is dropped and
+        // asked again (`on_page`), which for a canvas that cannot be made would never end.
+        if state.canvases.contains_key(index)
+            && let Some(scale) = pages::render_scale(state.sheet.zoom, ratio, size)
+        {
             wanted.push(PageKey::new(*index, scale));
         }
     }

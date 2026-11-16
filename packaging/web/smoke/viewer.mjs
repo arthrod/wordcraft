@@ -733,6 +733,33 @@ try {
     check("start() then open() in one task: the host's document is opened once", once.opened === 6 && once.count === 6 && once.viewOpens === 1, JSON.stringify(once));
     check("start() then open() in one task: no uncaught errors", sameTask.log.uncaught.length === 0, sameTask.log.uncaught.join(" | "));
     await sameTask.page.close();
+
+    // A page whose canvas cannot be made is not asked of the worker in a loop.
+    const noCanvas = await open(browser, base, "/", {
+      hooks: true,
+      height: 2400,
+      init: [
+        () => {
+          const append = Node.prototype.appendChild;
+          Node.prototype.appendChild = function (child) {
+            if (child instanceof HTMLCanvasElement && child.dataset.page === window.__noCanvasFor) throw new DOMException("refused by the test");
+            return append.call(this, child);
+          };
+        },
+      ],
+    });
+    await waitAttr(noCanvas.page, "data-wordcraft-painted", "true");
+    const quiet = await noCanvas.page.evaluate(async (doc) => {
+      window.__noCanvasFor = "1";
+      await window.wordcraftViewer.open(new Uint8Array(doc));
+      await new Promise((r) => setTimeout(r, 2000));
+      const renders = () => window.__posted.filter((h) => h.includes('"viewRender"')).length;
+      const before = renders();
+      await new Promise((r) => setTimeout(r, 1000));
+      return { rendersInASecond: renders() - before, page0: document.querySelector('#wordcraft_viewer canvas[data-page="0"]')?.hasAttribute("data-scale") ?? false };
+    }, long);
+    check("a page whose canvas cannot be made is not rendered in a loop", quiet.rendersInASecond === 0 && quiet.page0, JSON.stringify(quiet));
+    await noCanvas.page.close();
   }
 
   // ---- the modes a host can choose ----
