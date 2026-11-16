@@ -8,9 +8,9 @@
 | File | What it is |
 |---|---|
 | `index.html` | Progressive loading shell (HTML/CSS skeleton + the page module's bootstrap). |
-| `wordcraft-viewer-web-<hash>.js`, `wordcraft-viewer-web-<hash>_bg.wasm` | The page module, the first thing a visit runs (~0.2 MB raw, ~0.09 MB gzip; see [Viewer first](#viewer-first-what-a-visit-loads)). Content-hashed. |
-| `wordcraft-worker-viewer{.js,_loader.js,_bg.wasm}` | The view-only worker that lays out and paints pages for reading (~6.84 MB raw, ~3.12 MB gzip). |
-| `wordcraft-web.js`, `wordcraft-web_loader.js`, `wordcraft-web_bg.wasm` | The editor: `wasm-bindgen` glue, its loader and the compiled engine (~18.39 MB raw, ~7.29 MB gzip; 2026-11-16 build, capped under 25 MiB for Cloudflare). Fetched only on an edit action, so its names are not hashed. |
+| `wordcraft-viewer-web-<hash>.js`, `wordcraft-viewer-web-<hash>_bg.wasm` | The page module, the first thing a visit runs (~0.21 MB raw, ~0.09 MB gzip; see [Viewer first](#viewer-first-what-a-visit-loads)). Content-hashed. |
+| `wordcraft-worker-viewer{.js,_loader.js,_bg.wasm}` | The view-only worker that lays out and paints pages for reading (~5.85 MB raw, ~2.78 MB gzip). |
+| `wordcraft-web.js`, `wordcraft-web_loader.js`, `wordcraft-web_bg.wasm` | The editor: `wasm-bindgen` glue, its loader and the compiled engine (~17.70 MB raw, ~7.21 MB gzip; 2026-11-16 build, capped under 25 MiB for Cloudflare). Fetched only on an edit action, so its names are not hashed. |
 | `i18n/` | Externalized locale TSV catalogs + `manifest.json` fetched on demand. |
 | `samples/` | Pre-bundled showcase documents (`welcome.md`, `spec.md`, `letter.md`, and `welcome.docx`, which the viewer opens on a first visit). |
 | `_headers`, `.htaccess` | Sample header rules for Cloudflare Pages/Workers static assets, Netlify, and Apache. |
@@ -146,8 +146,8 @@ filenames under the `immutable` wildcard rule either.
   any other type, and the app then loads slowly or not at all. Serve `.js` as `text/javascript`.
   Most hosts already do both. For nginx, check that `mime.types` has `application/wasm wasm;`.
 - **Compression:** turn on gzip or Brotli for `.wasm`, `.js` and `.html`. Gzip takes the release
-  editor's `.wasm` from ~18.39 MB raw to ~7.29 MB (2026-11-16 build), and the view-only worker's
-  from ~6.84 MB to ~3.12 MB.
+  editor's `.wasm` from ~17.70 MB raw to ~7.21 MB (2026-11-16 build), and the view-only worker's
+  from ~5.85 MB to ~2.78 MB.
 - **Caching:** `Cache-Control: public, max-age=31536000, immutable` on the content-hashed page
   module (`wordcraft-viewer-web-<hash>`) and `snippets/` files, and `no-cache` on `index.html`,
   the editor (`wordcraft-web{.js,_loader.js,_bg.wasm}`), the workers (`wordcraft-worker-*`) and

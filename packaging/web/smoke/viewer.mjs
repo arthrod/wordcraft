@@ -232,6 +232,8 @@ try {
   report.editStepRequests = editStep;
   console.log("edit-step network log:\n  " + editStep.join("\n  "));
   check("AC3 editor module fetched on the edit action", ["_loader.js", ".js", "_bg.wasm"].every((s) => editStep.includes(`/wordcraft-web${s}`)));
+  // The proofing worker starts on the first edit, not when the editor starts.
+  check("AC3 edit step fetches no proof worker before typing", !editStep.some((p) => /\/wordcraft-worker-proof/.test(p)), editStep.filter((p) => /proof/.test(p)).join(" "));
   check("AC3 viewer removed", await first.page.evaluate(() => !document.querySelector("#wordcraft_viewer") && !document.querySelector("#wordcraft_viewer_loading")));
   const before = await first.page.evaluate(() => window.wordcraft.getMarkdown());
   check("AC3 editor shows the same document", before.includes(SAMPLE_TEXT), JSON.stringify(before.slice(0, 80)));
@@ -241,6 +243,9 @@ try {
   await new Promise((r) => setTimeout(r, 800));
   const after = await first.page.evaluate(() => window.wordcraft.getMarkdown());
   check("AC3 editor accepts typing", after.includes("Zebra42") && !before.includes("Zebra42"));
+  const typingStep = first.log.requests.slice(firstLoad.length + editStep.length);
+  report.typingStepRequests = typingStep;
+  console.log("after typing, network log:\n  " + typingStep.join("\n  "));
   check("AC3 no uncaught errors", first.log.uncaught.length === 0, first.log.uncaught.join(" | "));
   const editViolations = await violations(first.page);
   check("AC6 after the edit step: no Content-Security-Policy violation", editViolations.length === 0, editViolations.join(" | "));

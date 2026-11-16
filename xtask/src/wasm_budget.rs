@@ -47,13 +47,14 @@ pub struct WorkerCeiling {
 /// Measured 2026-11-14 on the SIMD release build (`trunk build --release` with
 /// `-C target-feature=+simd128`, plan §4.2), each at its size plus headroom: proof 1,012,294
 /// raw / 636,246 gzip; codecs 4,164,394 / 1,766,120; pdf 5,394,070 / 2,525,902. The view-only
-/// worker (plan 10.3) measured 2026-11-16 on the same build: 6,839,178 raw / 3,119,158 gzip /
-/// 2,497,128 Brotli q11, ceilings about 3% raw and 4% gzip above.
+/// worker (plan 10.3) re-measured 2026-11-16 after the typed model bridge, on the same kind of
+/// build (no optional inputs): 5,845,030 raw / 2,784,071 gzip / 2,285,910 Brotli q11, ceilings
+/// about 3% raw and 4% gzip above.
 pub const WORKER_CEILINGS: &[WorkerCeiling] = &[
     WorkerCeiling { name: "wordcraft-worker-proof", max_raw: 1_100_000, max_gzip: 700_000 },
     WorkerCeiling { name: "wordcraft-worker-codecs", max_raw: 4_300_000, max_gzip: 1_850_000 },
     WorkerCeiling { name: "wordcraft-worker-pdf", max_raw: 5_550_000, max_gzip: 2_625_000 },
-    WorkerCeiling { name: VIEWER_WORKER_STEM, max_raw: 7_045_000, max_gzip: 3_245_000 },
+    WorkerCeiling { name: VIEWER_WORKER_STEM, max_raw: 6_021_000, max_gzip: 2_896_000 },
 ];
 
 /// Offloaded symbols that must not appear in the *main module's* bytes: `krilla` (PDF export
@@ -92,9 +93,10 @@ pub const VIEWER_WORKER_FORBIDDEN_SYMBOLS: &[&str] = &["egui::", "eframe::", "wo
 pub const PAGE_STEM: &str = "wordcraft-viewer-web";
 
 /// The page module's ceilings, at measured size plus about 3% raw and 4% gzip (the headroom
-/// the workers got). Measured 2026-11-16 on the SIMD release build (`trunk build --release`,
-/// no optional inputs): 200,638 raw / 90,479 gzip -9 / 77,225 Brotli q11.
-pub const PAGE_CEILING: WorkerCeiling = WorkerCeiling { name: PAGE_STEM, max_raw: 206_700, max_gzip: 94_100 };
+/// the workers got). Re-measured 2026-11-16, with the in-page password form and the bounded
+/// editor wait, on the SIMD release build (`trunk build --release`, no optional inputs):
+/// 206,075 raw / 92,450 gzip -9 / 78,819 Brotli q11.
+pub const PAGE_CEILING: WorkerCeiling = WorkerCeiling { name: PAGE_STEM, max_raw: 212_300, max_gzip: 96_200 };
 
 /// Crates the page module must never link: it is `web-sys` glue that starts the view-only
 /// worker and loads the editor on an edit action. The editor, PDF export and the whole document

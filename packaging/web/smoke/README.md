@@ -64,6 +64,8 @@ node packaging/web/smoke/lazy.mjs --site dist/web --out packaging/web/smoke/resu
 node packaging/web/smoke/lazy.mjs --site dist/web --only idle,edit   # some flows
 ```
 
+The site shows the read-only viewer first (see `viewer.mjs` below), so `lazy.mjs` opens every
+page with `mode=edit` added to its query, which starts the editor at once.
 `run.sh` runs it after the matrix when `dist/web/index.html` exists. It exits 1
 when a flow fails and prints `PASS`/`FAIL` per flow on stderr.
 
@@ -105,7 +107,7 @@ without it the byte-for-byte page comparison is skipped and says so.
 |---|---|
 | AC1 first visit | the network log has the page module and the view-only worker, and no editor file (`wordcraft-web*`, eframe's snippet), no proofing, codecs or PDF worker; the password form takes no space |
 | AC2 first page | page 0's canvas is not blank and holds exactly the RGBA the core returns for that page at the canvas's scale |
-| AC3 edit action | the Edit control fetches the editor, which shows the same document, takes typing, and the viewer is gone |
+| AC3 edit action | the Edit control fetches the editor, which shows the same document, takes typing, and the viewer is gone; the proofing worker is not fetched before the first keystroke |
 | AC4 sizes | raw / gzip -9 / Brotli q11 of every file in the first load and in the edit step |
 | AC5 no editor | without WebGL, with the editor's glue or wasm answered 404, or with its wasm download never answered (a 3 s `data-editor-wait-ms`), the viewer stays with a notice and nothing is thrown uncaught; that download answered late, the editor takes over (notice cleared, same document) |
 | AC6 CSP | no `securitypolicyviolation` on the page under `_headers`' policy |
