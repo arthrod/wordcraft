@@ -46,11 +46,14 @@ pub struct WorkerCeiling {
 
 /// Measured 2026-11-14 on the SIMD release build (`trunk build --release` with
 /// `-C target-feature=+simd128`, plan §4.2), each at its size plus headroom: proof 1,012,294
-/// raw / 636,246 gzip; codecs 4,164,394 / 1,766,120; pdf 5,394,070 / 2,525,902.
+/// raw / 636,246 gzip; codecs 4,164,394 / 1,766,120; pdf 5,394,070 / 2,525,902. The view-only
+/// worker (plan 10.3) measured 2026-11-16 on the same build: 6,839,178 raw / 3,119,158 gzip /
+/// 2,497,128 Brotli q11, ceilings about 3% raw and 4% gzip above.
 pub const WORKER_CEILINGS: &[WorkerCeiling] = &[
     WorkerCeiling { name: "wordcraft-worker-proof", max_raw: 1_100_000, max_gzip: 700_000 },
     WorkerCeiling { name: "wordcraft-worker-codecs", max_raw: 4_300_000, max_gzip: 1_850_000 },
     WorkerCeiling { name: "wordcraft-worker-pdf", max_raw: 5_550_000, max_gzip: 2_625_000 },
+    WorkerCeiling { name: VIEWER_WORKER_STEM, max_raw: 7_045_000, max_gzip: 3_245_000 },
 ];
 
 /// Offloaded symbols that must not appear in the *main module's* bytes: `krilla` (PDF export
@@ -65,9 +68,52 @@ fn forbidden_symbols_for(worker_stem: &str) -> &[&str] {
     match worker_stem {
         "wordcraft-worker-codecs" => &["krilla::"],
         "wordcraft-worker-pdf" => &["wordcraft_docbin::"],
+        VIEWER_WORKER_STEM => VIEWER_WORKER_FORBIDDEN_SYMBOLS,
         _ => FORBIDDEN_SYMBOLS,
     }
 }
+
+/// The view-only dedicated worker (plan 10.3): the view-only core behind the worker envelope,
+/// fetched on a first visit. Its ceiling is a row in [`WORKER_CEILINGS`] like any worker's.
+pub const VIEWER_WORKER_STEM: &str = "wordcraft-worker-viewer";
+
+/// Crates the view-only worker must never link: it paints pages, so the editor and PDF export
+/// stay out. Unlike the bare core ([`VIEWER_FORBIDDEN_CRATES`]) it is a browser worker and
+/// links `web-sys` for its message port.
+pub const VIEWER_WORKER_FORBIDDEN_CRATES: &[&str] = &["egui", "eframe", "wordcraft-engine", "wordcraft-ui-egui", "krilla"];
+
+/// The byte-scan form of [`VIEWER_WORKER_FORBIDDEN_CRATES`] (supplementary; see
+/// [`FORBIDDEN_SYMBOLS`]).
+pub const VIEWER_WORKER_FORBIDDEN_SYMBOLS: &[&str] = &["egui::", "eframe::", "wordcraft_engine::", "wordcraft_ui_egui::", "krilla::"];
+
+/// The viewer-first page module (plan 10.3): the page's first module, content-hashed by Trunk
+/// (`wordcraft-viewer-web-<hash>_bg.wasm`). What a reader waits for before anything else, so it
+/// has its own row.
+pub const PAGE_STEM: &str = "wordcraft-viewer-web";
+
+/// The page module's ceilings, at measured size plus about 3% raw and 4% gzip (the headroom
+/// the workers got). Measured 2026-11-16 on the SIMD release build (`trunk build --release`,
+/// no optional inputs): 200,638 raw / 90,479 gzip -9 / 77,225 Brotli q11.
+pub const PAGE_CEILING: WorkerCeiling = WorkerCeiling { name: PAGE_STEM, max_raw: 206_700, max_gzip: 94_100 };
+
+/// Crates the page module must never link: it is `web-sys` glue that starts the view-only
+/// worker and loads the editor on an edit action. The editor, PDF export and the whole document
+/// stack (which lives in the worker) stay out.
+pub const PAGE_FORBIDDEN_CRATES: &[&str] = &[
+    "egui",
+    "eframe",
+    "wordcraft-engine",
+    "wordcraft-ui-egui",
+    "krilla",
+    "wordcraft-docx",
+    "wordcraft-layout",
+    "wordcraft-render",
+    "wordcraft-viewer",
+];
+
+/// The byte-scan form of [`PAGE_FORBIDDEN_CRATES`] (supplementary; see [`FORBIDDEN_SYMBOLS`]).
+pub const PAGE_FORBIDDEN_SYMBOLS: &[&str] =
+    &["egui::", "eframe::", "wordcraft_engine::", "wordcraft_ui_egui::", "krilla::", "wordcraft_docx::", "wordcraft_layout::", "wordcraft_render::"];
 
 /// The view-only module's artifact stem (`wordcraft-viewer_bg.wasm`; plan Phase 8). It is not a
 /// dedicated worker and no Trunk link builds it, so it has its own row and its own run
@@ -282,6 +328,49 @@ pub fn find_worker_wasms(dist_web: &Path) -> Vec<PathBuf> {
         .collect();
     matches.sort();
     matches
+}
+
+/// The page module's `wordcraft-viewer-web-<hash>_bg.wasm` in `dist_web`: exactly one, or an
+/// error (a page built from `apps/wordcraft-web/index.html` always has it).
+pub fn find_page_wasm(dist_web: &Path) -> Result<PathBuf, String> {
+    let prefix = format!("{PAGE_STEM}-");
+    let mut matches: Vec<PathBuf> = std::fs::read_dir(dist_web)
+        .map_err(|e| format!("{}: {e}", dist_web.display()))?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(&prefix) && n.ends_with("_bg.wasm")))
+        .collect();
+    matches.sort();
+    match matches.as_slice() {
+        [one] => Ok(one.clone()),
+        [] => Err(format!("no {PAGE_STEM}-*_bg.wasm (the viewer-first page module) in {}", dist_web.display())),
+        many => Err(format!(
+            "ambiguous: {} {PAGE_STEM}-*_bg.wasm files in {} ({}); clean the directory and rebuild",
+            many.len(),
+            dist_web.display(),
+            many.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+        )),
+    }
+}
+
+/// The page module's budget errors: its ceilings, the `name`-section guard and the byte scan.
+fn check_page_budget(r: &WasmReport) -> Vec<String> {
+    let mut errs = Vec::new();
+    if r.has_name_section {
+        errs.push(format!(
+            "{PAGE_STEM} carries a `name` custom section: `wasm-opt` did not run (build with `trunk build --release`), so this artifact is unoptimized and cannot be measured or shipped"
+        ));
+    }
+    if r.total_bytes > PAGE_CEILING.max_raw {
+        errs.push(format!("{PAGE_STEM} uncompressed {} bytes > ceiling {} bytes", r.total_bytes, PAGE_CEILING.max_raw));
+    }
+    if r.gzip_bytes > PAGE_CEILING.max_gzip {
+        errs.push(format!("{PAGE_STEM} gzipped {} bytes > ceiling {} bytes", r.gzip_bytes, PAGE_CEILING.max_gzip));
+    }
+    if !r.found_forbidden.is_empty() {
+        errs.push(format!("forbidden symbols found in {PAGE_STEM}: {}", r.found_forbidden.join(", ")));
+    }
+    errs
 }
 
 /// The `wordcraft-worker-<name>_bg.wasm` stem a [`WorkerCeiling`] is looked up by.
@@ -594,6 +683,36 @@ pub fn run(root: &Path, report_only: bool) -> Result<(), String> {
         "  everything loaded: {total_raw:>10} bytes raw (budget {MAX_TOTAL_UNCOMPRESSED_BYTES:>10}), {total_gz:>10} gzip (budget {MAX_TOTAL_GZIPPED_BYTES:>10})"
     );
 
+    // The viewer-first page module (plan 10.3), and the first-load modules: it and the
+    // view-only worker. The first-load total is reported only; its ceiling is plan 10.5's.
+    let page_report = match find_page_wasm(&dist_web) {
+        Ok(path) => {
+            let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let gz = gzip_size(&path, &bytes)?;
+            let br = brotli_size(&path, &bytes)?;
+            Ok(analyze_wasm_bytes_with(path, &bytes, gz, PAGE_FORBIDDEN_SYMBOLS)?.with_brotli(br))
+        }
+        Err(e) => Err(e),
+    };
+    match &page_report {
+        Ok(r) => {
+            println!(
+                "  page {PAGE_STEM}: uncompressed {:>10} bytes (budget {:>10}), gzip -9 {:>10} bytes (budget {:>10}), brotli q11 {:>10} bytes",
+                r.total_bytes, PAGE_CEILING.max_raw, r.gzip_bytes, PAGE_CEILING.max_gzip, r.brotli_bytes
+            );
+            let viewer_worker = worker_reports.iter().find(|w| worker_stem(&w.path) == VIEWER_WORKER_STEM);
+            let first = std::iter::once(r).chain(viewer_worker);
+            let (raw, gz, br) = first.fold((0usize, 0usize, 0usize), |(a, b, c), w| {
+                (a.saturating_add(w.total_bytes), b.saturating_add(w.gzip_bytes), c.saturating_add(w.brotli_bytes))
+            });
+            println!(
+                "  first load (wasm: {PAGE_STEM} + {}): {raw:>10} bytes raw, {gz:>10} gzip, {br:>10} brotli q11 (reported; no ceiling yet)",
+                if viewer_worker.is_some() { VIEWER_WORKER_STEM } else { "NO VIEWER WORKER" }
+            );
+        }
+        Err(e) => println!("  page {PAGE_STEM}: ERROR ({e})"),
+    }
+
     let sri_res = verify_sri_digests(&dist_web);
     match &sri_res {
         Ok(n) => println!("  SRI digests:  {n} verified cleanly in index.html"),
@@ -611,6 +730,16 @@ pub fn run(root: &Path, report_only: bool) -> Result<(), String> {
     if !forbidden_crates.is_empty() {
         println!("  forbidden crates in wasm dependency graph: {}", forbidden_crates.join(", "));
     }
+    let mut graph_errs = Vec::new();
+    for (package, forbidden) in [(PAGE_STEM, PAGE_FORBIDDEN_CRATES), (VIEWER_WORKER_STEM, VIEWER_WORKER_FORBIDDEN_CRATES)] {
+        let found = crates_in_tree(&wasm_dependency_tree_of(root, package)?, forbidden);
+        if found.is_empty() {
+            println!("  {package}: none of {} in its wasm32 dependency graph", forbidden.join(", "));
+        } else {
+            println!("  {package}: forbidden crates in its wasm32 dependency graph: {}", found.join(", "));
+            graph_errs.push(format!("forbidden crates in the {package} wasm32 dependency graph: {}", found.join(", ")));
+        }
+    }
 
     if report_only {
         return Ok(());
@@ -619,6 +748,11 @@ pub fn run(root: &Path, report_only: bool) -> Result<(), String> {
     for r in &worker_reports {
         errs.extend(check_worker_budget(r));
     }
+    match &page_report {
+        Ok(r) => errs.extend(check_page_budget(r)),
+        Err(e) => errs.push(e.clone()),
+    }
+    errs.extend(graph_errs);
     errs.extend(check_total_budget(&report, &worker_reports));
     if let Err(e) = sri_res {
         errs.push(e);
@@ -808,6 +942,60 @@ mod tests {
         let names: Vec<String> = found.iter().filter_map(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).collect();
         assert_eq!(names, vec!["wordcraft-worker-codecs_bg.wasm", "wordcraft-worker-proof_bg.wasm"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_page_module_and_the_un_hashed_editor_are_told_apart() {
+        let dir = std::env::temp_dir().join(format!("wc_wasm_page_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(find_page_wasm(&dir).unwrap_err().contains("no wordcraft-viewer-web"));
+        // The viewer-first build: the hashed page module, the editor un-hashed, the workers.
+        let page = dir.join("wordcraft-viewer-web-4a1d7206a6ed210d_bg.wasm");
+        let editor = dir.join("wordcraft-web_bg.wasm");
+        for p in [&page, &editor, &dir.join("wordcraft-worker-viewer_bg.wasm"), &dir.join("wordcraft-viewer-web-8adef863fe79cba4.js")] {
+            std::fs::write(p, b"x").unwrap();
+        }
+        assert_eq!(find_page_wasm(&dir).unwrap(), page);
+        assert_eq!(find_core_wasm(&dir).unwrap(), editor, "the page module is not the editor");
+        let workers: Vec<String> = find_worker_wasms(&dir).iter().map(|p| worker_stem(p)).collect();
+        assert_eq!(workers, vec![VIEWER_WORKER_STEM]);
+        std::fs::write(dir.join("wordcraft-viewer-web-0000000000000000_bg.wasm"), b"y").unwrap();
+        assert!(find_page_wasm(&dir).unwrap_err().contains("ambiguous"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn page_budget_flags_over_limit_forbidden_and_unoptimized() {
+        let path = || PathBuf::from("wordcraft-viewer-web-4a1d7206a6ed210d_bg.wasm");
+        let ok = analyze_wasm_bytes_with(path(), &minimal_wasm(1024, 512, b"safe"), 400, PAGE_FORBIDDEN_SYMBOLS).unwrap();
+        assert!(check_page_budget(&ok).is_empty(), "{:?}", check_page_budget(&ok));
+        let linked = analyze_wasm_bytes_with(path(), &minimal_wasm(1024, 512, b"wordcraft_layout::Layout"), 400, PAGE_FORBIDDEN_SYMBOLS).unwrap();
+        assert!(check_page_budget(&linked).iter().any(|e| e.contains("forbidden symbols")));
+        let big =
+            analyze_wasm_bytes_with(path(), &minimal_wasm(PAGE_CEILING.max_raw + 1, 512, b"safe"), PAGE_CEILING.max_gzip + 1, PAGE_FORBIDDEN_SYMBOLS)
+                .unwrap();
+        let errs = check_page_budget(&big);
+        assert!(errs.iter().any(|e| e.contains("uncompressed")) && errs.iter().any(|e| e.contains("gzipped")), "{errs:?}");
+        let named = analyze_wasm_bytes_with(path(), &minimal_wasm(1024, 512, &named_custom_section("name")), 400, PAGE_FORBIDDEN_SYMBOLS).unwrap();
+        assert!(named.has_name_section, "the fixture carries a `name` section");
+        assert!(check_page_budget(&named).iter().any(|e| e.contains("`name` custom section")));
+    }
+
+    #[test]
+    fn page_and_viewer_worker_forbidden_crates_detected_in_dependency_tree() {
+        let page = "wordcraft-viewer-web v0.18.1 (/x)\nwordcraft-worker-proto v0.18.1 (/x)\nweb-sys v0.3.0\nserde v1.0.0\n";
+        assert!(crates_in_tree(page, PAGE_FORBIDDEN_CRATES).is_empty());
+        let heavy = "wordcraft-viewer-web v0.18.1 (/x)\nwordcraft-layout v0.18.1 (/x)\nwordcraft-docx v0.18.1 (/x)\nwordcraft-render v0.18.1 (/x)\negui v0.37.0\n";
+        assert_eq!(crates_in_tree(heavy, PAGE_FORBIDDEN_CRATES), vec!["wordcraft-layout", "wordcraft-docx", "wordcraft-render", "egui"]);
+        // The worker hosts the document stack and a message port; only the editor and PDF are out.
+        let worker = "wordcraft-worker-viewer v0.18.1 (/x)\nwordcraft-viewer v0.18.1 (/x)\nwordcraft-layout v0.18.1 (/x)\nweb-sys v0.3.0\n";
+        assert!(crates_in_tree(worker, VIEWER_WORKER_FORBIDDEN_CRATES).is_empty());
+        let dirty = "wordcraft-worker-viewer v0.18.1 (/x)\nkrilla v0.4.0\nwordcraft-engine v0.18.1 (/x)\n";
+        assert_eq!(crates_in_tree(dirty, VIEWER_WORKER_FORBIDDEN_CRATES), vec!["krilla", "wordcraft-engine"]);
+        // And it has a measured row like every worker.
+        assert!(WORKER_CEILINGS.iter().any(|c| c.name == VIEWER_WORKER_STEM));
+        assert_eq!(forbidden_symbols_for(VIEWER_WORKER_STEM), VIEWER_WORKER_FORBIDDEN_SYMBOLS);
     }
 
     #[test]
