@@ -52,6 +52,11 @@ pub const MAX_PAGE_NUMBER: u32 = 100_000;
 /// Most bytes of `fonts/manifest.json` read from `ASSETS` (the real one is under 2 KB).
 pub const MAX_MANIFEST_BYTES: usize = 64 << 10;
 
+/// Most rounds of installing packs and laying the document out again in one request. One is the
+/// usual case; a second covers a want that shows only once a pack is in. Past that the answer is
+/// sent with what is installed, and not cached publicly.
+pub const MAX_PACK_ROUNDS: usize = 3;
+
 /// Most faces read from the manifest (the real one lists nine).
 pub const MAX_MANIFEST_FACES: usize = 32;
 

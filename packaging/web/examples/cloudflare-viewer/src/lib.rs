@@ -23,7 +23,6 @@ mod params;
 mod png_out;
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use futures_util::StreamExt;
@@ -110,7 +109,7 @@ async fn view_page(env: &Env, url: &Url) -> worker::Result<Response> {
     let Some(doc) = &query.doc else {
         return html_response(200, Caching::Asset, html::upload_form(None, false));
     };
-    let session = match asset_session(env, url, doc).await? {
+    let (session, caching) = match asset_session(env, url, doc).await? {
         Ok(s) => s,
         Err(resp) => return Ok(resp),
     };
@@ -119,7 +118,7 @@ async fn view_page(env: &Env, url: &Url) -> worker::Result<Response> {
         Err(resp) => return resp,
     };
     let (width, height) = document::raster_size(size, document::fit_scale(size, query.scale));
-    html_response(200, Caching::Asset, html::viewer_page(doc, query.page, session.page_count(), width, height, query.scale))
+    html_response(200, caching, html::viewer_page(doc, query.page, session.page_count(), width, height, query.scale))
 }
 
 /// `GET /view/page.png`: one page of `doc` as a PNG.
@@ -131,7 +130,7 @@ async fn page_image(env: &Env, url: &Url) -> worker::Result<Response> {
     let Some(doc) = &query.doc else {
         return error_response(400, "Bad request", "The doc parameter is required.");
     };
-    let session = match asset_session(env, url, doc).await? {
+    let (session, caching) = match asset_session(env, url, doc).await? {
         Ok(s) => s,
         Err(resp) => return Ok(resp),
     };
@@ -140,7 +139,7 @@ async fn page_image(env: &Env, url: &Url) -> worker::Result<Response> {
         Err(resp) => return resp,
     };
     match document::page_png(&session, index, query.scale) {
-        Ok((png, _, _)) => response(200, "image/png", Caching::Asset, png),
+        Ok((png, _, _)) => response(200, "image/png", caching, png),
         Err(e) => error_response(e.status(), "The page can't be drawn", &e.to_string()),
     }
 }
@@ -155,9 +154,11 @@ fn page_of(session: &wordcraft_viewer::Session, query: &ViewQuery) -> Result<(u3
     }
 }
 
-/// Open the deployed document `doc`, with any font packs it asks for. The inner `Err` is the
+/// Open the deployed document `doc`, with any font packs it asks for, and how its answer may be
+/// kept: publicly only when its layout is final ([`fonts::settle`]), so a page drawn with a
+/// substitute because a pack couldn't be read yet is never cached. The inner `Err` is the
 /// response to send instead (404 for a missing document, 4xx for one that can't be opened).
-async fn asset_session(env: &Env, url: &Url, doc: &DocPath) -> worker::Result<Result<wordcraft_viewer::Session, Response>> {
+async fn asset_session(env: &Env, url: &Url, doc: &DocPath) -> worker::Result<Result<(wordcraft_viewer::Session, Caching), Response>> {
     let bytes = match fetch_asset(env, url, doc.as_str(), MAX_BODY_BYTES).await? {
         Fetched::Bytes(b) => b,
         other => {
@@ -167,8 +168,10 @@ async fn asset_session(env: &Env, url: &Url, doc: &DocPath) -> worker::Result<Re
     };
     match document::open_document(&bytes, None) {
         Ok(mut session) => {
-            install_wanted_packs(env, url, &mut session).await;
-            Ok(Ok(session))
+            // Read before any await: the generation the document was just laid out at.
+            let laid_out_at = wordcraft_fonts::FontDb::global().generation();
+            let caching = if install_wanted_packs(env, url, &mut session, laid_out_at).await { Caching::Asset } else { Caching::NoStore };
+            Ok(Ok((session, caching)))
         }
         Err(OpenError::PasswordRequired) => Ok(Err(error_response(
             422,
@@ -285,7 +288,10 @@ async fn upload(req: &mut Request, env: &Env, url: &Url) -> worker::Result<Respo
         }
         Err(e) => return form_error(e.status(), &e.to_string(), false),
     };
-    install_wanted_packs(env, url, &mut session).await;
+    // Read before any await: the generation the document was just laid out at. The answer is
+    // `no-store` whatever the packs do.
+    let laid_out_at = wordcraft_fonts::FontDb::global().generation();
+    install_wanted_packs(env, url, &mut session, laid_out_at).await;
 
     let total = session.page_count();
     let mut images: Vec<(usize, Vec<u8>, u32, u32)> = Vec::new();
@@ -314,44 +320,79 @@ async fn upload(req: &mut Request, env: &Env, url: &Url) -> worker::Result<Respo
     html_response(200, Caching::NoStore, html::upload_result(form.file_name.as_deref(), &pages, total, left_out.as_deref()))
 }
 
+// A Workers isolate runs its wasm on one thread, so these are one per isolate (on the host, where
+// the tests run, one per thread).
 thread_local! {
-    /// `fonts/manifest.json`, read once per isolate (`None` until then).
+    /// `fonts/manifest.json` once read: its faces, or none when the deployment has no usable one
+    /// (missing, too large or not valid). `None` until read; a store that failed is asked again.
     static MANIFEST: RefCell<Option<Rc<Vec<fonts::Face>>>> = const { RefCell::new(None) };
-    /// Pack files already tried in this isolate, whatever the outcome: never fetched twice.
-    static TRIED: RefCell<BTreeSet<String>> = const { RefCell::new(BTreeSet::new()) };
+    /// The packs wanted, installed and unusable, for every request ([`fonts::settle`]).
+    static PACKS: Rc<RefCell<fonts::PackState>> = Rc::new(RefCell::new(fonts::PackState::default()));
 }
 
-/// Install the font packs laying `session` out asked for, then lay it out again. Best effort:
-/// a pack that can't be read leaves the text in a substitute face, as before.
-async fn install_wanted_packs(env: &Env, base: &Url, session: &mut wordcraft_viewer::Session) {
-    let wanted = wordcraft_fonts::FontDb::global().take_wanted_packs();
-    if wanted.is_empty() {
-        return;
+/// Install the font packs the isolate's documents want and lay `session` out again when a font
+/// arrived since `laid_out_at`. Returns whether its layout is final (see [`fonts::settle`]): a
+/// pack that couldn't be read leaves the text in a substitute face, and the answer uncached.
+async fn install_wanted_packs(env: &Env, base: &Url, session: &mut wordcraft_viewer::Session, laid_out_at: u64) -> bool {
+    let state = PACKS.with(Rc::clone);
+    let Some(faces) = manifest(env, base).await else {
+        // The store failed: the wants stay for a later request.
+        state.borrow_mut().note(wordcraft_fonts::FontDb::global().take_wanted_packs());
+        return !state.borrow().has_pending() && wordcraft_fonts::FontDb::global().generation() == laid_out_at;
+    };
+    let mut host = WorkerPacks { env, base, session };
+    fonts::settle(&state, &faces, &mut host, laid_out_at).await
+}
+
+/// [`fonts::PackHost`] over the font database, `ASSETS` and one request's document.
+struct WorkerPacks<'a> {
+    env: &'a Env,
+    base: &'a Url,
+    session: &'a mut wordcraft_viewer::Session,
+}
+
+impl fonts::PackHost for WorkerPacks<'_> {
+    fn take_wants(&mut self) -> Vec<wordcraft_fonts::WantedPackFace> {
+        wordcraft_fonts::FontDb::global().take_wanted_packs()
     }
-    let Some(faces) = manifest(env, base).await else { return };
-    let picks = TRIED.with(|t| fonts::files_for(&faces, &wanted, &t.borrow()));
-    let mut installed = false;
-    for i in picks {
-        let Some(face) = faces.get(i) else { continue };
-        TRIED.with(|t| t.borrow_mut().insert(face.file.clone()));
-        let Ok(Fetched::Bytes(packed)) = fetch_asset(env, base, &format!("fonts/{}", face.file), wordcraft_fonts::MAX_FONT_FILE_BYTES).await else {
-            continue;
-        };
-        let Ok(ttf) = wordcraft_fonts::decode_pack_bytes(&packed, face.bytes) else { continue };
-        installed |= wordcraft_fonts::FontDb::global().install_pack_font(&face.file, &ttf).is_ok();
+
+    async fn read(&mut self, file: &str) -> fonts::PackRead {
+        match fetch_asset(self.env, self.base, &format!("fonts/{file}"), wordcraft_fonts::MAX_FONT_FILE_BYTES).await {
+            Ok(Fetched::Bytes(b)) => fonts::PackRead::Bytes(b),
+            Ok(Fetched::Missing | Fetched::TooLarge) => fonts::PackRead::Unusable,
+            Ok(Fetched::Failed) | Err(_) => fonts::PackRead::Failed,
+        }
     }
-    if installed {
-        session.relayout();
+
+    fn install(&mut self, face: &fonts::Face, packed: &[u8]) -> bool {
+        let Ok(ttf) = wordcraft_fonts::decode_pack_bytes(packed, face.bytes) else { return false };
+        matches!(
+            wordcraft_fonts::FontDb::global().install_pack_font(&face.file, &ttf),
+            Ok(_) | Err(wordcraft_fonts::UserFontError::AlreadyAvailable(_))
+        )
+    }
+
+    fn generation(&self) -> u64 {
+        wordcraft_fonts::FontDb::global().generation()
+    }
+
+    fn relayout(&mut self) {
+        self.session.relayout();
     }
 }
 
-/// The parsed manifest, fetched on first use. A failed fetch is retried on a later request.
+/// The parsed manifest, fetched on first use. A deployment without a usable one has no packs;
+/// a store that failed is asked again by a later request.
 async fn manifest(env: &Env, base: &Url) -> Option<Rc<Vec<fonts::Face>>> {
     if let Some(m) = MANIFEST.with(|m| m.borrow().clone()) {
         return Some(m);
     }
-    let Ok(Fetched::Bytes(json)) = fetch_asset(env, base, "fonts/manifest.json", MAX_MANIFEST_BYTES).await else { return None };
-    let faces = Rc::new(fonts::parse_manifest(&json).ok()?);
+    let faces = match fetch_asset(env, base, "fonts/manifest.json", MAX_MANIFEST_BYTES).await {
+        Ok(Fetched::Bytes(json)) => fonts::parse_manifest(&json).unwrap_or_default(),
+        Ok(Fetched::Missing | Fetched::TooLarge) => Vec::new(),
+        Ok(Fetched::Failed) | Err(_) => return None,
+    };
+    let faces = Rc::new(faces);
     MANIFEST.with(|m| *m.borrow_mut() = Some(faces.clone()));
     Some(faces)
 }

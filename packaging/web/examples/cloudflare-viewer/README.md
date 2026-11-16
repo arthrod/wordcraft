@@ -63,7 +63,8 @@ Every bound is in [`src/limits.rs`](src/limits.rs) with its reason.
   (`wordcraft-fonts`, `minimal-wasm-fonts`). When a document asks for one of the nine faces the site
   ships as font packs (`dist/web/fonts/*.ttf.br`, listed in `fonts/manifest.json`), the Worker reads
   that pack through `ASSETS`, decodes it with the Brotli decoder the font crate already links, and
-  installs it for the life of the isolate, then lays the document out again. Measured: page 1 of
+  installs it for the life of the isolate, then lays the document out again. A pack that failed
+  to read is read again by a later request (see Caching). Measured: page 1 of
   `samples/welcome.docx` from `wrangler dev` is byte for byte the image a host build with all
   thirteen faces draws. Other fonts (Calibri, Aptos, Times New Roman…) are drawn with
   WordCraft's metric-compatible substitutes, as in the browser app; a document set in a font with
@@ -156,8 +157,14 @@ accept it (`[package.metadata.wasm-pack.profile.release]`).
 A response made from a deployed document (viewer page, page image) and the empty upload form carry
 `Cache-Control: public, max-age=600`: the document only changes when the site is deployed again,
 and its name carries no content hash, so ten minutes keeps paging back and forth free without
-hiding a new deployment for long. Everything made from an upload, and every error, is
-`no-store`.
+hiding a new deployment for long. That holds only when the page is drawn as the deployment
+draws it everywhere: a document page is cached publicly only when every font pack its layout
+wants that the manifest offers is installed and the page was laid out after the last one
+arrived. When a pack couldn't be read yet (the store failed, or another request is still
+installing it), the page is drawn with a substitute and sent `no-store`, and a later request
+reads the pack again. A pack the deployment itself can't give (missing, not the size the
+manifest says) is the same in every isolate, so that page is cached with its substitute.
+Everything made from an upload, and every error, is `no-store`.
 
 ## Privacy
 
