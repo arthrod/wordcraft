@@ -3,6 +3,8 @@ use super::{Ui, WordApp, json};
 /// The spelling suggestions and synonyms the context menu offers for the selection or the word
 /// at the caret.
 pub(super) fn context_suggestions(app: &mut WordApp) {
+    // A proofing command like any other: the host hears it (the web starts its proofing worker).
+    app.announce_command("review.suggestions");
     app.canvas.context_issue = app.session.run("review.suggestions", &json!({})).ok().filter(|v| !v.is_null());
     app.canvas.context_synonyms = app.session.run("review.thesaurus", &json!({})).ok().and_then(|v| v.get("synonyms").cloned());
 }
