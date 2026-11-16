@@ -21,7 +21,8 @@
 //        shows, and nothing is thrown uncaught
 //   AC6  served with the deployed Content-Security-Policy (`_headers`, plus the inline
 //        bootstrap's hash as `package.sh` adds it), nothing is refused
-//   and the three modes a host can choose (view, viewer-first, edit), a protected document
+//   and the three modes a host can choose (view, viewer-first, edit), an edit action while
+//   the document still downloads, a protected document
 //   (the password asked in the page), and the editor's parent bridge (?host=parent).
 //
 // Tooling-script JavaScript, like drive.mjs (see README.md).
@@ -325,6 +326,30 @@ try {
     check("AC5 editor download answered late: it shows the same document", typeof late.markdown === "string" && late.markdown.includes(SAMPLE_TEXT));
     check("AC5 editor download stalls: no uncaught error", stall.log.uncaught.length === 0, stall.log.uncaught.join(" | "));
     await stall.page.close();
+  }
+
+  // ---- an edit action while the document is still downloading ----
+  {
+    const slow = await open(browser, base, "/?doc=samples/welcome.docx", { stalled: /\/samples\/welcome\.docx$/ });
+    await slow.page.waitForFunction(() => window.wordcraftViewer, { timeout: 30000 }).catch(() => {});
+    const before = slow.log.requests.length;
+    await slow.page.evaluate(() => window.wordcraftViewer?.edit());
+    await new Promise((r) => setTimeout(r, 1500));
+    const waiting = await slow.page.evaluate(() => ({
+      phase: document.documentElement.getAttribute("data-wordcraft-phase"),
+      edit: (document.querySelector("#wordcraft_viewer_edit")?.getClientRects().length ?? 0) > 0,
+    }));
+    check("slow document: no edit action before it is open", waiting.phase === "viewing" && !waiting.edit && !slow.log.requests.slice(before).some((p) => EDITOR.test(p)), JSON.stringify(waiting));
+    for (const r of slow.held.splice(0)) await r.continue();
+    await waitAttr(slow.page, "data-wordcraft-painted", "true", 30000).catch(() => {});
+    const edit = await slow.page.evaluate(() => (document.querySelector("#wordcraft_viewer_edit")?.getClientRects().length ?? 0) > 0);
+    check("slow document: Edit is offered once it is open", edit);
+    await slow.page.click("#wordcraft_viewer_edit").catch(() => {});
+    await waitAttr(slow.page, "data-wordcraft-phase", "editing", 120000).catch(() => {});
+    const handed = await slow.page.evaluate(() => Promise.resolve(window.wordcraft?.getMarkdown?.()).catch(() => null));
+    check("slow document: the editor shows that document", typeof handed === "string" && handed.includes(SAMPLE_TEXT), JSON.stringify(String(handed).slice(0, 60)));
+    check("slow document: no uncaught errors", slow.log.uncaught.length === 0, slow.log.uncaught.join(" | "));
+    await slow.page.close();
   }
 
   // ---- a protected document: the password is asked for in the page ----
