@@ -315,12 +315,15 @@ pub(crate) fn convert_input_error(len: usize) -> Option<String> {
 pub(crate) const MAX_API_EXPORTS: usize = 16;
 
 /// The PDF exports the page API (`exportPdf`) asked for, waiting on the app's own export: the
-/// API runs `file.exportPdf` under a name claimed here, so the document, the options, the
-/// strict check and the font copies are the command's, and the finished bytes go back to the
-/// API's promise (`sink`) instead of a download.
+/// API runs `file.exportPdf` with a tag claimed here (`hostTag`, which the command hands back
+/// in its export options), so the document, the options, the strict check and the font copies
+/// are the command's, and the finished bytes go back to the API's promise (`sink`) instead of a
+/// download. The tag, not the file name, identifies the claim: any caller can choose a name,
+/// but the tag is a random number only the API call holds, so an export of the same name is
+/// delivered as its own.
 pub(crate) struct ApiExports<S> {
     next: u64,
-    waiting: Vec<(String, S)>,
+    waiting: Vec<(u64, S)>,
 }
 
 impl<S> Default for ApiExports<S> {
@@ -330,30 +333,34 @@ impl<S> Default for ApiExports<S> {
 }
 
 impl<S> ApiExports<S> {
-    /// A fresh export name for `sink`, unlike any a user picks or another claim holds; `None`
-    /// when [`MAX_API_EXPORTS`] are already waiting.
-    pub(crate) fn claim(&mut self, sink: S) -> Option<String> {
-        if self.waiting.len() >= MAX_API_EXPORTS {
+    /// Claim `tag` (a random number from the caller, never 0) for `sink`, with a file name for
+    /// the export; `None` when `tag` is 0 or already claimed, or [`MAX_API_EXPORTS`] are
+    /// already waiting.
+    pub(crate) fn claim(&mut self, tag: u64, sink: S) -> Option<String> {
+        if tag == 0 || self.waiting.len() >= MAX_API_EXPORTS || self.waiting.iter().any(|(t, _)| *t == tag) {
             return None;
         }
         self.next = self.next.wrapping_add(1);
-        let name = format!("wordcraft-api-export-{}.pdf", self.next);
-        self.waiting.push((name.clone(), sink));
-        Some(name)
+        self.waiting.push((tag, sink));
+        Some(format!("wordcraft-api-export-{}.pdf", self.next))
     }
 
-    /// The sink waiting on the export named `name`, taken: once only. `None` for a name no
-    /// claim holds (a user's own export).
-    pub(crate) fn take(&mut self, name: &str) -> Option<S> {
-        let at = self.waiting.iter().position(|(n, _)| n == name)?;
+    /// The sink waiting on the export tagged `tag`, taken: once only. `None` for an export no
+    /// claim holds (a user's own, tag 0, whatever its name).
+    pub(crate) fn take(&mut self, tag: u64) -> Option<S> {
+        if tag == 0 {
+            return None;
+        }
+        let at = self.waiting.iter().position(|(t, _)| *t == tag)?;
         Some(self.waiting.swap_remove(at).1)
     }
 }
 
-/// The `file.exportPdf` parameters for a page-API export under `name`: `markup` as the API
-/// call gave it, else what File › Print's Print Markup says, as the command decides.
-pub(crate) fn api_pdf_params(name: &str, markup: Option<bool>) -> serde_json::Value {
-    let mut params = serde_json::json!({"path": name});
+/// The `file.exportPdf` parameters for a page-API export under `name`, claimed by `tag`:
+/// `markup` as the API call gave it, else what File › Print's Print Markup says, as the command
+/// decides.
+pub(crate) fn api_pdf_params(name: &str, tag: u64, markup: Option<bool>) -> serde_json::Value {
+    let mut params = serde_json::json!({"path": name, "hostTag": tag});
     if let Some(markup) = markup {
         params["markup"] = serde_json::json!(markup);
     }
@@ -1141,37 +1148,65 @@ mod tests {
         }
     }
 
-    /// Review finding (the API's PDF options): the page API's export claims a name, runs the
-    /// app's own `file.exportPdf` under it, and gets the bytes back once; a user's export of
-    /// any name is not taken, and the claims are bounded.
+    /// Review finding (the API's PDF options): the page API's export claims a tag, runs the
+    /// app's own `file.exportPdf` with it, and gets the bytes back once; a user's export is not
+    /// taken, and the claims are bounded.
     #[test]
-    fn an_api_export_claims_its_own_name_once() {
+    fn an_api_export_claims_its_own_tag_once() {
         let mut claims: ApiExports<u32> = ApiExports::default();
-        let a = claims.claim(1).unwrap();
-        let b = claims.claim(2).unwrap();
+        let a = claims.claim(0xA11CE, 1).unwrap();
+        let b = claims.claim(0xB0B, 2).unwrap();
         assert_ne!(a, b);
         assert!(a.ends_with(".pdf") && export_route(&a) == Some(ExportRoute::Pdf), "the command routes it to the PDF worker");
-        assert_eq!(claims.take("report.pdf"), None, "a user's export is delivered, not claimed");
-        assert_eq!(claims.take(&b), Some(2));
-        assert_eq!(claims.take(&b), None, "once");
-        assert_eq!(claims.take(&a), Some(1));
-        for n in 0..MAX_API_EXPORTS {
-            assert!(claims.claim(n as u32).is_some());
+        assert_eq!(claims.take(0), None, "a user's export (no tag) is delivered, not claimed");
+        assert_eq!(claims.take(0xB0B), Some(2));
+        assert_eq!(claims.take(0xB0B), None, "once");
+        assert_eq!(claims.take(0xA11CE), Some(1));
+        assert_eq!(claims.claim(0, 3), None, "0 is no tag");
+        for n in 1..=MAX_API_EXPORTS {
+            assert!(claims.claim(n as u64, n as u32).is_some());
         }
-        assert_eq!(claims.claim(99), None, "bounded");
+        assert_eq!(claims.claim(99, 99), None, "bounded");
+        assert_eq!(claims.take(1), Some(1));
+        assert_eq!(claims.claim(2, 2), None, "a tag already held is not claimed twice");
         // The parameters are the command's own: the same export options the app's File › Export
-        // resolves for the same `markup`, the Print Markup setting deciding when none is given.
+        // resolves for the same `markup`, the Print Markup setting deciding when none is given,
+        // plus the tag the export hands back.
         let mut s = wordcraft_engine::Session::new(wordcraft_doc::Document::from_text("Figures"));
         s.prefs.print_markup = true;
         for markup in [None, Some(true), Some(false)] {
-            let api = wordcraft_engine::cmd::file::export_options(&s, &api_pdf_params(&a, markup));
+            let api = wordcraft_engine::cmd::file::export_options(&s, &api_pdf_params(&a, 0xA11CE, markup));
+            assert_eq!(api.host_tag, 0xA11CE);
             let mut user = serde_json::json!({"path": "report.pdf"});
             if let Some(m) = markup {
                 user["markup"] = serde_json::json!(m);
             }
-            assert_eq!(api, wordcraft_engine::cmd::file::export_options(&s, &user), "{markup:?}");
+            let user = wordcraft_engine::cmd::file::export_options(&s, &user);
+            assert_eq!(user.host_tag, 0);
+            assert_eq!(wordcraft_engine::io::ExportOptions { host_tag: 0, ..api }, user, "{markup:?}");
         }
-        assert!(wordcraft_engine::cmd::file::export_options(&s, &api_pdf_params(&a, None)).markup);
+        assert!(wordcraft_engine::cmd::file::export_options(&s, &api_pdf_params(&a, 1, None)).markup);
+    }
+
+    /// Review finding (gate 3, F5): the claim was found by file name, so a caller exporting under
+    /// the API's (predictable) name — `execute("file.exportPdf", {path: name})` — took the API's
+    /// promise with its own bytes, lost its own download, and the API's export was downloaded
+    /// instead. The claim is the API's tag now: the same-name export, untagged, is delivered as
+    /// its own, and the API's export still reaches its promise.
+    #[test]
+    fn an_export_under_the_apis_name_is_delivered_as_its_own() {
+        let mut claims: ApiExports<&str> = ApiExports::default();
+        let name = claims.claim(0x5EC_2E7, "the API's promise").unwrap();
+        let mut s = wordcraft_engine::Session::new(wordcraft_doc::Document::from_text("Figures"));
+        let user = wordcraft_engine::cmd::file::export_options(&s, &serde_json::json!({"path": name}));
+        let api = wordcraft_engine::cmd::file::export_options(&s, &api_pdf_params(&name, 0x5EC_2E7, None));
+        // The user's export finishes first: the finished export is routed by its own options.
+        assert_eq!(claims.take(user.host_tag), None, "the same-name export is the user's: delivered");
+        assert_eq!(claims.take(api.host_tag), Some("the API's promise"), "the API's export reaches its promise");
+        // A caller guessing a tag has no claim to take once it is answered.
+        s.prefs.print_markup = false;
+        let guess = wordcraft_engine::cmd::file::export_options(&s, &serde_json::json!({"path": name, "hostTag": 0x5EC_2E7}));
+        assert_eq!(claims.take(guess.host_tag), None);
     }
 
     /// A job's answers, its armed timers and the worker stops, recorded for the deadline tests.

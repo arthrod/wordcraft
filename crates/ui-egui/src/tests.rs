@@ -5933,12 +5933,15 @@ fn web_lazy_export_hands_the_host_the_commands_export_options() {
         ("file.exportPdf", json!({"path": "b.pdf", "markup": true})),
         ("file.saveAs", json!({"path": "c.pdf", "markup": true})),
         ("file.saveAs", json!({"path": "d.rtf", "markup": true})),
+        // A host's own tag for the export comes back with its options (the page API's claim).
+        ("file.exportPdf", json!({"path": "f.pdf", "hostTag": 0x5EC_2E7u64})),
     ];
     for (id, params) in cases.iter().cloned() {
         let expected = wordcraft_engine::cmd::file::export_options(&a.session, &params);
         a.execute(id, params.clone()).unwrap();
         let (name, got) = asked.borrow_mut().pop().unwrap();
         assert_eq!(got, expected, "{id} {params}: the host gets the options the engine's writer would use ({name})");
+        assert_eq!(got.host_tag, params.get("hostTag").and_then(serde_json::Value::as_u64).unwrap_or(0), "{id} {params}");
     }
     // Comments hidden in Track Changes Options stay hidden; File › Print's Print Markup counts.
     a.session.prefs.markup.comments = false;

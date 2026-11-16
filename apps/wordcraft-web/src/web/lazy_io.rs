@@ -44,22 +44,33 @@ thread_local! {
     /// Save As / Export jobs between the request and the delivery: the leave-page guard asks
     /// while there are any ([`exports_in_flight`]).
     static EXPORTS_IN_FLIGHT: Cell<usize> = const { Cell::new(0) };
-    /// PDF exports the page API asked for, by the name its `file.exportPdf` runs under.
+    /// PDF exports the page API asked for, by the tag its `file.exportPdf` runs with.
     static API_EXPORTS: RefCell<ApiExports<ApiSink>> = RefCell::new(ApiExports::default());
 }
 
 /// Where a page-API export's bytes (or the reason there are none) go.
 pub(crate) type ApiSink = Box<dyn FnOnce(Result<Vec<u8>, String>)>;
 
-/// Claim an export name for the page API ([`ApiExports`]): the app's own `file.exportPdf` run
-/// under it hands its result to `sink` instead of delivering it. `None` when too many wait.
-pub(crate) fn claim_api_export(sink: ApiSink) -> Option<String> {
-    API_EXPORTS.with(|c| c.borrow_mut().claim(sink))
+/// Claim an export for the page API ([`ApiExports`]): a random tag from the browser's secure
+/// random source, and a file name. The app's own `file.exportPdf` run with that tag
+/// (`hostTag`) hands its result to `sink` instead of delivering it. `Err` when no secure random
+/// source answers, or too many wait.
+pub(crate) fn claim_api_export(sink: ApiSink) -> Result<(u64, String), String> {
+    let mut bytes = [0u8; 8];
+    web_sys::window()
+        .ok_or("no window")?
+        .crypto()
+        .map_err(|_| "no secure random source")?
+        .get_random_values_with_u8_array(&mut bytes)
+        .map_err(|_| "no secure random source")?;
+    let tag = u64::from_le_bytes(bytes).max(1);
+    let name = API_EXPORTS.with(|c| c.borrow_mut().claim(tag, sink)).ok_or("too many PDF exports are waiting")?;
+    Ok((tag, name))
 }
 
-/// Give up the claim on `name` (its command failed, so no export will answer it).
-pub(crate) fn release_api_export(name: &str) {
-    let released = API_EXPORTS.with(|c| c.borrow_mut().take(name));
+/// Give up the claim on `tag` (its command failed, so no export will answer it).
+pub(crate) fn release_api_export(tag: u64) {
+    let released = API_EXPORTS.with(|c| c.borrow_mut().take(tag));
     drop(released);
 }
 
@@ -287,11 +298,12 @@ impl Exporter {
         say(&self.messages, &self.ctx, format!("Exporting {name}…"));
         // The leave-page guard covers the export from now until it is delivered or failed.
         EXPORTS_IN_FLIGHT.with(|n| n.set(n.get().saturating_add(1)));
-        let (messages, ctx, name, deliver) = (self.messages.clone(), self.ctx.clone(), name.to_string(), self.deliver.clone());
+        let (messages, ctx, name, deliver, tag) = (self.messages.clone(), self.ctx.clone(), name.to_string(), self.deliver.clone(), opts.host_tag);
         let done = move |reply: Result<Vec<u8>, String>| {
             EXPORTS_IN_FLIGHT.with(|n| n.set(n.get().saturating_sub(1)));
-            // The page API's export goes back to its promise, not to a download.
-            let claimed = API_EXPORTS.with(|c| c.borrow_mut().take(&name));
+            // The page API's export (its tag, never its name) goes back to its promise, not to
+            // a download.
+            let claimed = API_EXPORTS.with(|c| c.borrow_mut().take(tag));
             if let Some(sink) = claimed {
                 return sink(reply);
             }

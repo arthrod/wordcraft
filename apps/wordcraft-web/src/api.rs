@@ -283,7 +283,7 @@ fn attach_doc_helpers(api: &js_sys::Object, queue: Sender<ControlRequest>, ctx: 
     convert_document.forget();
 
     // PDF export through the dedicated worker (plan §3.4), as the app's own File › Export runs
-    // it: the API runs `file.exportPdf` under a name it claims (`lazy_io::claim_api_export`), so
+    // it: the API runs `file.exportPdf` with a tag it claims (`lazy_io::claim_api_export`), so
     // the document as printed, the export options (Print Markup, comments, digits), the strict
     // check and the font copies are the command's, and the finished bytes come back here
     // instead of a download. `markup` overrides Print Markup, as the command's own parameter.
@@ -297,21 +297,21 @@ fn attach_doc_helpers(api: &js_sys::Object, queue: Sender<ControlRequest>, ctx: 
             // The reply lands on a later task turn; the shared waker set (drained every shell
             // frame by `wake_waiters`, and woken here from the reply closure) completes it.
             let (tx, rx) = std::sync::mpsc::channel::<Result<Vec<u8>, String>>();
-            let name = crate::web::lazy_io::claim_api_export(Box::new(move |reply| {
+            let (tag, name) = crate::web::lazy_io::claim_api_export(Box::new(move |reply| {
                 let _ = tx.send(reply);
                 wake_waiters();
             }))
-            .ok_or_else(|| js_err("too many PDF exports are waiting"))?;
-            let params = crate::lazy_formats::api_pdf_params(&name, markup);
+            .map_err(|e| js_err(&e))?;
+            let params = crate::lazy_formats::api_pdf_params(&name, tag, markup);
             match execute_command(q, c, "file.exportPdf", params).await {
                 // The worker has the job (or already answered it).
                 Ok(res) if res.get("pending").and_then(Value::as_bool) == Some(true) => {}
                 Ok(_) => {
-                    crate::web::lazy_io::release_api_export(&name);
+                    crate::web::lazy_io::release_api_export(tag);
                     return Err(js_err("the PDF export did not run in the PDF worker"));
                 }
                 Err(e) => {
-                    crate::web::lazy_io::release_api_export(&name);
+                    crate::web::lazy_io::release_api_export(tag);
                     return Err(e);
                 }
             }
