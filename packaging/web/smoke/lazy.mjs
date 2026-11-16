@@ -230,13 +230,22 @@ const flows = {
       await s.page.evaluate(() => globalThis.wordcraft.execute("document.setText", { text: "cleared" }));
       await drop(s.page, "fixture.odt", odt.bytes);
       shown.odt = await until("the .odt text", async () => (await s.text()).includes(ODT_TEXT), 60_000).catch(() => false);
+      // Opening and saving these formats is the codecs worker's job alone: the PDF worker stays unfetched.
+      const pdfRequests = s.asked("wordcraft-worker-pdf");
       return {
-        pass: before.length === 0 && shown.rtf === true && shown.html === true && shown.odt === true && afterFirst.length >= 3 && s.pageErrors.length === 0,
+        pass:
+          before.length === 0 &&
+          shown.rtf === true &&
+          shown.html === true &&
+          shown.odt === true &&
+          afterFirst.length >= 3 &&
+          pdfRequests.length === 0 &&
+          s.pageErrors.length === 0,
         codecRequestsBeforeOpen: before,
         codecRequestsAfterFirstOpen: afterFirst,
         shown,
         said: s.consoleLog.filter((m) => /Opening |Opened |Couldn't /.test(m.text)).map((m) => m.text),
-        otherWorkerRequests: s.asked("wordcraft-worker-pdf"),
+        pdfRequests,
         pageErrors: s.pageErrors,
       };
     } finally {
@@ -253,10 +262,19 @@ const flows = {
       const answer = await s.page.evaluate(() => globalThis.wordcraft.execute("file.exportPdf", {}));
       const file = await download(s.page, ".pdf");
       const head = String.fromCharCode(...file.bytes.slice(0, 5));
+      // The PDF worker reads the Word package itself: the codecs worker stays unfetched.
+      const codecRequests = s.asked("wordcraft-worker-codecs");
       return {
-        pass: before.length === 0 && head === "%PDF-" && file.bytes.length > 2_000 && s.asked("wordcraft-worker-pdf").length >= 3 && s.pageErrors.length === 0,
+        pass:
+          before.length === 0 &&
+          head === "%PDF-" &&
+          file.bytes.length > 2_000 &&
+          s.asked("wordcraft-worker-pdf").length >= 3 &&
+          codecRequests.length === 0 &&
+          s.pageErrors.length === 0,
         pdfRequestsBeforeExport: before,
         pdfRequestsAfterExport: s.asked("wordcraft-worker-pdf"),
+        codecRequests,
         commandAnswer: answer,
         name: file.name,
         head,
