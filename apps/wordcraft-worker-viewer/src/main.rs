@@ -71,10 +71,11 @@ impl ViewerWorker {
     }
 
     /// `viewOpen`: read the package and lay it out. The document held before stays in place
-    /// when the new one can't be opened.
+    /// when the new one can't be opened; when it can, the fonts the one before embedded go with
+    /// it.
     fn open(&mut self, payload: &[u8]) -> Outcome {
         let req = proto::decode_view_open_request(payload).map_err(proto_error)?;
-        let session = wordcraft_viewer::open(&req.docx, req.password.as_deref()).map_err(viewer_error)?;
+        let session = wordcraft_viewer::open_after(self.session.as_ref(), &req.docx, req.password.as_deref()).map_err(viewer_error)?;
         let opened = opened_reply(&session)?;
         self.session = Some(session);
         Ok(opened)
@@ -360,6 +361,99 @@ mod tests {
         let (env, payload) = open(&mut worker, b"not a package", None, 4);
         assert_eq!(error_code(&env, &payload), ErrorCode::Unreadable);
         assert_eq!(render(&mut worker, 0, 1.0, 5).0.kind, Kind::ViewPage);
+    }
+
+    /// The repository's JetBrains Mono under `family` (the same length as its own name), so the
+    /// family is one no system and no other test has.
+    fn font_named(family: &str) -> Vec<u8> {
+        const ORIGINAL: &str = "JetBrains Mono";
+        assert_eq!(family.len(), ORIGINAL.len());
+        let mut data = std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts/JetBrainsMono-Regular.ttf")).unwrap();
+        let utf16 = |s: &str| s.encode_utf16().flat_map(u16::to_be_bytes).collect::<Vec<u8>>();
+        for (from, to) in [(utf16(ORIGINAL), utf16(family)), (ORIGINAL.as_bytes().to_vec(), family.as_bytes().to_vec())] {
+            let mut i = 0;
+            while let Some(at) = data[i..].windows(from.len()).position(|w| w == from) {
+                data[i + at..i + at + to.len()].copy_from_slice(&to);
+                i += at + to.len();
+            }
+        }
+        data
+    }
+
+    /// A `.docx` whose text is set in `family`, embedding `font` for it (a plain `.ttf`, the
+    /// all-zero key) or not.
+    fn docx_in(family: &str, font: Option<&[u8]>) -> Vec<u8> {
+        const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+        const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        const PR: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
+        let rels = |items: &[(&str, &str)]| {
+            let list: String = items.iter().map(|(t, g)| format!(r#"<Relationship Id="rId{t}" Type="{R}/{t}" Target="{g}"/>"#)).collect();
+            format!(r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="{PR}">{list}</Relationships>"#)
+        };
+        let mut files: Vec<(String, Vec<u8>)> = vec![
+            (
+                "[Content_Types].xml".into(),
+                br#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="ttf" ContentType="application/x-font-ttf"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/fontTable.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"/></Types>"#.to_vec(),
+            ),
+            ("_rels/.rels".into(), rels(&[("officeDocument", "word/document.xml")]).into_bytes()),
+            ("word/_rels/document.xml.rels".into(), rels(&[("fontTable", "fontTable.xml")]).into_bytes()),
+            (
+                "word/document.xml".into(),
+                format!(r#"<w:document xmlns:w="{W}"><w:body><w:p><w:r><w:rPr><w:rFonts w:ascii="{family}" w:hAnsi="{family}"/></w:rPr><w:t>Set in {family}</w:t></w:r></w:p></w:body></w:document>"#).into_bytes(),
+            ),
+        ];
+        let mut table = format!(r#"<w:fonts xmlns:w="{W}" xmlns:r="{R}"><w:font w:name="{family}">"#);
+        if let Some(font) = font {
+            table.push_str(r#"<w:embedRegular r:id="rIdfont" w:fontKey="{00000000-0000-0000-0000-000000000000}" w:subsetted="0"/>"#);
+            files.push(("word/_rels/fontTable.xml.rels".into(), rels(&[("font", "fonts/font1.ttf")]).into_bytes()));
+            files.push(("word/fonts/font1.ttf".into(), font.to_vec()));
+        }
+        table.push_str("</w:font></w:fonts>");
+        files.push(("word/fontTable.xml".into(), table.into_bytes()));
+        let mut zip = craft_zip::Writer::new();
+        for (name, bytes) in files {
+            zip.add(&name, &bytes, craft_zip::Compression::Deflated).unwrap();
+        }
+        zip.finish().unwrap()
+    }
+
+    fn missing(worker: &mut ViewerWorker, id: u32) -> Vec<String> {
+        let (rh, rp) = worker.handle_message(&header(Kind::ViewMissingFonts, id), b"{}");
+        assert_eq!(proto::decode_envelope(&rh).unwrap().kind, Kind::ViewFonts, "{}", String::from_utf8_lossy(&rp));
+        serde_json::from_slice::<proto::ViewFontsReply>(&rp).unwrap().missing
+    }
+
+    #[test]
+    fn a_documents_embedded_fonts_do_not_outlive_it() {
+        const FAMILY: &str = "JetBrains Wkr1";
+        let embedding = docx_in(FAMILY, Some(&font_named(FAMILY)));
+        let naming = docx_in(FAMILY, None);
+        let mut worker = ViewerWorker::new();
+        assert_eq!(open(&mut worker, &embedding, None, 1).0.kind, Kind::ViewOpened);
+        assert_eq!(missing(&mut worker, 2), Vec::<String>::new(), "it embeds the font it uses");
+        // A replacement that cannot be opened leaves the document shown with its fonts.
+        assert_eq!(open(&mut worker, b"not a package", None, 3).0.kind, Kind::Error);
+        assert_eq!(missing(&mut worker, 4), Vec::<String>::new(), "the shown document keeps its font");
+        // The next document only names the family: the first one's font is gone with it.
+        assert_eq!(open(&mut worker, &naming, None, 5).0.kind, Kind::ViewOpened);
+        assert_eq!(missing(&mut worker, 6), vec![FAMILY.to_string()], "another document's embedded font does not answer for this one");
+        // Opened again, the first document brings its font again.
+        assert_eq!(open(&mut worker, &embedding, None, 7).0.kind, Kind::ViewOpened);
+        assert_eq!(missing(&mut worker, 8), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_font_the_host_installs_stays_when_the_document_that_embedded_it_goes() {
+        const FAMILY: &str = "JetBrains Wkr2";
+        let font = font_named(FAMILY);
+        let mut worker = ViewerWorker::new();
+        assert_eq!(open(&mut worker, &docx_in(FAMILY, Some(&font)), None, 1).0.kind, Kind::ViewOpened);
+        // The host installs the same font by that name: already there, so nothing new is added.
+        let payload = proto::encode_view_install_font_request(&proto::ViewInstallFontRequest { name: FAMILY.into(), bytes: font.clone() }).unwrap();
+        let (rh, rp) = worker.handle_message(&header(Kind::ViewInstallFont, 2), &payload);
+        assert_eq!(proto::decode_envelope(&rh).unwrap().kind, Kind::ViewOpened, "{}", String::from_utf8_lossy(&rp));
+        assert_eq!(open(&mut worker, &docx_in(FAMILY, None), None, 3).0.kind, Kind::ViewOpened);
+        assert_eq!(missing(&mut worker, 4), Vec::<String>::new(), "the host's font is still installed");
     }
 
     #[test]

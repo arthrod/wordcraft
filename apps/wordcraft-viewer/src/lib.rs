@@ -173,6 +173,9 @@ pub struct PageImage {
 pub struct Session {
     doc: Document,
     layout: DocLayout,
+    /// The faces this document's embedded fonts added: withdrawn when another document takes
+    /// its place ([`open_after`]).
+    fonts: wordcraft_fonts::DocumentFaces,
 }
 
 /// Open the `.docx` package in `bytes` (decrypted with `password` when it is encrypted) and lay
@@ -186,22 +189,68 @@ pub fn open(bytes: &[u8], password: Option<&str>) -> Result<Session, ViewerError
     }
     let mut doc = wordcraft_docx::read_with_password(bytes, password)?;
     doc.ensure_nonempty();
-    load_embedded_fonts(&doc);
+    let fonts = load_embedded_fonts(&doc);
     let layout = lay_out(&doc);
-    Ok(Session { doc, layout })
+    Ok(Session { doc, layout, fonts })
 }
+
+/// [`open`], to take the place of `current`: `current`'s embedded fonts are withdrawn first, so
+/// the new document is never laid out with fonts another document embedded (nor is its own
+/// subset of a family skipped as already present), and they are put back if it cannot be
+/// opened, when the caller keeps `current`.
+pub fn open_after(current: Option<&Session>, bytes: &[u8], password: Option<&str>) -> Result<Session, ViewerError> {
+    let db = wordcraft_fonts::FontDb::global();
+    if let Some(current) = current {
+        db.withdraw_document_fonts(&current.fonts);
+    }
+    let opened = open(bytes, password);
+    if opened.is_err()
+        && let Some(current) = current
+    {
+        db.reinstate_document_fonts(&current.fonts);
+    }
+    opened
+}
+
+/// Most bytes of embedded fonts one process loads, over every document it opens. A face that
+/// layout has used stays in memory for the rest of the process (`wordcraft_fonts::FaceRef` keeps
+/// it, by design), whether or not it was withdrawn since, so this, not the font list, is what
+/// bounds them. Past it a document's embedded fonts are left out and its text falls back to
+/// other fonts ([`Session::missing_fonts`] names them).
+pub const MAX_EMBEDDED_FONT_BYTES: usize = 128 << 20;
+
+/// The embedded-font bytes loaded so far in this process ([`MAX_EMBEDDED_FONT_BYTES`]).
+static EMBEDDED_FONT_BYTES: Mutex<usize> = Mutex::new(0);
 
 /// Load the fonts `doc` embeds for this run, in memory only, as the engine does when it opens
 /// a file: text set in a font that isn't installed is then laid out in it. The reader has
-/// already bounded them; they don't count against [`MAX_FONTS`].
-fn load_embedded_fonts(doc: &Document) {
+/// already bounded them per document; they don't count against [`MAX_FONTS`], but against
+/// [`MAX_EMBEDDED_FONT_BYTES`]. The faces added are the session's.
+fn load_embedded_fonts(doc: &Document) -> wordcraft_fonts::DocumentFaces {
     let files: Vec<(Vec<u8>, String)> = wordcraft_docx::embedded_fonts(doc)
         .into_iter()
         .filter_map(|f| wordcraft_fonts::decode_font_file(&f.data).ok().map(|data| (data, f.name)))
         .collect();
-    if !files.is_empty() {
-        wordcraft_fonts::FontDb::global().add_document_fonts(files);
+    let mut used = EMBEDDED_FONT_BYTES.lock().unwrap_or_else(PoisonError::into_inner);
+    let files = within_budget(&mut used, MAX_EMBEDDED_FONT_BYTES, files);
+    if files.is_empty() {
+        return wordcraft_fonts::DocumentFaces::default();
     }
+    wordcraft_fonts::FontDb::global().add_document_fonts_scoped(files)
+}
+
+/// The files of `files` that fit in what is left of `max` after `used`, in order, counted in.
+fn within_budget(used: &mut usize, max: usize, files: Vec<(Vec<u8>, String)>) -> Vec<(Vec<u8>, String)> {
+    files
+        .into_iter()
+        .filter(|(data, _)| match used.checked_add(data.len()).filter(|n| *n <= max) {
+            Some(n) => {
+                *used = n;
+                true
+            }
+            None => false,
+        })
+        .collect()
 }
 
 impl Session {
@@ -248,6 +297,9 @@ impl Session {
     /// sessions see the font once they [`Session::relayout`].
     pub fn install_font(&mut self, name: &str, bytes: &[u8]) -> Result<(), ViewerError> {
         install_font(name, bytes)?;
+        // The host's font by that name now: faces this document embedded under it, which the
+        // install may have found already there, outlive the document.
+        self.fonts.release_family(name.trim());
         self.relayout();
         Ok(())
     }
@@ -377,6 +429,20 @@ pub fn install_font(name: &str, bytes: &[u8]) -> Result<(), ViewerError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedded_fonts_stop_loading_at_the_process_budget() {
+        let file = |n: usize| (vec![0u8; n], format!("F{n}"));
+        let mut used = 0;
+        let names = |files: Vec<(Vec<u8>, String)>| files.into_iter().map(|(_, n)| n).collect::<Vec<_>>();
+        assert_eq!(names(within_budget(&mut used, 10, vec![file(4), file(5), file(3)])), ["F4", "F5"], "the third would pass it");
+        assert_eq!(used, 9);
+        assert_eq!(names(within_budget(&mut used, 10, vec![file(2), file(1)])), ["F1"], "what is left still takes a file that fits");
+        assert_eq!(used, 10);
+        assert!(within_budget(&mut used, 10, vec![file(1)]).is_empty(), "spent");
+        let mut near = usize::MAX - 1;
+        assert!(within_budget(&mut near, usize::MAX, vec![file(2)]).is_empty(), "no overflow");
+    }
 
     #[test]
     fn font_budget_bounds_count_and_bytes() {

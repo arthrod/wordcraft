@@ -15,7 +15,9 @@ use skrifa::string::StringId;
 use skrifa::{GlyphId, MetadataProvider};
 
 pub(crate) mod user;
-pub use user::{FONT_FILE_EXTS, FontFormat, Installed, MAX_FONT_FILE_BYTES, UserFont, UserFontError, decode_font_file, is_font_file_name, sniff};
+pub use user::{
+    DocumentFaces, FONT_FILE_EXTS, FontFormat, Installed, MAX_FONT_FILE_BYTES, UserFont, UserFontError, decode_font_file, is_font_file_name, sniff,
+};
 
 mod catalog;
 mod face;

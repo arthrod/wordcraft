@@ -17,7 +17,7 @@ use std::sync::atomic::Ordering;
 use skrifa::MetadataProvider;
 use skrifa::raw::FileRef;
 
-use super::{FontBytes, FontDb, enumerate_faces, make_face};
+use super::{FontBytes, FontDb, FontFace, RunFallbackCache, enumerate_faces, make_face};
 
 /// Largest font file accepted (as given: TTF, OTF, TTC, WOFF or WOFF2).
 pub const MAX_FONT_FILE_BYTES: usize = 50 << 20;
@@ -489,6 +489,61 @@ impl FontDb {
         added
     }
 
+    /// [`FontDb::add_document_fonts`], answering with the faces the document added, so they can
+    /// be withdrawn when another document takes its place ([`FontDb::withdraw_document_fonts`]):
+    /// a font one document embeds then never answers for a later one that only names the family,
+    /// and the later one's own subset of a family is not skipped as already present.
+    pub fn add_document_fonts_scoped(&self, files: Vec<(Vec<u8>, String)>) -> DocumentFaces {
+        let added = self.add_font_faces(files.into_iter().map(|(data, name)| (data, Some(name))).collect());
+        if !added.is_empty() {
+            self.fonts_changed();
+        }
+        DocumentFaces(added)
+    }
+
+    /// Take a document's faces out of the font list: lookups no longer find them, and fallback
+    /// choices made while they were there are forgotten. Faces not in the list are skipped.
+    /// Layouts made with them keep drawing with them.
+    pub fn withdraw_document_fonts(&self, faces: &DocumentFaces) {
+        let ids: std::collections::HashSet<u32> = faces.0.iter().map(|f| f.id).collect();
+        let mut list = self.faces.write().unwrap_or_else(|e| e.into_inner());
+        let before = list.len();
+        list.retain(|f| !ids.contains(&f.id));
+        let removed = list.len() != before;
+        drop(list);
+        if removed {
+            self.forget_choices();
+        }
+    }
+
+    /// Put a document's withdrawn faces back (the document after it failed to open), each
+    /// unless the list already has that family and style. The same faces, so their ids and
+    /// cached outlines are still good.
+    pub fn reinstate_document_fonts(&self, faces: &DocumentFaces) {
+        let key = |f: &FontFace| (f.family.to_ascii_lowercase(), f.style.to_ascii_lowercase());
+        let mut list = self.faces.write().unwrap_or_else(|e| e.into_inner());
+        let mut present: std::collections::HashSet<_> = list.iter().map(|g| key(g)).collect();
+        let before = list.len();
+        for f in &faces.0 {
+            if present.insert(key(f)) {
+                list.push(f.clone());
+            }
+        }
+        let added = list.len() != before;
+        drop(list);
+        if added {
+            self.forget_choices();
+        }
+    }
+
+    /// Faces left the list or came back: every fallback choice may be another now. The run cache
+    /// is kept by face count, which a withdrawal and a later addition can bring back to the same
+    /// number, so it is emptied too.
+    fn forget_choices(&self) {
+        *self.run_fallbacks.write().unwrap_or_else(|e| e.into_inner()) = RunFallbackCache::default();
+        self.fonts_changed();
+    }
+
     /// Check the faces in `sfnt` and add the new ones, recording them as a user font.
     fn add_user_faces(&self, name: &str, sfnt: Vec<u8>, path: Option<PathBuf>) -> Result<UserFont, UserFontError> {
         if self.read_user().fonts.len() >= MAX_USER_FONTS {
@@ -734,3 +789,26 @@ fn write_unique(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<PathBuf
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+/// The faces one document added to the font list ([`FontDb::add_document_fonts_scoped`]).
+#[derive(Clone, Default)]
+pub struct DocumentFaces(Vec<Arc<FontFace>>);
+
+impl DocumentFaces {
+    /// How many faces the document added.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether it added none.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Let go of the faces answering to `family`: they are no longer the document's alone (a
+    /// host installed a font by that name, which found them already there), so they stay when
+    /// the document's faces are withdrawn.
+    pub fn release_family(&mut self, family: &str) {
+        self.0.retain(|f| !f.named(family));
+    }
+}

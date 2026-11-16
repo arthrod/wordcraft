@@ -502,3 +502,41 @@ fn named_instances_and_collection_members_are_capped() {
     // (under 0.1 s on a loaded machine) only backs up "read once", with room for a busy CI.
     assert!(started.elapsed() < std::time::Duration::from_secs(10), "{:?}", started.elapsed());
 }
+
+/// A document's fonts are its own: withdrawn when another document takes its place, so they
+/// never answer for one that only names the family, and back if that document fails to open.
+#[test]
+fn a_documents_fonts_leave_with_it_and_come_back_if_the_next_one_fails() {
+    let db = FontDb::with_font_dirs(vec![]);
+    let bold = include_bytes!("../../../../assets/fonts/SourceSans3-Bold.ttf").to_vec();
+    let faces = db.add_document_fonts_scoped(vec![(bold.clone(), "Contract Bold".to_string())]);
+    assert_eq!(faces.len(), 1, "the document's face is new under its own name");
+    assert!(db.has_family("Contract Bold"));
+    let generation = db.generation();
+    db.withdraw_document_fonts(&faces);
+    assert!(!db.has_family("Contract Bold"), "a later document does not see it");
+    assert!(db.runtime_faces().is_empty());
+    assert!(db.generation() > generation, "lookups made while it was there are forgotten");
+    db.reinstate_document_fonts(&faces);
+    assert!(db.has_family("Contract Bold"), "the next document failed: it is back");
+    db.reinstate_document_fonts(&faces);
+    assert_eq!(db.runtime_faces().len(), 1, "back once, however often it is reinstated");
+
+    // The next document embeds the same family and style (Word embeds subsets, so its bytes may
+    // differ): with the first withdrawn, its own face is added, not skipped as already present.
+    db.withdraw_document_fonts(&faces);
+    let next = db.add_document_fonts_scoped(vec![(bold.clone(), "Contract Bold".to_string())]);
+    assert_eq!(next.len(), 1, "the next document's own face");
+    // Reinstating the first beside it adds nothing under a family and style already present.
+    db.reinstate_document_fonts(&faces);
+    assert_eq!(db.runtime_faces().len(), 1);
+    // Withdrawing faces it does not hold changes nothing.
+    db.withdraw_document_fonts(&faces);
+    assert_eq!(db.runtime_faces().len(), 1);
+    // Faces a host has since installed under that name are let go of: they stay.
+    let mut next = next;
+    next.release_family("contract bold");
+    assert!(next.is_empty());
+    db.withdraw_document_fonts(&next);
+    assert!(db.has_family("Contract Bold"));
+}
