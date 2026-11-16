@@ -312,6 +312,45 @@ pub struct ConvertRequest {
     pub password: Option<String>,
     /// The file to convert, at most [`MAX_CONVERT_BYTES`].
     pub input: Vec<u8>,
+    /// Import only: the page a file that gives no page size of its own opens on — the paper of
+    /// the user's region, as the engine opens such a file in its session. `None` (also what a
+    /// client that predates the field sends) is a new blank document's page.
+    pub page: Option<PageSize>,
+}
+
+/// A page size in twentieths of a point (twips, as a Word package writes it), each side within
+/// [`MIN_PAGE_TWIPS`]..=[`MAX_PAGE_TWIPS`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PageSize {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// The narrowest page side a `convert` request may ask for: 0.1 inch.
+pub const MIN_PAGE_TWIPS: u32 = 144;
+/// The widest page side a `convert` request may ask for: 22 inches.
+pub const MAX_PAGE_TWIPS: u32 = 31_680;
+
+impl PageSize {
+    /// Both sides within [`MIN_PAGE_TWIPS`]..=[`MAX_PAGE_TWIPS`].
+    pub fn is_valid(&self) -> bool {
+        (MIN_PAGE_TWIPS..=MAX_PAGE_TWIPS).contains(&self.width) && (MIN_PAGE_TWIPS..=MAX_PAGE_TWIPS).contains(&self.height)
+    }
+
+    /// The size of a `width` × `height` point page, rounded to whole twips; `None` for a side
+    /// that is not finite or falls outside the bounds.
+    pub fn from_points(width: f32, height: f32) -> Option<PageSize> {
+        let twips = |pt: f32| {
+            let t = (f64::from(pt) * 20.0).round();
+            (t.is_finite() && t >= f64::from(MIN_PAGE_TWIPS) && t <= f64::from(MAX_PAGE_TWIPS)).then_some(t as u32)
+        };
+        Some(PageSize { width: twips(width)?, height: twips(height)? })
+    }
+
+    /// `(width, height)` in points.
+    pub fn points(&self) -> (f32, f32) {
+        (self.width as f32 / 20.0, self.height as f32 / 20.0)
+    }
 }
 
 /// One font the client sends the PDF worker (§3.4): the file's bytes plus the family and style
@@ -385,6 +424,9 @@ struct ConvertMeta {
     direction: ConvertDirection,
     #[serde(default)]
     password: Option<String>,
+    /// Absent from an older client's request: the default page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    page: Option<PageSize>,
 }
 
 /// The JSON part of a `renderPdf` payload: the fonts' names, in `fonts` order, and the job's
@@ -471,7 +513,7 @@ pub fn unpack_binary(bytes: &[u8]) -> Result<Vec<&[u8]>, ProtoError> {
 
 /// Encode a `convert` payload: a two-part [`pack_binary`] frame, JSON metadata then `input`.
 pub fn encode_convert_request(req: &ConvertRequest) -> Result<Vec<u8>, ProtoError> {
-    let meta = encode_payload(&ConvertMeta { format: req.format.clone(), direction: req.direction, password: req.password.clone() })?;
+    let meta = encode_payload(&ConvertMeta { format: req.format.clone(), direction: req.direction, password: req.password.clone(), page: req.page })?;
     pack_binary(&[&meta, &req.input])
 }
 
@@ -498,7 +540,10 @@ pub fn decode_convert_request(bytes: &[u8]) -> Result<ConvertRequest, ProtoError
     if meta.format.is_empty() {
         return Err(ProtoError::Decode("convert payload has an empty format".into()));
     }
-    Ok(ConvertRequest { format: meta.format, direction: meta.direction, password: meta.password, input: input.to_vec() })
+    if meta.page.is_some_and(|p| !p.is_valid()) {
+        return Err(ProtoError::Decode(format!("convert payload has a page size outside {MIN_PAGE_TWIPS}..={MAX_PAGE_TWIPS} twips")));
+    }
+    Ok(ConvertRequest { format: meta.format, direction: meta.direction, password: meta.password, input: input.to_vec(), page: meta.page })
 }
 
 /// Encode a `renderPdf` payload: `[metaJson, docx, font0, font1, …]`.
@@ -562,7 +607,7 @@ pub fn convert_request_error(req: &ConvertRequest) -> Option<ErrorCode> {
     {
         return Some(ErrorCode::TooLarge);
     }
-    if req.format.is_empty() {
+    if req.format.is_empty() || req.page.is_some_and(|p| !p.is_valid()) {
         return Some(ErrorCode::BadRequest);
     }
     None
@@ -871,6 +916,7 @@ mod tests {
             direction: ConvertDirection::Import,
             password: Some("open-sesame".into()),
             input: b"{\\rtf1 hi}".to_vec(),
+            page: Some(PageSize { width: 11_906, height: 16_838 }),
         }
     }
 
@@ -936,6 +982,56 @@ mod tests {
         let meta: serde_json::Value = serde_json::from_slice(unpack_binary(&encode_convert_request(&req).unwrap()).unwrap()[0]).unwrap();
         assert_eq!(meta["password"], serde_json::Value::Null);
         assert_eq!(decode_convert_request(&encode_convert_request(&req).unwrap()).unwrap(), req);
+    }
+
+    /// Review finding (the page of an opened file): the page an import opens on travels in the
+    /// JSON part, in twips; a request without one, as an older client sends it, has none, and an
+    /// older worker reads a new request (serde ignores the field it does not know).
+    #[test]
+    fn convert_request_carries_the_page_compatibly() {
+        let req = sample_convert();
+        let meta: serde_json::Value = serde_json::from_slice(unpack_binary(&encode_convert_request(&req).unwrap()).unwrap()[0]).unwrap();
+        assert_eq!(meta["page"], serde_json::json!({"width": 11_906, "height": 16_838}));
+        let none = ConvertRequest { page: None, ..sample_convert() };
+        let meta: serde_json::Value = serde_json::from_slice(unpack_binary(&encode_convert_request(&none).unwrap()).unwrap()[0]).unwrap();
+        assert!(meta.get("page").is_none(), "no page, no field: {meta}");
+        assert_eq!(decode_convert_request(&encode_convert_request(&none).unwrap()).unwrap(), none);
+        #[derive(Deserialize)]
+        struct OldConvertMeta {
+            format: String,
+        }
+        let old: OldConvertMeta = decode_payload(unpack_binary(&encode_convert_request(&req).unwrap()).unwrap()[0]).unwrap();
+        assert_eq!(old.format, "rtf");
+        // Points round to twips; A4 and Letter as the engine's regions give them.
+        assert_eq!(PageSize::from_points(595.28, 841.89), Some(PageSize { width: 11_906, height: 16_838 }));
+        assert_eq!(PageSize::from_points(612.0, 792.0), Some(PageSize { width: 12_240, height: 15_840 }));
+        assert_eq!(PageSize::from_points(612.0, 792.0).unwrap().points(), (612.0, 792.0));
+        for (w, h) in [(f32::NAN, 792.0), (612.0, f32::INFINITY), (-612.0, 792.0), (0.0, 792.0), (612.0, 1e9), (7.1, 792.0), (1584.1, 792.0)] {
+            assert_eq!(PageSize::from_points(w, h), None, "{w} x {h}");
+        }
+        assert!(PageSize::from_points(7.2, 1584.0).is_some(), "the bounds themselves fit");
+    }
+
+    /// A hostile page is a typed error, never a panic or a page laid out at any size.
+    #[test]
+    fn convert_request_rejects_a_hostile_page() {
+        for page in [
+            serde_json::json!({"width": 0, "height": 15_840}),
+            serde_json::json!({"width": 12_240, "height": MAX_PAGE_TWIPS + 1}),
+            serde_json::json!({"width": u64::MAX, "height": 15_840}),
+            serde_json::json!({"width": -1, "height": 15_840}),
+            serde_json::json!({"width": 12.5, "height": 15_840}),
+            serde_json::json!({"width": 12_240}),
+            serde_json::json!("A4"),
+        ] {
+            let meta = encode_payload(&serde_json::json!({"format": "html", "direction": "import", "page": page})).unwrap();
+            let frame = pack_binary(&[&meta, b"<p>x</p>"]).unwrap();
+            assert!(matches!(decode_convert_request(&frame), Err(ProtoError::Decode(_))), "{page}");
+        }
+        let req = ConvertRequest { page: Some(PageSize { width: 12_240, height: 0 }), ..sample_convert() };
+        assert_eq!(convert_request_error(&req), Some(ErrorCode::BadRequest));
+        let req = ConvertRequest { page: Some(PageSize { width: 12_240, height: 15_840 }), ..sample_convert() };
+        assert_eq!(convert_request_error(&req), None);
     }
 
     #[test]

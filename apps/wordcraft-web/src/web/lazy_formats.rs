@@ -164,6 +164,20 @@ pub(crate) fn pdf_job_options(opts: &wordcraft_engine::io::ExportOptions) -> wor
     wordcraft_worker_proto::PdfJobOptions { markup: opts.markup, comments: opts.markup && opts.comments, numeral }
 }
 
+/// The `convert` request that opens `input`, a file in format `format`, as a Word package. A
+/// file that gives no page size opens on the paper of `region` (the user's), as the engine opens
+/// such a file in its session (`io::open_bytes_in`); the worker has no session to ask.
+pub(crate) fn open_request(format: String, input: Vec<u8>, region: &wordcraft_engine::Region) -> wordcraft_worker_proto::ConvertRequest {
+    let page = wordcraft_engine::io::region_page(region);
+    wordcraft_worker_proto::ConvertRequest {
+        format,
+        direction: wordcraft_worker_proto::ConvertDirection::Import,
+        password: None,
+        input,
+        page: wordcraft_worker_proto::PageSize::from_points(page.page_w, page.page_h),
+    }
+}
+
 /// The name a converted file opens under: the engine picks a reader by extension, and what
 /// it is handed is a Word package, so `report.odt` opens as `report.docx`. The original name
 /// stays in the messages the user sees.
@@ -584,5 +598,21 @@ mod tests {
         // Neither strict nor the 2003 XML flag is a PDF option.
         let other = ExportOptions { strict: true, word2003: true, ..Default::default() };
         assert_eq!(pdf_job_options(&other), PdfJobOptions::default());
+    }
+
+    /// Review finding (the page of an opened file): a file opened through the codecs worker asks
+    /// for the paper of the user's region, the page the engine would open it on in-process.
+    #[test]
+    fn an_opened_file_asks_for_the_regions_paper() {
+        use wordcraft_engine::Region;
+        use wordcraft_worker_proto::{ConvertDirection, PageSize};
+        for (tag, w, h) in [("pl-PL", 11_906, 16_838), ("en-US", 12_240, 15_840), ("fr-CA", 12_240, 15_840)] {
+            let region = Region::from_tag(tag);
+            let req = open_request("html".into(), b"<p>x</p>".to_vec(), &region);
+            assert_eq!(req.page, Some(PageSize { width: w, height: h }), "{tag}");
+            let engine = wordcraft_engine::io::region_page(&region);
+            assert_eq!(req.page.map(|p| p.points()), Some(((engine.page_w * 20.0).round() / 20.0, (engine.page_h * 20.0).round() / 20.0)), "{tag}");
+            assert_eq!((req.direction, req.password.as_deref(), req.format.as_str()), (ConvertDirection::Import, None, "html"));
+        }
     }
 }

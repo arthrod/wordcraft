@@ -245,7 +245,9 @@ fn attach_doc_helpers(api: &js_sys::Object, queue: Sender<ControlRequest>, ctx: 
                 return fail(&reject, "convertDocument expects a non-empty `data`".into());
             }
             let password = str_prop("password");
-            let req = wordcraft_worker_proto::ConvertRequest { format, direction, password, input };
+            // A page-level conversion has no session, so no region: a file without a page size
+            // converts on a new blank document's page.
+            let req = wordcraft_worker_proto::ConvertRequest { format, direction, password, input, page: None };
             // The same job the app's own Open and Save As run (`lazy_io`): starts the worker on
             // first use and answers once, with the bytes or the reason there are none.
             crate::web::lazy_io::convert(&asset_base_convert, &req, move |reply| match reply {

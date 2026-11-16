@@ -22,7 +22,8 @@ use wordcraft_worker_proto as proto;
 
 use super::{codec_worker, pdf_worker};
 use crate::lazy_formats::{
-    ExportRoute, JobKind, JobQueue, NO_ANSWER, Once, export_route, failure_message, import_format, job_budget_ms, opened_name, pdf_job_options,
+    ExportRoute, JobKind, JobQueue, NO_ANSWER, Once, export_route, failure_message, import_format, job_budget_ms, open_request, opened_name,
+    pdf_job_options,
 };
 
 /// Status-bar lines waiting for the shell's next frame.
@@ -211,7 +212,9 @@ fn say_failed(messages: &Messages, ctx: &egui::Context, action: &str, name: &str
 /// package, which the app opens like any other picked file — beside a document that has work in
 /// it, never in its place (`file.open`). Everything else is left where it was, so what the
 /// engine reads itself never waits on a worker.
-pub(crate) fn take_foreign_opens(inbox: &Inbox, asset_base: &str, messages: &Messages, ctx: &egui::Context) {
+///
+/// `region` is the user's: a file that gives no page size opens on its paper ([`open_request`]).
+pub(crate) fn take_foreign_opens(inbox: &Inbox, asset_base: &str, messages: &Messages, ctx: &egui::Context, region: &wordcraft_engine::Region) {
     let taken = {
         let mut pending = inbox.lock().unwrap_or_else(|e| e.into_inner());
         if pending.is_empty() {
@@ -230,7 +233,7 @@ pub(crate) fn take_foreign_opens(inbox: &Inbox, asset_base: &str, messages: &Mes
     };
     for (name, bytes, format) in taken {
         say(messages, ctx, format!("Opening {name}…"));
-        let req = proto::ConvertRequest { format, direction: proto::ConvertDirection::Import, password: None, input: bytes };
+        let req = open_request(format, bytes, region);
         let (inbox, messages, ctx) = (inbox.clone(), messages.clone(), ctx.clone());
         convert(asset_base, &req, move |reply| match reply {
             Ok(docx) => {
@@ -287,8 +290,13 @@ impl Exporter {
         match route {
             ExportRoute::Pdf => render_pdf(&self.asset_base, docx, pdf_job_options(opts), opts.strict, done),
             ExportRoute::Codec(format) => {
-                let req =
-                    proto::ConvertRequest { format, direction: proto::ConvertDirection::Export, password: password.map(str::to_string), input: docx };
+                let req = proto::ConvertRequest {
+                    format,
+                    direction: proto::ConvertDirection::Export,
+                    password: password.map(str::to_string),
+                    input: docx,
+                    page: None,
+                };
                 convert(&self.asset_base, &req, done);
             }
         }

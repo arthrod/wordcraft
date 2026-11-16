@@ -535,7 +535,7 @@ impl eframe::App for WebShell {
         }
         // Picked, dropped or host-sent files only the codecs worker reads leave the inbox here
         // and come back as Word packages on a later frame (plan 10.2); the app opens the rest.
-        lazy_io::take_foreign_opens(&self.inbox, &self.asset_base, &self.messages, ctx);
+        lazy_io::take_foreign_opens(&self.inbox, &self.asset_base, &self.messages, ctx, &self.app.session.region());
         self.app.logic(ctx);
         // Wanted pack faces are recorded during layout, so drain them after the app ran.
         font_packs::drain_wanted(ctx);
