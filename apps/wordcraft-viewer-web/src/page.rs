@@ -545,13 +545,19 @@ fn hide_notice(page: &Page) {
 
 /// The document, or the viewer itself, failed: say so in the notice line.
 fn show_error(page: &Page, code: &str, text: &str) {
-    page.notice.set_inner_text(text);
-    page.notice.set_hidden(false);
     page.status.set_inner_text("");
     if let Some(html) = html(page) {
         let _ = html.set_attribute("data-wordcraft-error", code);
     }
     remove_skeleton(page);
+    notify(page, text);
+}
+
+/// Say `text` in the notice line and reject the waiting `open()` calls with it. Alone, for a
+/// request refused beside an open document, which stays as it is (no error flag, its status).
+fn notify(page: &Page, text: &str) {
+    page.notice.set_inner_text(text);
+    page.notice.set_hidden(false);
     let waiters = std::mem::take(&mut page.state.borrow_mut().open_waiters);
     for (_, reject) in waiters {
         let _ = reject.call1(&JsValue::NULL, &js_error(text));
@@ -669,10 +675,11 @@ async fn fetch_same_origin(page: &Rc<Page>, url: &str) -> Result<js_sys::Uint8Ar
 /// only the few bytes of framing come from this module.
 fn open_document(page: &Rc<Page>, bytes: js_sys::Uint8Array, password: Option<String>) {
     // A password past what the protocol carries is the password's problem, not the document's:
-    // an open document stays, otherwise the password is asked for again in the page.
+    // an open document stays untouched (the notice says why, the open() rejects), otherwise the
+    // password is asked for again in the page.
     if password.as_deref().is_some_and(|p| p.len() > proto::MAX_PASSWORD_BYTES) {
         if page.state.borrow().handover.document_open() {
-            return show_error(page, "password-too-long", PASSWORD_TOO_LONG);
+            return notify(page, PASSWORD_TOO_LONG);
         }
         let stale = forget_pages(page);
         {

@@ -640,6 +640,27 @@ try {
       return { first: await first, second: await second };
     }, long, six);
     check("two open() calls: the superseded one rejects, the other resolves with its own count", String(both.first).startsWith("rejected:") && both.second === 6 && (await shown(slow.page)).count === 6, JSON.stringify(both));
+    // open() with a password too long while a document is open: rejected, and the open document
+    // keeps its status line, Edit, and no error flag.
+    const beside = await slow.page.evaluate(async (doc) => {
+      const status = () => document.querySelector("#wordcraft_viewer [role=status]")?.innerText ?? "";
+      const before = status();
+      const got = await window.wordcraftViewer.open(new Uint8Array(doc), "x".repeat(300)).then(() => "resolved", (e) => `rejected: ${e.message}`);
+      return {
+        got,
+        before,
+        status: status(),
+        error: document.documentElement.getAttribute("data-wordcraft-error"),
+        notice: document.querySelector("#wordcraft_viewer_notice")?.hidden === false ? document.querySelector("#wordcraft_viewer_notice").innerText : null,
+        count: window.wordcraftViewer.pageCount(),
+        edit: (document.querySelector("#wordcraft_viewer_edit")?.getClientRects().length ?? 0) > 0,
+      };
+    }, long);
+    check(
+      "open() with a password too long beside an open document: rejected, the document untouched",
+      /^rejected: .*password/i.test(beside.got) && beside.error === null && beside.status === beside.before && beside.status.length > 0 && beside.count === 6 && beside.edit && /password/i.test(beside.notice ?? ""),
+      JSON.stringify(beside),
+    );
     check("open() races: no uncaught errors", slow.log.uncaught.length === 0, slow.log.uncaught.join(" | "));
     await slow.page.close();
 
