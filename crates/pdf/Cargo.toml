@@ -13,7 +13,7 @@ default = ["writer"]
 writer = [
     "dep:craft-pdf",
     "dep:wordcraft-fonts",
-    "dep:wordcraft-metafile",
+    "dep:craft-metafile",
     "dep:kurbo",
     "dep:image",
     "dep:log",
@@ -25,7 +25,7 @@ wordcraft-doc = { workspace = true }
 wordcraft-geom = { workspace = true, features = ["image"] }
 wordcraft-fonts = { workspace = true, optional = true }
 wordcraft-layout = { workspace = true, default-features = false }
-wordcraft-metafile = { workspace = true, optional = true }
+craft-metafile = { workspace = true, optional = true }
 craft-pdf = { workspace = true, optional = true }
 kurbo = { workspace = true, optional = true }
 image = { workspace = true, optional = true }

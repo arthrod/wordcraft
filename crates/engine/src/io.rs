@@ -521,7 +521,7 @@ pub fn save_bytes_with(name: &str, doc: &Document, password: Option<&str>, opts:
     let bytes = save_bytes_opts(name, doc, opts)?;
     match password {
         #[cfg(feature = "extra-formats")]
-        Some(pw) if matches!(ext_of(name).as_str(), "odt" | "ott") => wordcraft_formats::odt::encrypt(&bytes, pw),
+        Some(pw) if matches!(ext_of(name).as_str(), "odt" | "ott") => wordcraft_formats::odt::encrypt(&bytes, pw).map_err(|e| e.to_string()),
         #[cfg(not(feature = "extra-formats"))]
         Some(_) if matches!(ext_of(name).as_str(), "odt" | "ott") => Err("ODT export is not included in this build".into()),
         Some(pw) if can_encrypt(name) => wordcraft_docx::encrypt(&bytes, pw).map_err(|e| e.to_string()),
