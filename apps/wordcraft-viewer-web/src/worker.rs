@@ -115,13 +115,23 @@ impl ViewerWorker {
 }
 
 impl Drop for ViewerWorker {
+    /// Stop the worker. Every request still waiting is answered with a typed `error`, as when
+    /// the worker dies: its sink may hold a host promise (`installFont`), which would otherwise
+    /// wait for ever. The sinks run after the state borrow is released, so the owner must drop
+    /// this outside its own borrows (the page does: `remove_viewer`).
     fn drop(&mut self) {
-        // Detach first so a message that races the drop can't touch freed state, then stop the
-        // worker itself.
-        let inner = self.inner.borrow();
-        inner.worker.set_onmessage(None);
-        inner.worker.set_onerror(None);
-        inner.worker.terminate();
+        let pending = {
+            let mut inner = self.inner.borrow_mut();
+            // Detach first so a message that races the drop can't touch freed state, then stop
+            // the worker itself.
+            inner.worker.set_onmessage(None);
+            inner.worker.set_onerror(None);
+            inner.worker.terminate();
+            inner.failed = true;
+            inner.queued.clear();
+            inner.pending.drain().collect::<Vec<_>>()
+        };
+        fail_pending(pending, "the viewer stopped: the editor took over the page");
     }
 }
 

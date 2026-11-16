@@ -740,7 +740,8 @@ fn forget_pages(page: &Page) -> Vec<PageCanvas> {
 }
 
 fn on_opened(page: &Rc<Page>, generation: u32, env: &proto::Envelope, payload: &js_sys::Uint8Array) {
-    if page.state.borrow().generation != generation {
+    // A request answered as the viewer goes (`remove_viewer`) is no concern of the editor's page.
+    if page.state.borrow().removed || page.state.borrow().generation != generation {
         return;
     }
     if env.kind == proto::Kind::ViewOpened {
@@ -1261,14 +1262,19 @@ fn await_paint(page: &Rc<Page>) {
 /// The editor has painted: stop the worker, take the viewer's elements away, and give the
 /// editor's canvas the focus.
 fn remove_viewer(page: &Rc<Page>) {
-    let (worker, canvases) = {
+    let (worker, canvases, waiters) = {
         let mut state = page.state.borrow_mut();
         state.removed = true;
         state.cache.clear();
-        (state.worker.take(), state.canvases.drain().collect::<Vec<_>>())
+        (state.worker.take(), state.canvases.drain().collect::<Vec<_>>(), std::mem::take(&mut state.open_waiters))
     };
+    // Outside the borrow: stopping the worker answers its waiting requests (an `installFont`
+    // promise among them), whose sinks come back to the page.
     drop(worker);
     drop(canvases);
+    for (_, reject) in waiters {
+        let _ = reject.call1(&JsValue::NULL, &js_error("the editor took over the page"));
+    }
     page.root.remove();
     remove_skeleton(page);
     if let Some(canvas) = page.document.get_element_by_id(EDITOR_CANVAS_ID).and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok()) {

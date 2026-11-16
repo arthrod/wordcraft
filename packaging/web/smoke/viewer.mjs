@@ -602,6 +602,22 @@ try {
       check("font then open: the page shows the new document", after.count === got.opened && after.pages === got.opened, detail);
       check("font then open: no uncaught errors", race.log.uncaught.length === 0, race.log.uncaught.join(" | "));
       await race.page.close();
+
+      // installFont() still waiting on the worker when the editor takes over: the viewer's worker
+      // is stopped, and the promise settles (rejects) instead of waiting for ever.
+      const handed = await open(browser, base, "/", { hooks: true });
+      await waitAttr(handed.page, "data-wordcraft-painted", "true");
+      await handed.page.evaluate(async () => {
+        const font = new Uint8Array(await (await fetch("/__fixture/font.ttf")).arrayBuffer());
+        window.__hold = true; // the worker's answer to installFont never arrives
+        window.__installed = window.wordcraftViewer.installFont("Fixture Font", font).then(() => "resolved", (e) => `rejected: ${e.message}`);
+      });
+      await handed.page.click("#wordcraft_viewer_edit");
+      await waitAttr(handed.page, "data-wordcraft-phase", "editing", 120000).catch(() => {});
+      const settled = await handed.page.evaluate(() => Promise.race([window.__installed, new Promise((r) => setTimeout(() => r("pending"), 3000))]));
+      check("installFont() pending when the editor takes over: it rejects, not waits for ever", (await attr(handed.page, "data-wordcraft-phase")) === "editing" && settled.startsWith("rejected:"), settled);
+      check("installFont() pending at the hand-over: no uncaught errors", handed.log.uncaught.length === 0, handed.log.uncaught.join(" | "));
+      await handed.page.close();
     }
   }
 
