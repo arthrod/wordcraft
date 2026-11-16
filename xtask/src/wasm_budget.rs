@@ -337,13 +337,21 @@ pub fn find_worker_wasms(dist_web: &Path) -> Vec<PathBuf> {
 /// The page module's `wordcraft-viewer-web-<hash>_bg.wasm` in `dist_web`: exactly one, or an
 /// error (a page built from `apps/wordcraft-web/index.html` always has it).
 pub fn find_page_wasm(dist_web: &Path) -> Result<PathBuf, String> {
+    let entries = std::fs::read_dir(dist_web).map_err(|e| format!("{}: {e}", dist_web.display()))?.map(|e| e.map(|e| e.path()));
+    unique_page_wasm(dist_web, entries)
+}
+
+/// [`find_page_wasm`] over the listing `entries` of `dist_web`. An entry that cannot be read is
+/// an error: a second page module may be behind it, so "exactly one" would not be known.
+fn unique_page_wasm(dist_web: &Path, entries: impl Iterator<Item = std::io::Result<PathBuf>>) -> Result<PathBuf, String> {
     let prefix = format!("{PAGE_STEM}-");
-    let mut matches: Vec<PathBuf> = std::fs::read_dir(dist_web)
-        .map_err(|e| format!("{}: {e}", dist_web.display()))?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(&prefix) && n.ends_with("_bg.wasm")))
-        .collect();
+    let mut matches = Vec::new();
+    for entry in entries {
+        let path = entry.map_err(|e| format!("{}: {e}", dist_web.display()))?;
+        if path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(&prefix) && n.ends_with("_bg.wasm")) {
+            matches.push(path);
+        }
+    }
     matches.sort();
     match matches.as_slice() {
         [one] => Ok(one.clone()),
@@ -967,6 +975,20 @@ mod tests {
         std::fs::write(dir.join("wordcraft-viewer-web-0000000000000000_bg.wasm"), b"y").unwrap();
         assert!(find_page_wasm(&dir).unwrap_err().contains("ambiguous"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_listing_that_fails_part_way_is_an_error_not_a_unique_page_module() {
+        // One page module read, then the listing fails: a second one may be behind the failure,
+        // so "exactly one" is not known.
+        let dir = Path::new("dist/web");
+        let page = dir.join("wordcraft-viewer-web-4a1d7206a6ed210d_bg.wasm");
+        let failed = || std::io::Error::other("the listing failed");
+        let err = unique_page_wasm(dir, [Ok(page.clone()), Err(failed())].into_iter()).unwrap_err();
+        assert!(err.contains("the listing failed") && err.contains("dist/web"), "{err}");
+        let err = unique_page_wasm(dir, [Err(failed()), Ok(page.clone())].into_iter()).unwrap_err();
+        assert!(err.contains("the listing failed"), "{err}");
+        assert_eq!(unique_page_wasm(dir, [Ok(page.clone()), Ok(dir.join("wordcraft-web_bg.wasm"))].into_iter()).unwrap(), page);
     }
 
     #[test]
