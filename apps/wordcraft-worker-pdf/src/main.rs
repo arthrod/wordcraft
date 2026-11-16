@@ -46,7 +46,9 @@ pub fn handle_message(header: &[u8], payload: &[u8]) -> (Vec<u8>, Vec<u8>) {
         Kind::Cancel => cancel(payload),
         Kind::RenderPdf => render_pdf(payload),
         // This worker renders PDFs; it does not proof or convert formats.
-        Kind::Check | Kind::Configure | Kind::Convert => error(ErrorCode::UnknownKind, "`renderPdf` is the only job this worker runs".into()),
+        Kind::Check | Kind::Configure | Kind::Convert | Kind::ViewOpen | Kind::ViewRender | Kind::ViewInstallFont | Kind::ViewMissingFonts => {
+            error(ErrorCode::UnknownKind, "`renderPdf` is the only job this worker runs".into())
+        }
         // Unreachable: `is_request` was checked above.
         other => error(ErrorCode::UnknownKind, format!("`{other:?}` is a reply, not a request")),
     };

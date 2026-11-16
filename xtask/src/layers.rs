@@ -61,6 +61,7 @@ pub const TABLE: &[(&str, Class)] = &[
     ("worker-proof", Class::Exempt),
     ("worker-codecs", Class::Exempt),
     ("worker-pdf", Class::Exempt),
+    ("worker-viewer", Class::Exempt),
     // The view-only module exposes its handle through wasm-bindgen, like the workers: an app.
     ("viewer", Class::Exempt),
     ("xtask", Class::Exempt),

@@ -57,7 +57,9 @@ pub fn handle_message(header: &[u8], payload: &[u8]) -> (Vec<u8>, Vec<u8>) {
         Kind::Cancel => cancel(payload),
         Kind::Convert => convert(payload),
         // This worker converts; it does not proof or render.
-        Kind::Check | Kind::Configure | Kind::RenderPdf => error(ErrorCode::UnknownKind, "`convert` is the only job this worker runs".into()),
+        Kind::Check | Kind::Configure | Kind::RenderPdf | Kind::ViewOpen | Kind::ViewRender | Kind::ViewInstallFont | Kind::ViewMissingFonts => {
+            error(ErrorCode::UnknownKind, "`convert` is the only job this worker runs".into())
+        }
         // Unreachable: `is_request` was checked above.
         other => error(ErrorCode::UnknownKind, format!("`{other:?}` is a reply, not a request")),
     };
