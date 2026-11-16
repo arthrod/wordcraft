@@ -152,10 +152,6 @@ pub struct FontFace {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(super) hint_slow: std::sync::atomic::AtomicU32,
     pub(super) hinting_off: std::sync::atomic::AtomicBool,
-    /// Added for one document while it is shown ([`FontDb::add_document_fonts_scoped`]): an
-    /// installed font of the same family and style takes its place instead of being skipped as
-    /// already present, since the document's face leaves with the document.
-    pub(super) document: bool,
     /// A hinted draw slower than this is a strike ([`HINT_STRIKE`]; tests shorten it).
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) hint_strike: std::time::Duration,

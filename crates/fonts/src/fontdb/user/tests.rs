@@ -632,27 +632,3 @@ fn a_pack_cap_counts_faces_freed_before_commit() {
     assert!(!db.has_family(FAMILY), "the interleaved removal still happened");
     assert!(!db.has_family(PACKFAMILY), "the refused pack committed no face");
 }
-
-#[test]
-fn an_install_takes_the_place_of_a_documents_face_of_its_family_and_style() {
-    // A face one document embeds is that document's for as long as it is shown. A pack, a user
-    // font or a host's font of the same family and style is not skipped as already present: it
-    // takes the document's face's place, so the family stays when the document goes.
-    for (how, family) in [("pack", "Pack Sans Abc"), ("user", "User Sans Abc"), ("host", "Host Sans Abc")] {
-        let db = db();
-        let font = renamed("SourceSans3-Regular.ttf", family);
-        let doc = db.add_document_fonts_scoped(vec![(font.clone(), family.to_string())]);
-        assert_eq!(doc.len(), 1, "{how}");
-        let added = match how {
-            "pack" => db.install_pack_font("pack.ttf", &font).map(|f| f.len()).unwrap_or(0),
-            "user" => db.install_font("user.ttf", &font).map(|i| i.font.faces.len()).unwrap_or(0),
-            _ => db.add_document_fonts(vec![(font.clone(), family.to_string())]),
-        };
-        assert_eq!(added, 1, "{how}: its face is added in the document's place");
-        assert_eq!(db.read_faces().iter().filter(|f| f.named(family)).count(), 1, "{how}: one face for the family and style");
-        db.withdraw_document_fonts(&doc);
-        assert_eq!(db.styles(family), ["Regular"], "{how}: the family stays when the document goes");
-        db.reinstate_document_fonts(&doc);
-        assert_eq!(db.read_faces().iter().filter(|f| f.named(family)).count(), 1, "{how}: the document's face does not come back beside it");
-    }
-}

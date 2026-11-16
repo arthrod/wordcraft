@@ -15,9 +15,10 @@ mod script;
 mod ui_fallback;
 pub mod word;
 
+pub use fontdb::DocumentFaces;
 pub use fontdb::{
-    DocumentFaces, FALLBACK_FAMILY, FONT_FILE_EXTS, FaceRef, FontDb, FontFace, FontFormat, Installed, LocalName, MAX_FONT_FILE_BYTES, UserFont,
-    UserFontError, base_style, bundled, bundled_by_stem, decode_font_file, is_font_file_name, name_language_matches, sniff, system_font_dirs,
+    FALLBACK_FAMILY, FONT_FILE_EXTS, FaceRef, FontDb, FontFace, FontFormat, Installed, LocalName, MAX_FONT_FILE_BYTES, UserFont, UserFontError,
+    base_style, bundled, bundled_by_stem, decode_font_file, is_font_file_name, name_language_matches, sniff, system_font_dirs,
 };
 pub use harfrust::Feature;
 use harfrust::{Direction, ShapeOptions, ShapePlan, ShapePlanKey, Shaper, Tag, UnicodeBuffer};

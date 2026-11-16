@@ -14,10 +14,10 @@ use skrifa::raw::FileRef;
 use skrifa::string::StringId;
 use skrifa::{GlyphId, MetadataProvider};
 
+mod document;
 pub(crate) mod user;
-pub use user::{
-    DocumentFaces, FONT_FILE_EXTS, FontFormat, Installed, MAX_FONT_FILE_BYTES, UserFont, UserFontError, decode_font_file, is_font_file_name, sniff,
-};
+pub use document::DocumentFaces;
+pub use user::{FONT_FILE_EXTS, FontFormat, Installed, MAX_FONT_FILE_BYTES, UserFont, UserFontError, decode_font_file, is_font_file_name, sniff};
 
 mod catalog;
 mod face;
@@ -26,7 +26,6 @@ mod fallback_data;
 mod lookup;
 mod names;
 
-use catalog::{Adding, file_faces, given_name};
 use face::FontBytes;
 pub use face::{FALLBACK_FAMILY, FaceRef, FontFace, bundled, bundled_by_stem};
 #[cfg(not(target_arch = "wasm32"))]
@@ -68,9 +67,8 @@ pub struct FontDb {
     /// ([`crate::packs`]). Kept apart from `user` so packs never persist, count against
     /// [`user::MAX_USER_FONTS`], or answer to [`FontDb::remove_user_font`].
     pub(crate) packs: RwLock<crate::packs::PackFonts>,
-    /// The font files documents embedded, kept for the life of the database so that a
-    /// document opened again reuses its faces ([`FontDb::add_document_fonts_scoped`]).
-    document_files: Mutex<Vec<user::KeptFile>>,
+    /// The font files documents embedded, kept for the life of the database ([`document`]).
+    document_files: Mutex<Vec<document::KeptFile>>,
     /// Bumped whenever user fonts are added or removed ([`FontDb::generation`]).
     generation: AtomicU64,
     /// The folders the system font scan reads (the platform's font folders for [`FontDb::global`]).

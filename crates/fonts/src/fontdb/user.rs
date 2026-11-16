@@ -17,7 +17,7 @@ use std::sync::atomic::Ordering;
 use skrifa::MetadataProvider;
 use skrifa::raw::FileRef;
 
-use super::{FontBytes, FontDb, FontFace, RunFallbackCache, enumerate_faces, make_face};
+use super::{FontBytes, FontDb, enumerate_faces, make_face};
 
 /// Largest font file accepted (as given: TTF, OTF, TTC, WOFF or WOFF2).
 pub const MAX_FONT_FILE_BYTES: usize = 50 << 20;
@@ -482,108 +482,11 @@ impl FontDb {
     /// (`___WRD_EMBED_SUB_46`), and the text asks for it by the table's name (#2240). Returns how
     /// many faces were added.
     pub fn add_document_fonts(&self, files: Vec<(Vec<u8>, String)>) -> usize {
-        let added = self.add_font_faces(files.into_iter().map(|(data, name)| (data, Some(name))).collect(), super::Adding::Installed).len();
+        let added = self.add_fonts(files.into_iter().map(|(data, name)| (data, Some(name))).collect());
         if added > 0 {
             self.fonts_changed();
         }
         added
-    }
-
-    /// [`FontDb::add_document_fonts`], answering with the faces the document added, so they can
-    /// be withdrawn when another document takes its place ([`FontDb::withdraw_document_fonts`]):
-    /// a font one document embeds then never answers for a later one that only names the family,
-    /// and the later one's own subset of a family is not skipped as already present.
-    ///
-    /// A file the database already keeps from an earlier document (the same bytes under the same
-    /// name) brings back the faces made for it then: opening a document again, or another that
-    /// embeds the same font, makes no new faces and keeps no new bytes. A file whose faces were
-    /// all already present is not kept. [`DocumentFaces::new_bytes`] counts the bytes this call
-    /// newly kept, which stay for the life of the process: the caller bounds them.
-    pub fn add_document_fonts_scoped(&self, files: Vec<(Vec<u8>, String)>) -> DocumentFaces {
-        let mut kept = self.document_files.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut known = Vec::new();
-        let mut fresh = Vec::new();
-        for (data, name) in files {
-            let name = super::given_name(Some(name));
-            match kept.iter().find(|k| k.name == name && *k.data == data) {
-                Some(k) => known.extend(k.faces.iter().cloned()),
-                None => {
-                    let data = Arc::new(data);
-                    let faces = super::file_faces(&data, name.as_deref(), true);
-                    fresh.push(KeptFile { data, name, faces });
-                }
-            }
-        }
-        let key = |f: &FontFace| (f.family.to_ascii_lowercase(), f.style.to_ascii_lowercase());
-        let mut list = self.faces.write().unwrap_or_else(|e| e.into_inner());
-        let mut present: std::collections::HashSet<_> = list.iter().map(|g| key(g)).collect();
-        let mut added: Vec<Arc<FontFace>> = known.into_iter().filter(|f| present.insert(key(f))).collect();
-        let mut new_bytes = 0usize;
-        for file in fresh {
-            let from_file: Vec<_> = file.faces.iter().filter(|f| present.insert(key(f))).cloned().collect();
-            if !from_file.is_empty() {
-                new_bytes = new_bytes.saturating_add(file.data.len());
-                added.extend(from_file);
-                kept.push(file);
-            }
-        }
-        list.extend(added.iter().cloned());
-        drop(list);
-        drop(kept);
-        if !added.is_empty() {
-            self.forget_choices();
-        }
-        DocumentFaces { faces: added, new_bytes }
-    }
-
-    /// Whether `data` under `name` is a font file the database keeps from an earlier document
-    /// ([`FontDb::add_document_fonts_scoped`]), so adding it again keeps no new bytes.
-    pub fn keeps_document_file(&self, data: &[u8], name: &str) -> bool {
-        let name = super::given_name(Some(name.to_string()));
-        self.document_files.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().any(|k| k.name == name && k.data.as_slice() == data)
-    }
-
-    /// Take a document's faces out of the font list: lookups no longer find them, and fallback
-    /// choices made while they were there are forgotten. Faces not in the list are skipped.
-    /// Layouts made with them keep drawing with them.
-    pub fn withdraw_document_fonts(&self, faces: &DocumentFaces) {
-        let ids: std::collections::HashSet<u32> = faces.faces.iter().map(|f| f.id).collect();
-        let mut list = self.faces.write().unwrap_or_else(|e| e.into_inner());
-        let before = list.len();
-        list.retain(|f| !ids.contains(&f.id));
-        let removed = list.len() != before;
-        drop(list);
-        if removed {
-            self.forget_choices();
-        }
-    }
-
-    /// Put a document's withdrawn faces back (the document after it failed to open), each
-    /// unless the list already has that family and style. The same faces, so their ids and
-    /// cached outlines are still good.
-    pub fn reinstate_document_fonts(&self, faces: &DocumentFaces) {
-        let key = |f: &FontFace| (f.family.to_ascii_lowercase(), f.style.to_ascii_lowercase());
-        let mut list = self.faces.write().unwrap_or_else(|e| e.into_inner());
-        let mut present: std::collections::HashSet<_> = list.iter().map(|g| key(g)).collect();
-        let before = list.len();
-        for f in &faces.faces {
-            if present.insert(key(f)) {
-                list.push(f.clone());
-            }
-        }
-        let added = list.len() != before;
-        drop(list);
-        if added {
-            self.forget_choices();
-        }
-    }
-
-    /// Faces left the list or came back: every fallback choice may be another now. The run cache
-    /// is kept by face count, which a withdrawal and a later addition can bring back to the same
-    /// number, so it is emptied too.
-    pub(super) fn forget_choices(&self) {
-        *self.run_fallbacks.write().unwrap_or_else(|e| e.into_inner()) = RunFallbackCache::default();
-        self.fonts_changed();
     }
 
     /// Check the faces in `sfnt` and add the new ones, recording them as a user font.
@@ -684,27 +587,22 @@ impl FontDb {
         new: &[Arc<super::FontFace>],
         admit: impl FnOnce(usize) -> Result<(), UserFontError>,
     ) -> Result<Vec<Arc<super::FontFace>>, UserFontError> {
-        let same = |f: &super::FontFace, g: &super::FontFace| g.family.eq_ignore_ascii_case(&f.family) && g.style.eq_ignore_ascii_case(&f.style);
         let mut faces = self.faces.write().unwrap_or_else(|e| e.into_inner());
-        // A face one document added gives way ([`FontFace::document`]); any other is kept.
-        let fresh: Vec<_> = new.iter().filter(|f| !faces.iter().any(|g| !g.document && same(f, g))).cloned().collect();
+        let fresh: Vec<_> = new
+            .iter()
+            .filter(|f| !faces.iter().any(|g| g.family.eq_ignore_ascii_case(&f.family) && g.style.eq_ignore_ascii_case(&f.style)))
+            .cloned()
+            .collect();
         if fresh.is_empty() {
             return Ok(Vec::new());
         }
         admit(fresh.len())?;
-        let before = faces.len();
-        faces.retain(|g| !(g.document && fresh.iter().any(|f| same(f, g))));
-        let took_over = faces.len() != before;
         faces.extend(fresh.iter().cloned());
-        drop(faces);
-        if took_over {
-            self.forget_choices();
-        }
         Ok(fresh)
     }
 
     /// Forget cached fallback choices and tell watchers ([`FontDb::generation`]).
-    fn fonts_changed(&self) {
+    pub(super) fn fonts_changed(&self) {
         self.fallbacks.write().unwrap_or_else(|e| e.into_inner()).map.clear();
         self.generation.fetch_add(1, Ordering::AcqRel);
     }
@@ -836,37 +734,3 @@ fn write_unique(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<PathBuf
 
 #[cfg(test)]
 pub(crate) mod tests;
-
-/// The faces one document added to the font list ([`FontDb::add_document_fonts_scoped`]).
-#[derive(Clone, Default)]
-pub struct DocumentFaces {
-    pub(super) faces: Vec<Arc<FontFace>>,
-    new_bytes: usize,
-}
-
-impl DocumentFaces {
-    /// How many faces the document added.
-    pub fn len(&self) -> usize {
-        self.faces.len()
-    }
-
-    /// Whether it added none.
-    pub fn is_empty(&self) -> bool {
-        self.faces.is_empty()
-    }
-
-    /// The bytes of font files the database kept for the first time when these faces were added
-    /// (a file it already kept, or one that added no face, counts nothing).
-    pub fn new_bytes(&self) -> usize {
-        self.new_bytes
-    }
-}
-
-/// A font file one document embedded, kept with the faces made for it so that a document
-/// embedding it again gets the same faces ([`FontDb::add_document_fonts_scoped`]).
-pub(super) struct KeptFile {
-    data: Arc<Vec<u8>>,
-    /// The name it was given to go by ([`super::given_name`]).
-    name: Option<String>,
-    faces: Vec<Arc<FontFace>>,
-}
