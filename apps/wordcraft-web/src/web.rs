@@ -351,31 +351,11 @@ fn launch_with_config(config: StartConfig) -> js_sys::Promise {
                     crate::prefs::restore(&mut app, stored.as_deref());
                     let asset_base = initial_asset_base;
                     font_packs::init(&asset_base, messages.clone());
-                    // §3.2's smoke path (`?proof-worker`): squiggles themselves are always on
-                    // (proof_squiggles::tick starts the worker lazily with the first
-                    // document); the flag only adds a known-bad check whose console line the
-                    // smoke harness waits for.
-                    if query().contains("proof-worker") && proof_worker::ensure(&asset_base) {
-                        proof_worker::with(|w| {
-                            if let Err(e) = w.ping() {
-                                log::warn!("proofing worker ping failed to send: {e}");
-                            }
-                            let req = wordcraft_worker_proto::CheckRequest {
-                                para_id: 0,
-                                text: "Ths is a tst.".to_string(),
-                                spans: Vec::new(),
-                                skip: Vec::new(),
-                                options: None,
-                                typing: None,
-                                list_item: false,
-                            };
-                            if let Err(e) = w.check(&req, |res| match res {
-                                Ok(reply) => log::info!("proofing worker: {} issue(s) in the smoke check", reply.issues.len()),
-                                Err(e) => log::warn!("proofing worker smoke check: {} ({:?})", e.message, e.code),
-                            }) {
-                                log::warn!("proofing worker check failed to send: {e}");
-                            }
-                        });
+                    // §3.2's smoke path (`?proof-worker`): the flag only adds console lines the
+                    // smoke harness waits for. The worker itself starts on the first edit
+                    // (`proof_squiggles::StartGate`, plan 10.1), flag or no flag.
+                    if query().contains("proof-worker") {
+                        crate::proof_squiggles::enable_smoke();
                     }
                     let initial_lang = app.ui.language.clone();
                     ensure_locale_loaded(&initial_lang, &asset_base, cc.egui_ctx.clone());

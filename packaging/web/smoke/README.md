@@ -47,10 +47,30 @@ Chrome already in `~/.cache/puppeteer`.
 | **wasm found (no config)** | first `start()` uses the package default `new URL("./wordcraft-web_bg.wasm", import.meta.url)` | bundlers that leave the wasm URL unresolved; on a miss the page retries with an explicit `wasmUrl` so the rest still runs |
 | **locale loaded** | `navigator.language(s)` is `fr-FR` (+ stored `{"language":"fr"}`), so the shell fetches `i18n/fr/common.tsv` and `i18n/fr/wordcraft.tsv` through `assetBase` | runtime catalogs consumers must self-serve |
 | **font pack loaded** | `api.installFonts(["JetBrains Mono"])` → `fonts/manifest.json` + `fonts/JetBrainsMono-*.ttf.br` fetched, Brotli-decoded, installed | the assetBase runtime files bundlers never copy |
-| **worker started** | `?proof-worker` spawns `<assetBase>wordcraft-worker-proof_loader.js` as a module worker and runs one `check`; success is the `proofing worker: N issue(s)` console line | worker loader/glue/wasm all resolve same-origin |
+| **worker started** | the proofing worker starts on the first edit, so the driver inserts one misspelt sentence (`api.execute("text.insert", …)`); with `?proof-worker` the shell then runs one known-bad `check` through `<assetBase>wordcraft-worker-proof_loader.js`; success is the `proofing worker: N issue(s)` console line | worker loader/glue/wasm all resolve same-origin |
 | **exported proof worker** | the fixture calls `createProofWorker({ assetBase: "/wordcraft-web/" })`, waits for `ready`, and completes one `ping`/`pong` | the npm export resolves the loader from the documented deployment base in a bundled consumer |
 | **malformed messages** | a second worker instance is posted `null`, a string, a bad header/payload pair and a non-string header, then one valid `ping`; every malformed message must get a typed `error`/`badRequest` reply and the ping a `pong` | `unpack` throwing out of `onmessage` (dropped messages), wrong-type payloads slipping through |
 | console errors | any `console.error`/`pageerror` after the deliberate zero-config wasm attempt | uncaught failures |
+
+## Lazy-loading checks (`lazy.mjs`)
+
+The matrix above starts every worker itself, so it cannot say what a visitor's
+page fetches. `lazy.mjs` drives the standalone site (the Trunk output) and reads
+the static server's own request log:
+
+```sh
+(cd apps/wordcraft-web && trunk build --release)       # writes dist/web
+node packaging/web/smoke/lazy.mjs --site dist/web --out packaging/web/smoke/results/lazy.json
+node packaging/web/smoke/lazy.mjs --site dist/web --only idle,edit   # some flows
+```
+
+`run.sh` runs it after the matrix when `dist/web/index.html` exists. It exits 1
+when a flow fails and prints `PASS`/`FAIL` per flow on stderr.
+
+| Flow | What it does | What it proves |
+|---|---|---|
+| `idle` | loads `/` and `/?sample`, waits 8 s with no input, lists every request with raw and gzip size | a page that is only read requests no `wordcraft-worker-*` file |
+| `edit` | `/?sample&proof-worker`: waits, clicks into the page, types a misspelt sentence with real key events | no proofing file before the keystrokes; after them the loader, glue and wasm are requested, the known-bad check answers and a document paragraph comes back with an issue |
 
 ## JavaScript exception
 
