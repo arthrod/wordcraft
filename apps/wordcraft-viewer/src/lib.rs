@@ -5,7 +5,8 @@
 //! DOM, the network or the file system, so one module serves a browser worker, the main thread
 //! or a server. Underneath are plain Rust functions ([`open`] to a [`Session`], then
 //! [`Session::render`] one page at a time), which the host tests call with no wasm and no
-//! mocks; the `wasm-bindgen` handle in `wasm.rs` is a thin layer over them.
+//! mocks; the `wasm-bindgen` handle in the crate's bin (`main.rs`, `wasm.rs`) is a thin layer
+//! over them.
 //!
 //! It builds on three entry points, unchanged: [`wordcraft_docx::read_with_password`],
 //! [`wordcraft_layout::layout`] and [`wordcraft_render::render_page`]. A page is laid out and
@@ -30,9 +31,6 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use wordcraft_doc::Document;
 use wordcraft_layout::{DocLayout, LayoutCache, LayoutOptions};
-
-#[cfg(target_arch = "wasm32")]
-mod wasm;
 
 /// Largest document accepted, in bytes: the bound the PDF worker puts on the same package
 /// (`wordcraft_worker_proto::MAX_PDF_DOC_BYTES`), so a file one opens the other exports.

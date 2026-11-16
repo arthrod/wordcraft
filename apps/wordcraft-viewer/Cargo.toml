@@ -9,9 +9,12 @@ publish = false
 [lints]
 workspace = true
 
-[lib]
-# `cdylib` is the wasm module a host loads; `rlib` is what the host tests link.
-crate-type = ["cdylib", "rlib"]
+# The wasm module is the bin, as for the workers: a `cdylib` beside the `rlib` the host tests
+# link would be built without link-time optimisation (cargo leaves it off when one target
+# has both crate types), which measured 1.3 MB of code larger.
+[[bin]]
+name = "wordcraft-viewer"
+path = "src/main.rs"
 
 [dependencies]
 wordcraft-doc = { workspace = true }
