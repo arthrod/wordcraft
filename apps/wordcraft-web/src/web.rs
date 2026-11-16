@@ -143,8 +143,14 @@ pub(crate) fn read_worker_message(worker: &str, data: &wasm_bindgen::JsValue) ->
     };
     let limit = u32::try_from(wordcraft_worker_proto::MAX_PAYLOAD_BYTES).unwrap_or(u32::MAX);
     let header = header.dyn_ref::<js_sys::JsString>().filter(|s| s.length() <= limit).and_then(|s| s.as_string());
-    let bytes = (payload.is_instance_of::<js_sys::ArrayBuffer>() || payload.is_instance_of::<js_sys::Uint8Array>())
-        .then(|| js_sys::Uint8Array::new(&payload));
+    // A `Uint8Array` (what the workers post) is used as it is: `new Uint8Array(typedArray)` would
+    // copy every byte (ECMA-262 InitializeTypedArrayFromTypedArray clones the buffer) before the
+    // length check. An `ArrayBuffer` gets a view, which copies nothing.
+    let bytes = match payload.dyn_into::<js_sys::Uint8Array>() {
+        Ok(view) => Some(view),
+        Err(other) if other.is_instance_of::<js_sys::ArrayBuffer>() => Some(js_sys::Uint8Array::new(&other)),
+        Err(_) => None,
+    };
     match inbound(header.as_deref(), bytes.as_ref().map(|b| b.length() as usize)) {
         Inbound::Route(env) => {
             // `ready` carries nothing read; anything else is within its bound by now.
