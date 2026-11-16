@@ -510,7 +510,9 @@ pub fn export_options(s: &Session, v: &Value) -> crate::io::ExportOptions {
 }
 
 /// `strict: true` is for a PDF or a page image only: any other output is a parameter error.
-fn check_strict_output(strict: bool, path: &str) -> Result<(), CmdError> {
+/// Public for a host that writes a save itself (the web app's downloads) and must refuse the
+/// same parameters `file.save` refuses.
+pub fn check_strict_output(strict: bool, path: &str) -> Result<(), CmdError> {
     if strict && !crate::strict::is_strict_output(path) {
         return Err(CmdError::Params("`strict` applies to a .pdf or .png output only".into()));
     }

@@ -141,6 +141,17 @@ impl WordApp {
         Some(lazy(name, password, opts, &docx, &faces)?.map(|()| json!({"exporting": name, "pending": true})))
     }
 
+    /// A web save (`file.save`, `file.saveAs`) under `name` with `params` is checked as the
+    /// engine's `file.save` checks it (`strict` on an output that is no PDF or page image), with
+    /// the engine's own error; the exports always name such an output.
+    fn check_web_save(&self, id: &str, name: &str, params: &Value) -> Result<(), String> {
+        if !matches!(id, "file.save" | "file.saveAs") {
+            return Ok(());
+        }
+        let strict = wordcraft_engine::cmd::file::export_options(&self.session, params).strict;
+        wordcraft_engine::cmd::file::check_strict_output(strict, name).map_err(|e| e.to_string())
+    }
+
     /// Tell the host the command `id` is about to run ([`Services::on_command`]).
     pub(crate) fn announce_command(&self, id: &str) {
         if let Some(seen) = &self.services.on_command {
@@ -188,6 +199,8 @@ impl WordApp {
             // Inspect only the suffix bytes: no full-name allocation or UTF-8 slicing.
             let has_pdf_suffix = name.as_bytes().last_chunk::<4>().is_some_and(|suffix| suffix.eq_ignore_ascii_case(b".pdf"));
             let name = if id == "file.exportPdf" && !has_pdf_suffix { format!("{name}.pdf") } else { name };
+            // The engine's `file.save` parameter check, before anything is written or stamped.
+            self.check_web_save(id, &name, &params)?;
             // A save with a password encrypts this and later saves (`file.save`'s `password`).
             if matches!(id, "file.save" | "file.saveAs")
                 && let Some(pw) = params.get("password").filter(|v| !v.is_null())

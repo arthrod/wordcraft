@@ -5998,6 +5998,35 @@ fn web_lazy_pdf_refuses_a_strict_export_as_the_engine_does() {
     assert_eq!((calls.get(), packaged.get()), (3, 2));
 }
 
+/// Review finding (strict on the web): `strict: true` on a save that is no PDF or page image is
+/// the parameter error the engine's `file.save` gives, in the browser too, before anything is
+/// written, downloaded or stamped.
+#[test]
+fn web_save_refuses_strict_on_a_word_package_as_the_engine_does() {
+    let downloads = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let d = downloads.clone();
+    let services = Services {
+        download: Some(Box::new(move |_: &str, _: &[u8]| {
+            d.set(d.get() + 1);
+            Ok(())
+        })),
+        ..Default::default()
+    };
+    let mut a = WordApp::new(Session::new(wordcraft_doc::Document::from_text("Figures")), services);
+    let revision = a.session.doc.core.revision;
+    for id in ["file.saveAs", "file.save"] {
+        let params = json!({"path": "report.docx", "strict": true});
+        let engine = Session::new(wordcraft_doc::Document::from_text("Figures")).run(id, &params).unwrap_err().to_string();
+        assert!(engine.contains("`strict` applies to a .pdf or .png output only"), "{engine}");
+        assert_eq!(a.execute(id, params).unwrap_err(), engine, "{id}: the engine's own error");
+    }
+    assert_eq!(downloads.get(), 0, "nothing was downloaded");
+    assert_eq!(a.session.doc.core.revision, revision, "nothing was stamped");
+    // A strict PDF save still goes.
+    a.execute("file.saveAs", json!({"path": "report.pdf", "strict": true})).unwrap();
+    assert_eq!(downloads.get(), 1);
+}
+
 /// The web host is offered the faces a PDF of the document draws text in, from the engine's
 /// own export layout, so it can send those font copies first and refuse a strict export only
 /// for them; it asks only when it must choose.
