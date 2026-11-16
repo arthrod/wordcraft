@@ -675,18 +675,16 @@ try {
 
   // ---- the host's buffer after open(): changed or transferred, the editor still gets the
   // document the reader sees ----
-  for (const [what, spoil] of [
-    ["changed", "bytes.fill(0)"],
-    ["transferred", "structuredClone(bytes.buffer, { transfer: [bytes.buffer] })"],
-  ]) {
+  for (const what of ["changed", "transferred"]) {
     const kept = await open(browser, base, "/");
     await waitAttr(kept.page, "data-wordcraft-painted", "true");
-    const opened = await kept.page.evaluate(async (spoil) => {
+    const opened = await kept.page.evaluate(async (what) => {
       const bytes = new Uint8Array(await (await fetch("samples/welcome.docx")).arrayBuffer());
       const got = await window.wordcraftViewer.open(bytes).then((a) => a.pageCount, (e) => `rejected: ${e.message}`);
-      new Function("bytes", spoil)(bytes);
+      if (what === "changed") bytes.fill(0);
+      else structuredClone(bytes.buffer, { transfer: [bytes.buffer] });
       return { got, left: bytes.length };
-    }, spoil);
+    }, what);
     await kept.page.click("#wordcraft_viewer_edit");
     await waitAttr(kept.page, "data-wordcraft-phase", "editing", 120000).catch(() => {});
     const handed = await kept.page.evaluate(() => Promise.resolve(window.wordcraft?.getMarkdown?.()).catch(() => null));
