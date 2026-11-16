@@ -390,6 +390,10 @@ mod tests {
         session.run("edit.undo", &serde_json::json!({})).unwrap();
         assert_eq!(session.doc.para(StoryRef::Body, &path).unwrap().text, "aaa");
         SCHED.with(|s| s.borrow_mut().ticks = PATHS_REFRESH - 1);
+        let (_, sends) = pump(&session);
+        assert!(sends.iter().any(|(_, req, _, _, _)| req.text == "aaa"), "the restored text was not re-checked");
+    }
+
     /// Pumps until the single-paragraph document's check is sent, queues a clean reply for it
     /// and pumps once more to apply it, leaving the tracked entry complete (not pending).
     /// Returns the paragraph's path and the request that went out.
@@ -424,13 +428,13 @@ mod tests {
     fn same_text_proofing_changes_recheck() {
         let mut session = wordcraft_engine::Session::new(Document::from_text("hello world"));
         let (path, first) = check_and_answer(&session);
-        assert!(first.spans.iter().all(|s| s.tag != "fr-FR"));
+        assert!(first.spans.iter().all(|s| !s.tag.eq_ignore_ascii_case("fr-FR")));
         // Same text, new language on the whole paragraph.
         session.run("select.all", &serde_json::json!({})).unwrap();
         session.run("review.language", &serde_json::json!({"lang": "fr-FR"})).unwrap();
         assert_eq!(session.doc.para(StoryRef::Body, &path).unwrap().text, "hello world", "the fixture must not change the text");
         let (_, second) = check_and_answer(&session);
-        assert!(second.spans.iter().any(|s| s.tag == "fr-FR"), "the re-check carried the new language");
+        assert!(second.spans.iter().any(|s| s.tag.eq_ignore_ascii_case("fr-FR")), "the re-check carried the new language, got {:?}", second.spans);
         // Same text again, now also left unchecked: the re-check carries the range.
         session.run("select.all", &serde_json::json!({})).unwrap();
         session.run("review.language", &serde_json::json!({"lang": "fr-FR", "noProof": true})).unwrap();
