@@ -247,6 +247,52 @@ pub(crate) fn font_batch(
     batch
 }
 
+/// What a worker client does with one message from its worker ([`inbound`]).
+#[derive(Debug, PartialEq)]
+pub(crate) enum Inbound {
+    /// Route it to the job `id` waits on (or, for `ready`, open the gate): its payload may be
+    /// copied now, its length checked.
+    Route(wordcraft_worker_proto::Envelope),
+    /// It answers a job but cannot be taken (no bytes, too many): that job gets this typed
+    /// `error` reply instead, and the payload is never copied.
+    Refuse(wordcraft_worker_proto::Envelope, wordcraft_worker_proto::ErrorReply),
+    /// It answers no job a client can name (not a `[header, payload]` pair, no readable header,
+    /// a request kind): logged and dropped; every job still ends by its deadline.
+    Drop(String),
+}
+
+/// Judge a message from a worker by its shape before anything is copied, as the workers judge
+/// a request (`unpack`): `header` is its JSON header when the message is an array whose first
+/// item is a string no longer than a JSON payload may be, `payload_len` the length of its second
+/// item when that is an `ArrayBuffer` or a `Uint8Array`. No browser types, so host tests cover
+/// it; both clients read messages through it.
+pub(crate) fn inbound(header: Option<&str>, payload_len: Option<usize>) -> Inbound {
+    use wordcraft_worker_proto::{Envelope, ErrorCode, ErrorReply, Kind, decode_envelope, reply_payload_limit};
+    let Some(header) = header else {
+        return Inbound::Drop("a message that is not a [header, payload] pair".into());
+    };
+    let env = match decode_envelope(header.as_bytes()) {
+        Ok(env) => env,
+        Err(e) => return Inbound::Drop(format!("an undecodable header ({e})")),
+    };
+    if env.kind.is_request() {
+        return Inbound::Drop(format!("a `{:?}` request, which a worker never sends", env.kind));
+    }
+    // `ready` carries nothing the client reads.
+    if env.kind == Kind::Ready {
+        return Inbound::Route(env);
+    }
+    let refuse = |code, message: String| {
+        Inbound::Refuse(Envelope { kind: Kind::Error, ..env.clone() }, ErrorReply { code, message: format!("the worker's reply {message}") })
+    };
+    let limit = reply_payload_limit(env.kind);
+    match payload_len {
+        None => refuse(ErrorCode::BadRequest, "carried no bytes".into()),
+        Some(got) if got > limit => refuse(ErrorCode::TooLarge, format!("is {got} bytes, over the {limit}-byte limit")),
+        Some(_) => Inbound::Route(env),
+    }
+}
+
 /// The `convert` request that opens `input`, a file in format `format`, as a Word package. A
 /// file that gives no page size opens on the paper of `region` (the user's), as the engine opens
 /// such a file in its session (`io::open_bytes_in`); the worker has no session to ask.
@@ -849,5 +895,37 @@ mod tests {
         let batch = font_batch(big, || vec![("Huge".into(), "Regular".into())], FontBudget { count: 10, bytes: 5 });
         assert_eq!(batch.copies.len(), 3);
         assert_eq!((batch.left_used, batch.left_used_named.as_slice()), (1, ["Huge".to_string()].as_slice()));
+    }
+
+    /// Review finding (the clients' inbound guards): a worker's message is judged by its shape
+    /// before any copy. Junk is dropped, a reply with no bytes or too many fails its own job with
+    /// a typed error, and only a well-formed reply within its kind's bound is routed.
+    #[test]
+    fn a_workers_message_is_judged_before_it_is_copied() {
+        use wordcraft_worker_proto::{Envelope, ErrorCode, Kind, MAX_OUTPUT_BYTES, MAX_PAYLOAD_BYTES, encode_envelope};
+        let header = |id, kind| {
+            String::from_utf8(encode_envelope(&Envelope { v: wordcraft_worker_proto::PROTOCOL_VERSION, id, kind, revision: 0 }).unwrap()).unwrap()
+        };
+        // Well formed, within bounds: routed.
+        let pdf = header(7, Kind::Pdf);
+        assert!(matches!(inbound(Some(&pdf), Some(1_000)), Inbound::Route(e) if e.id == 7 && e.kind == Kind::Pdf));
+        assert!(matches!(inbound(Some(&pdf), Some(MAX_OUTPUT_BYTES)), Inbound::Route(_)));
+        // `ready` needs no payload at all.
+        assert!(matches!(inbound(Some(&header(0, Kind::Ready)), None), Inbound::Route(e) if e.kind == Kind::Ready));
+        // Too many bytes, or none: that job fails, typed, and nothing is copied.
+        match inbound(Some(&pdf), Some(MAX_OUTPUT_BYTES + 1)) {
+            Inbound::Refuse(env, err) => {
+                assert_eq!((env.id, env.kind, err.code), (7, Kind::Error, ErrorCode::TooLarge));
+                assert!(err.message.contains("over the"), "{}", err.message);
+            }
+            other => panic!("{other:?}"),
+        }
+        let error = header(8, Kind::Error);
+        assert!(matches!(inbound(Some(&error), Some(MAX_PAYLOAD_BYTES + 1)), Inbound::Refuse(e, r) if e.id == 8 && r.code == ErrorCode::TooLarge));
+        assert!(matches!(inbound(Some(&header(9, Kind::Converted)), None), Inbound::Refuse(e, r) if e.id == 9 && r.code == ErrorCode::BadRequest));
+        // Junk answers no job: dropped.
+        for junk in [None, Some("not json"), Some("{}"), Some(header(3, Kind::RenderPdf).as_str())] {
+            assert!(matches!(inbound(junk, Some(10)), Inbound::Drop(_)), "{junk:?}");
+        }
     }
 }

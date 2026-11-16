@@ -127,6 +127,42 @@ pub(crate) fn worker_failure(worker: &str, ready: bool) -> String {
     }
 }
 
+/// Read one `[headerJson, payloadBuffer]` message from the `worker` worker, checked as the
+/// workers check a request ([`crate::lazy_formats::inbound`]): it is an array, its header a
+/// string no longer than a JSON payload, its payload an `ArrayBuffer` or `Uint8Array` within the
+/// reply kind's bound — all before anything is copied. A reply that fails the checks comes back
+/// as a typed `error` reply for its own job; a message that answers no job is logged and `None`.
+pub(crate) fn read_worker_message(worker: &str, data: &wasm_bindgen::JsValue) -> Option<(wordcraft_worker_proto::Envelope, Vec<u8>)> {
+    use crate::lazy_formats::{Inbound, inbound};
+    // `is_array` before the cast: an array-like object never goes through `Array.from`.
+    let (header, payload) = if js_sys::Array::is_array(data) {
+        let arr: &js_sys::Array = data.unchecked_ref();
+        (arr.get(0), arr.get(1))
+    } else {
+        (wasm_bindgen::JsValue::UNDEFINED, wasm_bindgen::JsValue::UNDEFINED)
+    };
+    let limit = u32::try_from(wordcraft_worker_proto::MAX_PAYLOAD_BYTES).unwrap_or(u32::MAX);
+    let header = header.dyn_ref::<js_sys::JsString>().filter(|s| s.length() <= limit).and_then(|s| s.as_string());
+    let bytes = (payload.is_instance_of::<js_sys::ArrayBuffer>() || payload.is_instance_of::<js_sys::Uint8Array>())
+        .then(|| js_sys::Uint8Array::new(&payload));
+    match inbound(header.as_deref(), bytes.as_ref().map(|b| b.length() as usize)) {
+        Inbound::Route(env) => {
+            // `ready` carries nothing read; anything else is within its bound by now.
+            let copied = if env.kind == wordcraft_worker_proto::Kind::Ready { Vec::new() } else { bytes.map(|b| b.to_vec()).unwrap_or_default() };
+            Some((env, copied))
+        }
+        Inbound::Refuse(env, reply) => {
+            log::warn!("{worker} worker: {}", reply.message);
+            let payload = wordcraft_worker_proto::encode_payload(&reply).ok()?;
+            Some((env, payload))
+        }
+        Inbound::Drop(why) => {
+            log::warn!("{worker} worker: dropped {why}");
+            None
+        }
+    }
+}
+
 const CANVAS_ID: &str = "wordcraft_canvas";
 const LOADING_ID: &str = "wordcraft_loading";
 

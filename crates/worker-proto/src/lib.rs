@@ -637,6 +637,24 @@ pub fn request_payload_limit(kind: Kind) -> usize {
     }
 }
 
+/// Most bytes a converted file or a PDF may come back in: a client refuses a larger reply before
+/// copying it ([`reply_payload_limit`]).
+pub const MAX_OUTPUT_BYTES: usize = 256 << 20;
+
+/// The largest payload buffer a `kind` reply may arrive in, in bytes, so a client can refuse a
+/// malformed or oversized message from a worker before copying it into its heap, as a worker
+/// refuses a request ([`request_payload_limit`]). `0` for request kinds, which a worker never
+/// sends.
+pub fn reply_payload_limit(kind: Kind) -> usize {
+    match kind {
+        // Raw file bytes.
+        Kind::Converted | Kind::Pdf => MAX_OUTPUT_BYTES,
+        // JSON bodies (or none): `decode_payload`'s own cap.
+        Kind::Issues | Kind::Ack | Kind::Pong | Kind::Ready | Kind::Error => MAX_PAYLOAD_BYTES,
+        Kind::Check | Kind::Cancel | Kind::Configure | Kind::Convert | Kind::RenderPdf | Kind::Ping => 0,
+    }
+}
+
 /// Validate a [`PdfRenderRequest`] against the protocol bounds before a worker runs it, like
 /// [`check_request_error`]: `TooLarge` past [`MAX_PDF_DOC_BYTES`], [`MAX_FONT_COPIES`] or
 /// [`MAX_FONT_TOTAL_BYTES`], `BadRequest` for an empty package.
@@ -1282,5 +1300,20 @@ mod tests {
         parts.extend((0..MAX_FONT_COPIES).map(|_| font.as_slice()));
         let frame = pack_binary(&parts).unwrap();
         assert!(frame.len() <= request_payload_limit(Kind::RenderPdf), "{} > {}", frame.len(), request_payload_limit(Kind::RenderPdf));
+    }
+
+    /// Every reply kind has a bound a client checks before copying; request kinds have none
+    /// (a worker never sends them), and file replies are the widest.
+    #[test]
+    fn reply_payload_limits_bound_every_reply_kind() {
+        for kind in [Kind::Issues, Kind::Ack, Kind::Pong, Kind::Ready, Kind::Error] {
+            assert_eq!(reply_payload_limit(kind), MAX_PAYLOAD_BYTES, "{kind:?}");
+        }
+        assert_eq!(reply_payload_limit(Kind::Pdf), MAX_OUTPUT_BYTES);
+        assert_eq!(reply_payload_limit(Kind::Converted), MAX_OUTPUT_BYTES);
+        for kind in [Kind::Check, Kind::Cancel, Kind::Configure, Kind::Convert, Kind::RenderPdf, Kind::Ping] {
+            assert!(kind.is_request());
+            assert_eq!(reply_payload_limit(kind), 0, "{kind:?}");
+        }
     }
 }

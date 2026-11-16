@@ -233,18 +233,8 @@ fn fail_pending(pending: Vec<(u32, Sink)>, message: &str) {
 
 /// Route one `[headerJson, payloadBuffer]` message from the worker.
 fn on_message(inner: &Rc<RefCell<Inner>>, data: &wasm_bindgen::JsValue) {
-    let arr = js_sys::Array::from(data);
-    let Some(header) = arr.get(0).as_string() else {
-        log::warn!("codec worker: message without a JSON header");
+    let Some((env, payload)) = super::read_worker_message("codec", data) else {
         return;
-    };
-    let payload = js_sys::Uint8Array::new(&arr.get(1)).to_vec();
-    let env = match proto::decode_envelope(header.as_bytes()) {
-        Ok(env) => env,
-        Err(e) => {
-            log::warn!("codec worker: undecodable header ({e})");
-            return;
-        }
     };
     let pending = {
         let mut guard = inner.borrow_mut();

@@ -215,18 +215,8 @@ fn fail_pending(pending: Vec<(u32, Box<dyn FnOnce(&proto::Envelope, &[u8])>)>, m
 
 /// Route one `[headerJson, payloadBuffer]` message from the worker.
 fn on_message(inner_rc: &Rc<RefCell<Inner>>, data: &wasm_bindgen::JsValue) {
-    let arr = js_sys::Array::from(data);
-    let Some(header) = arr.get(0).as_string() else {
-        log::warn!("pdf worker: message without a JSON header");
+    let Some((env, payload)) = super::read_worker_message("pdf", data) else {
         return;
-    };
-    let payload = js_sys::Uint8Array::new(&arr.get(1)).to_vec();
-    let env = match proto::decode_envelope(header.as_bytes()) {
-        Ok(env) => env,
-        Err(e) => {
-            log::warn!("pdf worker: undecodable header ({e})");
-            return;
-        }
     };
     let pending = {
         let mut inner = inner_rc.borrow_mut();
