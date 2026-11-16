@@ -81,8 +81,10 @@ pub const VIEWER_STEM: &str = "wordcraft-viewer";
 /// the flags `apps/wordcraft-web/index.html` gives the workers): 7,496,105 raw / 3,198,016
 /// gzip / 2,537,321 Brotli q11. The first measurement (8,159,381 / 3,440,073) was of a `cdylib`
 /// built beside an `rlib`, which cargo builds without link-time optimisation; the module is a
-/// bin since. Ceilings ratchet down; raising one is a recorded decision in the plan.
-pub const VIEWER_CEILING: WorkerCeiling = WorkerCeiling { name: VIEWER_STEM, max_raw: 7_725_000, max_gzip: 3_325_000 };
+/// bin since. Measured again 2026-11-16 after `wordcraft_docx::read_with_password` stopped
+/// linking the write direction of the model bridge: 6,809,726 raw / 3,106,857 gzip /
+/// 2,486,942 Brotli q11. Ceilings ratchet down; raising one is a recorded decision in the plan.
+pub const VIEWER_CEILING: WorkerCeiling = WorkerCeiling { name: VIEWER_STEM, max_raw: 7_015_000, max_gzip: 3_230_000 };
 
 /// Crates the view-only module must never link (plan 8.2): it opens a document and paints its
 /// pages, so the editor (`wordcraft-engine`, `wordcraft-ui-egui`, `egui`, `eframe`), PDF export

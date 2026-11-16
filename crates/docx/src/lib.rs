@@ -51,7 +51,9 @@ pub fn read(bytes: &[u8]) -> Result<wordcraft_doc::Document, DocxError> {
 
 /// Read a package with a password.
 pub fn read_with_password(bytes: &[u8], password: Option<&str>) -> Result<wordcraft_doc::Document, DocxError> {
-    read_with(bytes, &ReadOptions { password, ..Default::default() })
+    // As in `read`: no chunk importer, so the write direction of the model bridge stays out of
+    // a build that only reads, such as the view-only module.
+    from_shared_model(craft_docx::read_with(bytes, &craft_docx::ReadOptions { password, chunks: None })?)
 }
 
 /// Read a package with options.
