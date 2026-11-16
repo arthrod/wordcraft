@@ -147,10 +147,9 @@ fn post(worker: &web_sys::Worker, id: u32, kind: proto::Kind, payload: &js_sys::
 /// request could not be sent to it), so no caller waits forever. Runs outside the state borrow: the sinks re-enter the page.
 fn fail_pending(pending: Vec<(u32, Sink)>, message: &str) {
     let reply = proto::ErrorReply { code: proto::ErrorCode::Internal, message: message.to_string() };
-    let Ok(payload) = proto::encode_payload(&reply) else { return };
-    for (id, sink) in pending {
-        sink(&proto::Envelope::request(id, proto::Kind::Error, 0), &js_sys::Uint8Array::from(payload.as_slice()));
-    }
+    crate::settle::settle_all(pending, proto::encode_payload(&reply), |id, sink, payload| {
+        sink(&proto::Envelope::request(id, proto::Kind::Error, 0), &js_sys::Uint8Array::from(payload));
+    });
 }
 
 /// Route one `[headerJson, payload]` message from the worker.
