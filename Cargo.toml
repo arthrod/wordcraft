@@ -18,6 +18,9 @@ wordcraft-fonts = { path = "crates/fonts" }
 wordcraft-layout = { path = "crates/layout" }
 wordcraft-docx = { path = "crates/docx" }
 wordcraft-docbin = { path = "crates/docbin" }
+wordcraft-model-bridge = { path = "crates/model-bridge" }
+# TEMPORARY (10.4): craft-convert by path until storytold/craft-libs#1860 lands; then a git dependency like the craft crates below.
+craft-convert = { path = "../craft-libs-convert/crates/convert" }
 wordcraft-formats = { path = "crates/formats" }
 wordcraft-render = { path = "crates/render" }
 wordcraft-pdf = { path = "crates/pdf" }
