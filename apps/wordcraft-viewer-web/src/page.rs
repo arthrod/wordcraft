@@ -52,6 +52,8 @@ const VIEWER_GLOBAL: &str = "wordcraftViewer";
 /// What the reader is told about a document past the viewer's limit, from its declared length
 /// or its bytes.
 const TOO_LARGE: &str = "The document is too large for this viewer.";
+/// What the reader is told about a password longer than the viewer takes.
+const PASSWORD_TOO_LONG: &str = "That password is too long.";
 /// Pixels kept in painted pages outside the window, in bytes of RGBA.
 const CACHE_BUDGET_BYTES: u64 = 192 << 20;
 /// Where the document comes from. Kept after the viewer reads it: if the viewer fails, the
@@ -609,22 +611,28 @@ fn start_viewer(page: &Rc<Page>) {
 }
 
 /// The document's bytes: the ones already held, else fetched from where the host said. With
-/// nothing said, the viewer gets the built-in sample and the editor gets nothing.
+/// nothing said, the viewer gets the built-in sample and the editor gets nothing. `None` too when
+/// a host's `open()` came while they were fetched: that document is the one shown.
 async fn document_bytes(page: &Rc<Page>, for_viewer: bool) -> Result<Option<js_sys::Uint8Array>, String> {
-    let source = {
+    let (source, opens) = {
         let state = page.state.borrow();
         if let Some(docx) = &state.docx {
             return Ok(Some(docx.clone()));
         }
-        state.source.clone()
+        (state.source.clone(), state.opens)
     };
     let bytes = match source {
-        Source::Bytes(bytes) => bytes,
-        Source::Url(url) => fetch_same_origin(page, &url).await?,
-        Source::Unset if for_viewer => fetch_same_origin(page, &format!("{}{SAMPLE_FILE}", page.asset_base)).await?,
+        Source::Bytes(bytes) => Ok(bytes),
+        Source::Url(url) => fetch_same_origin(page, &url).await,
+        Source::Unset if for_viewer => fetch_same_origin(page, &format!("{}{SAMPLE_FILE}", page.asset_base)).await,
         Source::Unset => return Ok(None),
     };
-    page.state.borrow_mut().docx = Some(bytes.clone());
+    let mut state = page.state.borrow_mut();
+    if state.opens != opens {
+        return Ok(None);
+    }
+    let bytes = bytes?;
+    state.docx = Some(bytes.clone());
     Ok(Some(bytes))
 }
 
@@ -654,6 +662,21 @@ async fn fetch_same_origin(page: &Rc<Page>, url: &str) -> Result<js_sys::Uint8Ar
 /// Send `bytes` to the worker as the document to show. The bytes stay in JavaScript's memory:
 /// only the few bytes of framing come from this module.
 fn open_document(page: &Rc<Page>, bytes: js_sys::Uint8Array, password: Option<String>) {
+    // A password past what the protocol carries is the password's problem, not the document's:
+    // an open document stays, otherwise the password is asked for again in the page.
+    if password.as_deref().is_some_and(|p| p.len() > proto::MAX_PASSWORD_BYTES) {
+        if page.state.borrow().handover.document_open() {
+            return show_error(page, "password-too-long", PASSWORD_TOO_LONG);
+        }
+        let stale = forget_pages(page);
+        {
+            let mut state = page.state.borrow_mut();
+            state.docx = Some(bytes);
+            state.opens = state.opens.wrapping_add(1);
+        }
+        drop(stale);
+        return ask_password(page, "password-too-long", PASSWORD_TOO_LONG);
+    }
     let length = bytes.length();
     let prefix = match proto::view_open_request_prefix(password.as_deref(), length as usize) {
         Ok(prefix) => prefix,
@@ -717,6 +740,8 @@ fn on_opened(page: &Rc<Page>, generation: u32, env: &proto::Envelope, payload: &
         proto::ErrorCode::PasswordRequired => ask_password(page, "password-required", "This document is protected with a password."),
         proto::ErrorCode::WrongPassword => ask_password(page, "wrong-password", "That password does not open this document."),
         proto::ErrorCode::TooLarge => document_failed(page, "document-failed", TOO_LARGE),
+        // The worker's own failure (or a request it was never sent), not the file's.
+        proto::ErrorCode::Internal => document_failed(page, "viewer-failed", "The document viewer could not start in this browser."),
         _ => document_failed(page, "document-failed", "This file is not a Word document this viewer can read."),
     }
 }
@@ -943,6 +968,12 @@ fn on_page(page: &Rc<Page>, generation: u32, key: PageKey, env: &proto::Envelope
         match header.filter(|h| h.page == key.page && h.scale.to_bits() == key.scale().to_bits()) {
             None => {
                 state.cache.failed(key);
+                false
+            }
+            // Its canvas went (scrolled away before the answer): the pixels would be held by
+            // nothing, so the page is asked for again when it is wanted.
+            Some(_) if !state.canvases.contains_key(&key.page) => {
+                state.cache.forget(key.page);
                 false
             }
             Some(header) => {
@@ -1261,7 +1292,12 @@ fn build_api(page: &Rc<Page>) -> js_sys::Object {
         }
         let page = p.clone();
         js_sys::Promise::new(&mut |resolve, reject| {
-            page.state.borrow_mut().open_waiters.push((resolve, reject));
+            // An earlier open() still waiting is superseded: its document is never shown, so its
+            // promise rejects instead of settling with this one's page count.
+            let superseded = std::mem::replace(&mut page.state.borrow_mut().open_waiters, vec![(resolve, reject)]);
+            for (_, reject) in superseded {
+                let _ = reject.call1(&JsValue::NULL, &js_error("open(): a later open() replaced this document"));
+            }
             open_document(&page, bytes.clone(), password.as_string());
         })
     });
