@@ -133,8 +133,8 @@ fn post(worker: &web_sys::Worker, id: u32, kind: proto::Kind, payload: &js_sys::
     worker.post_message_with_transfer(&msg, &transfer).map_err(|e| format!("postMessage failed: {e:?}"))
 }
 
-/// Complete each pending request with a typed `error` reply after the worker died, so no
-/// caller waits forever. Runs outside the state borrow: the sinks re-enter the page.
+/// Complete each pending request with a typed `error` reply after the worker died (or the
+/// request could not be sent to it), so no caller waits forever. Runs outside the state borrow: the sinks re-enter the page.
 fn fail_pending(pending: Vec<(u32, Sink)>, message: &str) {
     let reply = proto::ErrorReply { code: proto::ErrorCode::Internal, message: message.to_string() };
     let Ok(payload) = proto::encode_payload(&reply) else { return };
@@ -165,12 +165,15 @@ fn on_message(inner: &Rc<RefCell<Inner>>, data: &wasm_bindgen::JsValue) {
             state.ready = true;
             let queued = std::mem::take(&mut state.queued);
             let worker = state.worker.clone();
+            // A request that cannot be posted is answered with an error, as one posted at once
+            // is refused to its caller: never left waiting for a reply that cannot come.
+            let unsent: Vec<(u32, Sink)> = queued
+                .into_iter()
+                .filter(|(id, kind, payload)| post(&worker, *id, *kind, payload).is_err())
+                .filter_map(|(id, ..)| state.pending.remove(&id).map(|sink| (id, sink)))
+                .collect();
             drop(state);
-            for (id, kind, payload) in queued {
-                if let Err(e) = post(&worker, id, kind, &payload) {
-                    web_sys::console::warn_1(&format!("wordcraft viewer: a queued request failed to send: {e}").into());
-                }
-            }
+            fail_pending(unsent, "a request could not be sent to the viewer worker");
             return;
         }
         match state.pending.remove(&env.id) {

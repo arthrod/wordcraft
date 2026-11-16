@@ -717,6 +717,8 @@ fn on_opened(page: &Rc<Page>, generation: u32, env: &proto::Envelope, payload: &
         proto::ErrorCode::PasswordRequired => ask_password(page, "password-required", "This document is protected with a password."),
         proto::ErrorCode::WrongPassword => ask_password(page, "wrong-password", "That password does not open this document."),
         proto::ErrorCode::TooLarge => document_failed(page, "document-failed", TOO_LARGE),
+        // The worker's own failure (or a request it was never sent), not the file's.
+        proto::ErrorCode::Internal => document_failed(page, "viewer-failed", "The document viewer could not start in this browser."),
         _ => document_failed(page, "document-failed", "This file is not a Word document this viewer can read."),
     }
 }

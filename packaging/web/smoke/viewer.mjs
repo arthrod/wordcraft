@@ -635,6 +635,25 @@ try {
     check("a page answered after its canvas went is painted when shown again", back.asked.length > 0 && back.gone && back.painted.every(Boolean), JSON.stringify(back));
     check("scrolled away and back: no uncaught errors", away.log.uncaught.length === 0, away.log.uncaught.join(" | "));
     await away.page.close();
+
+    // A request queued before the worker was ready whose postMessage throws: the page is told
+    // (an error, Edit offered), instead of saying "Opening the document…" for ever.
+    const refused = await open(browser, base, "/", { hooks: true, holdFromStart: true });
+    await refused.page.waitForFunction(() => performance.getEntriesByType("resource").some((e) => e.name.endsWith("/samples/welcome.docx") && e.responseEnd > 0), { timeout: 30000 });
+    await new Promise((r) => setTimeout(r, 1000));
+    await refused.page.evaluate(() => {
+      window.__failPost = true;
+      window.__release();
+      window.__failPost = false;
+    });
+    await waitAttr(refused.page, "data-wordcraft-error", "viewer-failed", 10000).catch(() => {});
+    const told = await refused.page.evaluate(() => ({
+      error: document.documentElement.getAttribute("data-wordcraft-error"),
+      edit: (document.querySelector("#wordcraft_viewer_edit")?.getClientRects().length ?? 0) > 0,
+    }));
+    check("a queued request that cannot be posted ends in an error, with Edit offered", told.error === "viewer-failed" && told.edit, JSON.stringify(told));
+    check("a queued request that cannot be posted: no uncaught errors", refused.log.uncaught.length === 0, refused.log.uncaught.join(" | "));
+    await refused.page.close();
   }
 
   // ---- the modes a host can choose ----
