@@ -237,8 +237,8 @@ pub struct PdfFaces {
 /// The faces a PDF export of `doc` draws text in, as `(typographic family, style)`, each once in
 /// the order first drawn: the faces its fonts ask for and the fallback faces drawn instead, over
 /// the display list the export draws (body, headers, footers, notes, text boxes, tables, charts,
-/// diagrams, equations) and the watermark. Text inside a picture's metafile is not included. For
-/// a host that writes the PDF elsewhere with copies of its faces (the web app's PDF worker) and
+/// diagrams, equations), the text of metafile pictures (the page picture too), which the export
+/// draws as text, and the watermark. For a host that writes the PDF elsewhere with copies of its faces (the web app's PDF worker) and
 /// must know which copies this document needs. Lays the document out, so a host asks only when
 /// it has to choose. `doc` is the document as printed (`output_fields`). At most
 /// [`MAX_PDF_FACES`], else [`PdfFaces::cut`].
@@ -266,18 +266,33 @@ pub fn pdf_faces_within(doc: &Document, opts: &ExportOptions, limit: usize) -> P
         let f = face.get();
         out.faces.push((f.family.clone(), f.style.clone()));
     };
+    // Each picture is read once: its text draws in the same faces wherever it is placed.
+    let mut pictures = std::collections::HashSet::new();
+    let mut picture_faces = |media: &str| -> Vec<wordcraft_fonts::FaceRef> {
+        if !pictures.insert(media.to_string()) {
+            return Vec::new();
+        }
+        doc.media.get(media).map(|bytes| wordcraft_layout::metafile_text_faces(bytes)).unwrap_or_default()
+    };
     for page in &lay.pages {
         // A stack, not recursion: nesting depth comes from the document.
         let mut stack = page_display(doc, page, &display);
         while let Some(d) = stack.pop() {
             match d {
                 Draw::Glyphs { face, .. } => add(&face),
+                Draw::Image { media, .. } => picture_faces(&media).iter().for_each(&mut add),
                 Draw::Figure { draws: items, .. } | Draw::Turned { items, .. } | Draw::Rotated { items, .. } | Draw::Clip { items, .. } => {
                     stack.extend(items.into_iter().rev());
                 }
                 _ => {}
             }
         }
+    }
+    // The page picture is drawn behind every page, outside the display list.
+    if !lay.pages.is_empty()
+        && let Some(pic) = &doc.settings.page_picture
+    {
+        picture_faces(&pic.media).iter().for_each(&mut add);
     }
     if !lay.pages.is_empty()
         && let Some(wm) = &doc.settings.watermark
