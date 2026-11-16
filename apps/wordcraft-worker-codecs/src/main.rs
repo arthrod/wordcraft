@@ -339,19 +339,23 @@ mod tests {
         };
         let a4 = proto::PageSize::from_points(595.28, 841.89);
         let html = b"<html><body><p>No page size here.</p></body></html>";
+        // The worker reads the file on exactly the region's page, as the engine does in process:
+        // the same reader on the same, unrounded page gives the same document.
+        // An A4 region's page as `wordcraft_engine::io::region_page` builds it (the web app's
+        // `an_opened_file_asks_for_the_regions_paper` pins that it sends exactly this).
+        let region = wordcraft_doc::SectionProps { page_w: 595.28, page_h: 841.89, ..Default::default() };
+        let rtf = b"{\\rtf1\\ansi No size.\\par}";
+        for (format, input) in [("html", &html[..]), ("rtf", &rtf[..])] {
+            let engine = wordcraft_formats::import_on(format, input, &region).unwrap().unwrap();
+            let worker = import_document(format, input, None, &page(a4)).unwrap();
+            let first = |d: &Document| d.sections().first().map(|(_, p)| (p.page_w.to_bits(), p.page_h.to_bits()));
+            assert_eq!(first(&worker), first(&engine), "{format}: the worker's page is the engine's, bit for bit");
+        }
+        // The reply is a Word package, whose page sizes are whole twips (ECMA-376 `w:pgSz`): it
+        // reads back as any saved `.docx` does, the engine's own included.
         assert_eq!(page_of(html, "html", a4), (595.3, 841.9), "an A4 region's HTML opens on A4");
         let default = wordcraft_doc::SectionProps::default();
         assert_eq!(page_of(html, "html", None), (default.page_w, default.page_h), "no page sent: the blank page");
-        // Each format reads the page as the engine's in-process open does: the same reader on
-        // the same page (an RTF file without `\\paperw` is Letter by that format's own rule).
-        let rtf = b"{\\rtf1\\ansi No size.\\par}";
-        let region_page = wordcraft_doc::SectionProps { page_w: 595.3, page_h: 841.9, ..Default::default() };
-        for (format, input) in [("html", &html[..]), ("rtf", &rtf[..])] {
-            let engine = wordcraft_formats::import_on(format, input, &region_page).unwrap().unwrap();
-            let sections = engine.sections();
-            let p = sections.first().map(|(_, p)| (*p).clone()).unwrap_or_default();
-            assert_eq!(page_of(input, format, a4), (p.page_w, p.page_h), "{format}");
-        }
         // A file with a size of its own keeps it.
         let letter_rtf = b"{\\rtf1\\ansi\\paperw12240\\paperh15840 Letter.\\par}";
         assert_eq!(page_of(letter_rtf, "rtf", a4), (612.0, 792.0));

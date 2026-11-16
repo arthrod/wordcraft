@@ -787,13 +787,16 @@ mod tests {
     #[test]
     fn an_opened_file_asks_for_the_regions_paper() {
         use wordcraft_engine::Region;
-        use wordcraft_worker_proto::{ConvertDirection, PageSize};
-        for (tag, w, h) in [("pl-PL", 11_906, 16_838), ("en-US", 12_240, 15_840), ("fr-CA", 12_240, 15_840)] {
+        use wordcraft_worker_proto::ConvertDirection;
+        for (tag, w, h) in [("pl-PL", 595.28f32, 841.89f32), ("en-US", 612.0, 792.0), ("fr-CA", 612.0, 792.0)] {
             let region = Region::from_tag(tag);
             let req = open_request("html".into(), b"<p>x</p>".to_vec(), &region);
-            assert_eq!(req.page, Some(PageSize { width: w, height: h }), "{tag}");
+            // Exactly the engine's page, unrounded, on the wire and back.
             let engine = wordcraft_engine::io::region_page(&region);
-            assert_eq!(req.page.map(|p| p.points()), Some(((engine.page_w * 20.0).round() / 20.0, (engine.page_h * 20.0).round() / 20.0)), "{tag}");
+            assert_eq!((engine.page_w, engine.page_h), (w, h), "{tag}");
+            let sent = wordcraft_worker_proto::encode_convert_request(&req).unwrap();
+            let got = wordcraft_worker_proto::decode_convert_request(&sent).unwrap().page.map(|p| p.points());
+            assert_eq!(got.map(|(w, h)| (w.to_bits(), h.to_bits())), Some((engine.page_w.to_bits(), engine.page_h.to_bits())), "{tag}");
             assert_eq!((req.direction, req.password.as_deref(), req.format.as_str()), (ConvertDirection::Import, None, "html"));
         }
     }

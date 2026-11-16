@@ -300,7 +300,7 @@ pub enum ConvertDirection {
 /// On the wire the payload is a [`pack_binary`] frame of two parts — the JSON metadata
 /// (`{format, direction, password}`) and the raw `input` bytes — so a file of up to
 /// [`MAX_CONVERT_BYTES`] never has to survive JSON.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ConvertRequest {
     /// Format of the non-`.docx` side, as a lower-case extension (`rtf`, `odt`, `doc`, `html`,
     /// `xml`…), at most [`MAX_FORMAT_BYTES`]. `.docx` and its sibling flavors (`.docm`, `.dotx`,
@@ -318,38 +318,38 @@ pub struct ConvertRequest {
     pub page: Option<PageSize>,
 }
 
-/// A page size in twentieths of a point (twips, as a Word package writes it), each side within
-/// [`MIN_PAGE_TWIPS`]..=[`MAX_PAGE_TWIPS`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A page size in points, exactly as the client's document model holds it (an `f32` crosses
+/// JSON and back bit for bit), each side finite and within
+/// [`MIN_PAGE_POINTS`]..=[`MAX_PAGE_POINTS`]. Not twips: rounding the region's A4
+/// (595.28 × 841.89 pt) to twips would open a file on a page 0.02 pt off the one the engine
+/// opens it on in process.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PageSize {
-    pub width: u32,
-    pub height: u32,
+    pub width: f32,
+    pub height: f32,
 }
 
 /// The narrowest page side a `convert` request may ask for: 0.1 inch.
-pub const MIN_PAGE_TWIPS: u32 = 144;
+pub const MIN_PAGE_POINTS: f32 = 7.2;
 /// The widest page side a `convert` request may ask for: 22 inches.
-pub const MAX_PAGE_TWIPS: u32 = 31_680;
+pub const MAX_PAGE_POINTS: f32 = 1584.0;
 
 impl PageSize {
-    /// Both sides within [`MIN_PAGE_TWIPS`]..=[`MAX_PAGE_TWIPS`].
+    /// Both sides finite and within [`MIN_PAGE_POINTS`]..=[`MAX_PAGE_POINTS`] (NaN is not).
     pub fn is_valid(&self) -> bool {
-        (MIN_PAGE_TWIPS..=MAX_PAGE_TWIPS).contains(&self.width) && (MIN_PAGE_TWIPS..=MAX_PAGE_TWIPS).contains(&self.height)
+        (MIN_PAGE_POINTS..=MAX_PAGE_POINTS).contains(&self.width) && (MIN_PAGE_POINTS..=MAX_PAGE_POINTS).contains(&self.height)
     }
 
-    /// The size of a `width` × `height` point page, rounded to whole twips; `None` for a side
-    /// that is not finite or falls outside the bounds.
+    /// The size of a `width` × `height` point page, unchanged; `None` for a side that is not
+    /// finite or falls outside the bounds.
     pub fn from_points(width: f32, height: f32) -> Option<PageSize> {
-        let twips = |pt: f32| {
-            let t = (f64::from(pt) * 20.0).round();
-            (t.is_finite() && t >= f64::from(MIN_PAGE_TWIPS) && t <= f64::from(MAX_PAGE_TWIPS)).then_some(t as u32)
-        };
-        Some(PageSize { width: twips(width)?, height: twips(height)? })
+        let page = PageSize { width, height };
+        page.is_valid().then_some(page)
     }
 
     /// `(width, height)` in points.
     pub fn points(&self) -> (f32, f32) {
-        (self.width as f32 / 20.0, self.height as f32 / 20.0)
+        (self.width, self.height)
     }
 }
 
@@ -546,7 +546,7 @@ pub fn decode_convert_request(bytes: &[u8]) -> Result<ConvertRequest, ProtoError
         return Err(ProtoError::Decode("convert payload has an empty format".into()));
     }
     if meta.page.is_some_and(|p| !p.is_valid()) {
-        return Err(ProtoError::Decode(format!("convert payload has a page size outside {MIN_PAGE_TWIPS}..={MAX_PAGE_TWIPS} twips")));
+        return Err(ProtoError::Decode(format!("convert payload has a page size outside {MIN_PAGE_POINTS}..={MAX_PAGE_POINTS} points")));
     }
     Ok(ConvertRequest { format: meta.format, direction: meta.direction, password: meta.password, input: input.to_vec(), page: meta.page })
 }
@@ -921,7 +921,7 @@ mod tests {
             direction: ConvertDirection::Import,
             password: Some("open-sesame".into()),
             input: b"{\\rtf1 hi}".to_vec(),
-            page: Some(PageSize { width: 11_906, height: 16_838 }),
+            page: Some(PageSize { width: 595.28, height: 841.89 }),
         }
     }
 
@@ -990,13 +990,13 @@ mod tests {
     }
 
     /// Review finding (the page of an opened file): the page an import opens on travels in the
-    /// JSON part, in twips; a request without one, as an older client sends it, has none, and an
+    /// JSON part, in points as the client holds them; a request without one, as an older client sends it, has none, and an
     /// older worker reads a new request (serde ignores the field it does not know).
     #[test]
     fn convert_request_carries_the_page_compatibly() {
         let req = sample_convert();
         let meta: serde_json::Value = serde_json::from_slice(unpack_binary(&encode_convert_request(&req).unwrap()).unwrap()[0]).unwrap();
-        assert_eq!(meta["page"], serde_json::json!({"width": 11_906, "height": 16_838}));
+        assert_eq!(meta["page"].to_string(), r#"{"height":841.89,"width":595.28}"#, "the shortest form that reads back exactly");
         let none = ConvertRequest { page: None, ..sample_convert() };
         let meta: serde_json::Value = serde_json::from_slice(unpack_binary(&encode_convert_request(&none).unwrap()).unwrap()[0]).unwrap();
         assert!(meta.get("page").is_none(), "no page, no field: {meta}");
@@ -1007,10 +1007,23 @@ mod tests {
         }
         let old: OldConvertMeta = decode_payload(unpack_binary(&encode_convert_request(&req).unwrap()).unwrap()[0]).unwrap();
         assert_eq!(old.format, "rtf");
-        // Points round to twips; A4 and Letter as the engine's regions give them.
-        assert_eq!(PageSize::from_points(595.28, 841.89), Some(PageSize { width: 11_906, height: 16_838 }));
-        assert_eq!(PageSize::from_points(612.0, 792.0), Some(PageSize { width: 12_240, height: 15_840 }));
-        assert_eq!(PageSize::from_points(612.0, 792.0).unwrap().points(), (612.0, 792.0));
+        // Points cross as they are, never rounded: A4 and Letter as the engine's regions give
+        // them come back bit for bit, on the wire too.
+        for (w, h) in [(595.28f32, 841.89f32), (612.0, 792.0), (7.2, 1584.0), (419.53, 595.28), (0.1 + 600.0, 800.3)] {
+            let page = PageSize::from_points(w, h).unwrap();
+            assert_eq!(page.points(), (w, h));
+            let req = ConvertRequest { page: Some(page), ..sample_convert() };
+            let back = decode_convert_request(&encode_convert_request(&req).unwrap()).unwrap().page.unwrap().points();
+            assert_eq!((back.0.to_bits(), back.1.to_bits()), (w.to_bits(), h.to_bits()), "{w} x {h}");
+        }
+        // Every f32 in the bounds survives the JSON, not just the regions' sizes.
+        let mut pt = MIN_PAGE_POINTS;
+        while pt <= MAX_PAGE_POINTS {
+            let req = ConvertRequest { page: PageSize::from_points(pt, MAX_PAGE_POINTS), ..sample_convert() };
+            let back = decode_convert_request(&encode_convert_request(&req).unwrap()).unwrap().page.unwrap().points();
+            assert_eq!(back.0.to_bits(), pt.to_bits(), "{pt}");
+            pt = f32::from_bits(pt.to_bits() + 997);
+        }
         for (w, h) in [(f32::NAN, 792.0), (612.0, f32::INFINITY), (-612.0, 792.0), (0.0, 792.0), (612.0, 1e9), (7.1, 792.0), (1584.1, 792.0)] {
             assert_eq!(PageSize::from_points(w, h), None, "{w} x {h}");
         }
@@ -1021,21 +1034,25 @@ mod tests {
     #[test]
     fn convert_request_rejects_a_hostile_page() {
         for page in [
-            serde_json::json!({"width": 0, "height": 15_840}),
-            serde_json::json!({"width": 12_240, "height": MAX_PAGE_TWIPS + 1}),
-            serde_json::json!({"width": u64::MAX, "height": 15_840}),
-            serde_json::json!({"width": -1, "height": 15_840}),
-            serde_json::json!({"width": 12.5, "height": 15_840}),
-            serde_json::json!({"width": 12_240}),
+            serde_json::json!({"width": 0, "height": 792}),
+            serde_json::json!({"width": 612, "height": 1584.5}),
+            serde_json::json!({"width": 7.1, "height": 792}),
+            serde_json::json!({"width": u64::MAX, "height": 792}),
+            serde_json::json!({"width": 1e300, "height": 792}),
+            serde_json::json!({"width": -612, "height": 792}),
+            serde_json::json!({"width": 612}),
+            serde_json::json!({"width": "612", "height": 792}),
             serde_json::json!("A4"),
         ] {
             let meta = encode_payload(&serde_json::json!({"format": "html", "direction": "import", "page": page})).unwrap();
             let frame = pack_binary(&[&meta, b"<p>x</p>"]).unwrap();
             assert!(matches!(decode_convert_request(&frame), Err(ProtoError::Decode(_))), "{page}");
         }
-        let req = ConvertRequest { page: Some(PageSize { width: 12_240, height: 0 }), ..sample_convert() };
-        assert_eq!(convert_request_error(&req), Some(ErrorCode::BadRequest));
-        let req = ConvertRequest { page: Some(PageSize { width: 12_240, height: 15_840 }), ..sample_convert() };
+        for (w, h) in [(612.0, 0.0), (f32::NAN, 792.0), (612.0, f32::INFINITY), (-612.0, 792.0)] {
+            let req = ConvertRequest { page: Some(PageSize { width: w, height: h }), ..sample_convert() };
+            assert_eq!(convert_request_error(&req), Some(ErrorCode::BadRequest), "{w} x {h}");
+        }
+        let req = ConvertRequest { page: Some(PageSize { width: 612.0, height: 792.0 }), ..sample_convert() };
         assert_eq!(convert_request_error(&req), None);
     }
 
