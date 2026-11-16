@@ -1009,7 +1009,11 @@ mod tests {
         let err = worker_wasms_in(dir, [Ok(viewer.clone()), Err(failed())].into_iter()).unwrap_err();
         assert!(err.contains("the listing failed") && err.contains("dist/web"), "{err}");
         assert!(worker_wasms_in(dir, [Err(failed())].into_iter()).is_err());
-        let found = worker_wasms_in(dir, [Ok(dir.join("wordcraft-worker-pdf_bg.wasm")), Ok(viewer.clone()), Ok(dir.join("wordcraft-web_bg.wasm"))].into_iter()).unwrap();
+        let found = worker_wasms_in(
+            dir,
+            [Ok(dir.join("wordcraft-worker-pdf_bg.wasm")), Ok(viewer.clone()), Ok(dir.join("wordcraft-web_bg.wasm"))].into_iter(),
+        )
+        .unwrap();
         assert_eq!(found, vec![dir.join("wordcraft-worker-pdf_bg.wasm"), viewer]);
         // A folder that cannot be listed at all is an error too, not "no workers".
         assert!(find_worker_wasms(Path::new("/nonexistent/wordcraft/dist/web")).is_err());
