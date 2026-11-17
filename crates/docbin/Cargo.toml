@@ -12,8 +12,7 @@ workspace = true
 craft-doc-binary = { workspace = true }
 craft-wordmodel = { workspace = true }
 wordcraft-doc = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
+wordcraft-model-bridge = { workspace = true }
 
 [dev-dependencies]
 wordcraft-doc = { workspace = true, features = ["test-support"] }

@@ -18,6 +18,9 @@ wordcraft-fonts = { path = "crates/fonts" }
 wordcraft-layout = { path = "crates/layout" }
 wordcraft-docx = { path = "crates/docx" }
 wordcraft-docbin = { path = "crates/docbin" }
+wordcraft-model-bridge = { path = "crates/model-bridge" }
+# TEMPORARY (10.4): craft-convert from the branch of storytold/craft-libs#1883 until it lands; then the same repository and revision as the craft crates below.
+craft-convert = { git = "https://github.com/arthrod/craft-libs", rev = "8a46e13e2" }
 wordcraft-formats = { path = "crates/formats" }
 wordcraft-render = { path = "crates/render" }
 wordcraft-pdf = { path = "crates/pdf" }
