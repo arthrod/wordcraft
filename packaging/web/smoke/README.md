@@ -64,6 +64,8 @@ node packaging/web/smoke/lazy.mjs --site dist/web --out packaging/web/smoke/resu
 node packaging/web/smoke/lazy.mjs --site dist/web --only idle,edit   # some flows
 ```
 
+The site shows the read-only viewer first (see `viewer.mjs` below), so `lazy.mjs` opens every
+page with `mode=edit` added to its query, which starts the editor at once.
 `run.sh` runs it after the matrix when `dist/web/index.html` exists. It exits 1
 when a flow fails and prints `PASS`/`FAIL` per flow on stderr.
 
@@ -84,6 +86,34 @@ flows wait for the download (or the `Couldn't export …` line), never for the c
 `?proof-worker` prints its lines only once the proofing worker starts (the first edit or
 proofing command); `edit` types before waiting for them, as `drive.mjs`'s fixture page does.
 Limits of the worker jobs are listed in `packaging/web/README.md` ("Worker jobs").
+
+## Viewer-first page (`viewer.mjs`, plan 10.3)
+
+A second, separate driver for the demo page itself (no npm package, no bundler): it serves a
+Trunk release build (`dist/web`) with the deployed Content-Security-Policy and drives headless
+Chrome through the viewer-first flow.
+
+```sh
+(cd apps/wordcraft-web && trunk build --release)        # writes dist/web
+node packaging/web/smoke/viewer.mjs --dist dist/web --core <dir> --out <results.json>
+```
+
+`--core` is the view-only core built for Node (`cargo build -p wordcraft-viewer --bin
+wordcraft-viewer --target wasm32-unknown-unknown --profile wasm-release`, then
+`wasm-bindgen --target nodejs` and `wasm-opt` with the flags `index.html` gives the workers);
+without it the byte-for-byte page comparison is skipped and says so.
+
+| Check | What it proves |
+|---|---|
+| AC1 first visit | the network log has the page module and the view-only worker, and no editor file (`wordcraft-web*`, eframe's snippet), no proofing, codecs or PDF worker; the password form takes no space |
+| AC2 first page | page 0's canvas is not blank and holds exactly the RGBA the core returns for that page at the canvas's scale |
+| AC3 edit action | the Edit control fetches the editor, which shows the same document, takes typing, and the viewer is gone; the proofing worker is not fetched before the first keystroke |
+| AC4 sizes | raw / gzip -9 / Brotli q11 of every file in the first load and in the edit step |
+| AC5 no editor | without WebGL, with the editor's glue or wasm answered 404, or with its wasm download never answered (a 3 s `data-editor-wait-ms`), the viewer stays with a notice and nothing is thrown uncaught; that download answered late, the editor takes over (notice cleared, same document) |
+| AC6 CSP | no `securitypolicyviolation` on the page under `_headers`' policy |
+| password | a document the editor encrypted (`file.encrypt`, `exportDocx`): `open()` rejects, the in-page form asks (focused) and Edit, double click, Enter, F2 and `edit()` do nothing, Cancel leaves a "protected" notice, a wrong password asks again, the right one shows the pages, no `window.prompt`, and the editor opens it on Edit |
+| modes | `?mode=view` never offers or loads the editor; `?mode=edit` loads it at once; `?mode=edit` without WebGL falls back to the viewer |
+| `?host=parent` | in a same-origin iframe the editor announces `wordcraft:ready` and owns the frame; without WebGL it is still fetched and posts `wordcraft:failed`; neither fetches the viewer worker or a sample |
 
 ## JavaScript exception
 

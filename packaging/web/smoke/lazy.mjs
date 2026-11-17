@@ -64,6 +64,12 @@ async function until(what, fn, timeoutMs = 90_000) {
   }
 }
 
+// The site shows a read-only viewer first and fetches the editor on an edit
+// action; these flows test the editor, so every page asks for it at once.
+function editorQuery(query) {
+  return query ? `${query}&mode=edit` : "?mode=edit";
+}
+
 // One page on a fresh server log. `miss` makes matching paths 404. A setup that
 // fails closes its page and server before throwing: the caller never got the
 // `close`, and a listening server would keep Node running after the report.
@@ -106,7 +112,7 @@ async function setUp(context, server, port, log, query) {
     };
   });
   await page.setViewport({ width: 1400, height: 900 });
-  await page.goto(`http://127.0.0.1:${port}/${query}`, { waitUntil: "domcontentloaded", timeout: 60_000 });
+  await page.goto(`http://127.0.0.1:${port}/${editorQuery(query)}`, { waitUntil: "domcontentloaded", timeout: 60_000 });
   await page.waitForFunction(() => typeof globalThis.wordcraft?.execute === "function", { timeout: 240_000, polling: 250 });
   const asked = (part) => log.filter((r) => r.path.includes(part)).map((r) => `${r.status} ${r.path}`);
   const text = () => page.evaluate(() => globalThis.wordcraft.getMarkdown());

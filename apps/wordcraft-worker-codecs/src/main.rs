@@ -57,7 +57,9 @@ pub fn handle_message(header: &[u8], payload: &[u8]) -> (Vec<u8>, Vec<u8>) {
         Kind::Cancel => cancel(payload),
         Kind::Convert => convert(payload),
         // This worker converts; it does not proof or render.
-        Kind::Check | Kind::Configure | Kind::RenderPdf => error(ErrorCode::UnknownKind, "`convert` is the only job this worker runs".into()),
+        Kind::Check | Kind::Configure | Kind::RenderPdf | Kind::ViewOpen | Kind::ViewRender | Kind::ViewInstallFont | Kind::ViewMissingFonts => {
+            error(ErrorCode::UnknownKind, "`convert` is the only job this worker runs".into())
+        }
         // Unreachable: `is_request` was checked above.
         other => error(ErrorCode::UnknownKind, format!("`{other:?}` is a reply, not a request")),
     };
@@ -250,7 +252,13 @@ fn unpack(data: &wasm_bindgen::JsValue) -> (Vec<u8>, Vec<u8>, Option<(Envelope, 
         return (Vec::new(), Vec::new(), None);
     }
     let arr = js_sys::Array::from(data);
-    let header_str = arr.get(0).as_string().unwrap_or_default();
+    // The header's length is read from the JS string before it is copied: a string of hundreds
+    // of megabytes must cost one reply, not an allocation this module may not survive.
+    let first = arr.get(0);
+    let header_str = match first.dyn_ref::<js_sys::JsString>() {
+        Some(s) if s.length() as usize <= proto::MAX_PAYLOAD_BYTES => String::from(s),
+        _ => String::new(),
+    };
     // `decode_envelope` applies `MAX_PAYLOAD_BYTES` itself; an over-limit header gets the same
     // `BadRequest` an empty one does, without paying for the copy first.
     let header = if header_str.len() > proto::MAX_PAYLOAD_BYTES { Vec::new() } else { header_str.into_bytes() };

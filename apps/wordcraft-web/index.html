@@ -11,7 +11,19 @@
   <link data-trunk rel="copy-dir" href="target-assets/fonts" data-target-path="fonts" />
   <link data-trunk rel="copy-file" href="target-assets/robots.txt" />
   <link data-trunk rel="copy-file" href="target-assets/404.html" />
-  <link data-trunk rel="rust" data-bin="wordcraft-web" data-cargo-profile="wasm-release" data-typescript data-wasm-opt="z" data-wasm-opt-params="--enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-simd" data-weak-refs />
+  <!-- Plan 10.3: the page's first module is the small viewer-first page module. It paints the
+       document from the view-only worker and adds the editor's script element only on an edit
+       action. Content-hashed, with SRI, like every Trunk main target. -->
+  <link data-trunk rel="rust" href="../wordcraft-viewer-web/Cargo.toml" data-bin="wordcraft-viewer-web" data-cargo-profile="wasm-release" data-wasm-opt="z" data-wasm-opt-params="--enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-simd" data-weak-refs />
+  <!-- The editor. Trunk allows one main target a page, so the editor is built as a secondary
+       target: `data-type="worker"` only means "emit the files, inject nothing". It runs on the
+       main thread: the page module adds `<script type="module" src="wordcraft-web_loader.js">`
+       (Trunk's loader shim: `import init from './wordcraft-web.js'; await init();`). Its names
+       are un-hashed so they can be named at run time, and so are served `no-cache`. -->
+  <link data-trunk rel="rust" data-bin="wordcraft-web" data-type="worker" data-bindgen-target="web" data-cargo-profile="wasm-release" data-typescript data-wasm-opt="z" data-wasm-opt-params="--enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-simd" data-weak-refs data-loader-shim />
+  <!-- Plan 10.3: the view-only dedicated worker (the view-only core behind the worker
+       envelope), started by the page module on load. -->
+  <link data-trunk rel="rust" href="../wordcraft-worker-viewer/Cargo.toml" data-bin="wordcraft-worker-viewer" data-type="worker" data-bindgen-target="web" data-cargo-profile="wasm-release" data-wasm-opt="z" data-wasm-opt-params="--enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-simd" data-weak-refs data-loader-shim />
   <!-- §3.2: the proofing dedicated worker. `data-loader-shim` makes Trunk emit a same-origin
        `wordcraft-worker-proof_loader.js` (no `blob:` URL — `worker-src 'self'`); the shell
        lazily `new Worker(assetBase + file, {type: "module"})`s it on the ?proof-worker flag.
@@ -26,7 +38,7 @@
   <style>
     html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #e6e6e6; font-family: system-ui, -apple-system, sans-serif; }
     #wordcraft_canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
-    #wordcraft_loading { position: absolute; inset: 0; display: flex; flex-direction: column; pointer-events: none; background: #e6e6e6; color: #334155; z-index: 500; }
+    #wordcraft_viewer_loading { position: absolute; inset: 0; display: flex; flex-direction: column; pointer-events: none; background: #e6e6e6; color: #334155; z-index: 500; }
     .wc-skel-bar { height: 34px; background: #2b47b5; color: #fff; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; font-size: 13px; font-weight: 600; }
     .wc-skel-ribbon { height: 76px; background: #f8fafc; border-bottom: 1px solid #cbd5e1; display: flex; align-items: center; gap: 12px; padding: 0 16px; }
     .wc-skel-pill { height: 14px; border-radius: 4px; background: #e2e8f0; }
@@ -37,8 +49,9 @@
   </style>
 </head>
 <body>
-  <canvas id="wordcraft_canvas"></canvas>
-  <div id="wordcraft_loading" aria-live="polite">
+  <!-- The viewer mounts here; the page module adds the editor's canvas when it loads the editor. -->
+  <div id="wordcraft_viewer"></div>
+  <div id="wordcraft_viewer_loading" aria-live="polite">
     <div class="wc-skel-bar">
       <span>WordCraftWeb</span>
       <span style="font-weight: 400; opacity: 0.9;">Streaming WebAssembly runtime&hellip;</span>

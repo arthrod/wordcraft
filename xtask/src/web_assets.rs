@@ -76,6 +76,10 @@ Warm regards,
 The Studio Crew
 "#;
 
+/// The document the viewer-first page shows when it is given none: the three sample texts
+/// above, as one `.docx` (`apps/wordcraft-viewer-web` fetches `samples/welcome.docx`).
+pub const VIEWER_SAMPLE_DOCX: &str = "welcome.docx";
+
 /// Parse every non-English `LangInfo { code: "..." }` entry from `crates/ui-egui/src/i18n.rs`.
 pub fn offered_non_english_locales(root: &Path) -> Result<Vec<String>, String> {
     let i18n_path = root.join("crates/ui-egui/src/i18n.rs");
@@ -204,6 +208,13 @@ pub fn emit_web_assets(root: &Path, out_dir: &Path, i18n_dir: Option<&Path>, req
     for (name, content) in [("welcome.md", SAMPLE_WELCOME_MD), ("spec.md", SAMPLE_SPEC_MD), ("letter.md", SAMPLE_LETTER_MD)] {
         std::fs::write(samples_out.join(name), content).map_err(|e| format!("{}: {e}", samples_out.join(name).display()))?;
     }
+
+    // The viewer-first page's built-in sample (plan 10.3). The view-only module reads `.docx`
+    // and nothing else, so the same sample text is staged as a package too.
+    let viewer_sample = [SAMPLE_WELCOME_MD, SAMPLE_SPEC_MD, SAMPLE_LETTER_MD].join("\n");
+    let docx =
+        wordcraft_docx::write(&wordcraft_formats::markdown::import(&viewer_sample)).map_err(|e| format!("samples/{VIEWER_SAMPLE_DOCX}: {e}"))?;
+    std::fs::write(samples_out.join(VIEWER_SAMPLE_DOCX), docx).map_err(|e| format!("{}: {e}", samples_out.join(VIEWER_SAMPLE_DOCX).display()))?;
 
     for (name, content) in [("robots.txt", ROBOTS_TXT), ("404.html", NOT_FOUND_HTML)] {
         std::fs::write(out_dir.join(name), content).map_err(|e| format!("{}: {e}", out_dir.join(name).display()))?;

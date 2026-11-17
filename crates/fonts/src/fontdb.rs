@@ -14,7 +14,9 @@ use skrifa::raw::FileRef;
 use skrifa::string::StringId;
 use skrifa::{GlyphId, MetadataProvider};
 
+mod document;
 pub(crate) mod user;
+pub use document::DocumentFaces;
 pub use user::{FONT_FILE_EXTS, FontFormat, Installed, MAX_FONT_FILE_BYTES, UserFont, UserFontError, decode_font_file, is_font_file_name, sniff};
 
 mod catalog;
@@ -65,6 +67,8 @@ pub struct FontDb {
     /// ([`crate::packs`]). Kept apart from `user` so packs never persist, count against
     /// [`user::MAX_USER_FONTS`], or answer to [`FontDb::remove_user_font`].
     pub(crate) packs: RwLock<crate::packs::PackFonts>,
+    /// The font files documents embedded, kept for the life of the database ([`document`]).
+    document_files: Mutex<document::DocumentFiles>,
     /// Bumped whenever user fonts are added or removed ([`FontDb::generation`]).
     generation: AtomicU64,
     /// The folders the system font scan reads (the platform's font folders for [`FontDb::global`]).
@@ -145,6 +149,7 @@ impl FontDb {
             catalog: RwLock::new(Vec::new()),
             user: RwLock::new(user::UserFonts::default()),
             packs: RwLock::new(crate::packs::PackFonts::default()),
+            document_files: Mutex::new(document::DocumentFiles::default()),
             generation: AtomicU64::new(0),
             font_dirs,
             #[cfg(not(target_arch = "wasm32"))]

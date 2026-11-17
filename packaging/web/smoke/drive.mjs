@@ -46,8 +46,8 @@ const MIME = {
   ".md": "text/markdown; charset=utf-8",
 };
 
-function serveFile(res, path) {
-  res.writeHead(200, { "Content-Type": MIME[extname(path)] ?? "application/octet-stream" });
+function serveFile(res, path, headers = {}) {
+  res.writeHead(200, { ...headers, "Content-Type": MIME[extname(path)] ?? "application/octet-stream" });
   createReadStream(path).pipe(res);
 }
 
@@ -60,6 +60,8 @@ function serveFile(res, path) {
 // for none) — and `opts.miss(path)` answering true makes that request a 404 —
 // lazy.mjs uses both to measure what a page fetches and to simulate a missing
 // worker file.
+// `opts.headers` are added to every file served (viewer.mjs sends the deployed
+// Content-Security-Policy this way).
 export function startServer(distDir, pkgDir, opts = {}) {
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -88,7 +90,7 @@ export function startServer(distDir, pkgDir, opts = {}) {
     const file = existsSync(path) && statSync(path).isDirectory() ? join(path, "index.html") : path;
     if (existsSync(file) && statSync(file).isFile()) {
       note(200, statSync(file).size, file);
-      serveFile(res, file);
+      serveFile(res, file, opts.headers);
     } else {
       note(404, 0);
       res.writeHead(404).end("not found");

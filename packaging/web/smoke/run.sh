@@ -106,13 +106,20 @@ seed_stage_from_static() {
   local src="$STATIC_DIST" dest="$SMOKE_DIST/npm"
   rm -rf "$dest"
   mkdir -p "$dest"
-  local glue wasm dts
-  glue="$(first_name "$src"/wordcraft-web-*.js)"
-  wasm="$(first_name "$src"/wordcraft-web-*_bg.wasm)"
-  dts="$(first_name "$src"/wordcraft-web-*.d.ts)"
-  /bin/cp -f "$src/$glue" "$dest/wordcraft-web.js"
-  /bin/cp -f "$src/$wasm" "$dest/wordcraft-web_bg.wasm"
-  /bin/cp -f "$src/$dts" "$dest/wordcraft-web.d.ts"
+  # Since the viewer-first page (plan 10.3) the editor is a secondary Trunk target whose
+  # names are un-hashed in the static build too; an older static build still has the hashed
+  # names, which are de-hashed here.
+  if [[ -f "$src/wordcraft-web.js" ]]; then
+    /bin/cp -f "$src/wordcraft-web.js" "$src/wordcraft-web_bg.wasm" "$src/wordcraft-web.d.ts" "$dest/"
+  else
+    local glue wasm dts
+    glue="$(first_name "$src"/wordcraft-web-*.js)"
+    wasm="$(first_name "$src"/wordcraft-web-*_bg.wasm)"
+    dts="$(first_name "$src"/wordcraft-web-*.d.ts)"
+    /bin/cp -f "$src/$glue" "$dest/wordcraft-web.js"
+    /bin/cp -f "$src/$wasm" "$dest/wordcraft-web_bg.wasm"
+    /bin/cp -f "$src/$dts" "$dest/wordcraft-web.d.ts"
+  fi
   for f in wordcraft-worker-proof.js wordcraft-worker-proof_loader.js wordcraft-worker-proof_bg.wasm \
       wordcraft-worker-codecs.js wordcraft-worker-codecs_loader.js wordcraft-worker-codecs_bg.wasm \
       wordcraft-worker-pdf.js wordcraft-worker-pdf_loader.js wordcraft-worker-pdf_bg.wasm; do
