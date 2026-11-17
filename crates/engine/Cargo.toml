@@ -21,6 +21,7 @@ inline-proof = ["wordcraft-layout/inline-proof"]
 test-support = []
 
 [dependencies]
+craft-mime.workspace = true
 wordcraft-geom = { workspace = true, features = ["image"] }
 wordcraft-doc = { workspace = true }
 wordcraft-fonts = { workspace = true }
