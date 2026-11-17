@@ -28,12 +28,24 @@ use worker::*;
 /// Chosen from the Step 5.2a benchmark so isolate peak memory stays well below Cloudflare's 128 MB cap.
 const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
 
-/// Decompression budgets for request-supplied `.docx` input, passed to `wordcraft_docx::read_limited`.
+/// Decompression budgets for request-supplied `.docx` input ([`read_request_docx`]).
 /// The 4 MiB body cap bounds the *compressed* package only; without these a small zip could inflate
 /// to the crate defaults (256 MiB per part, 512 MiB total) and blow the isolate's 128 MB. 64 MiB
 /// total leaves ample room for the document model, layout and the page-1 raster on top.
 const DOCX_MAX_PART_BYTES: u64 = 32 * 1024 * 1024;
 const DOCX_MAX_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Read a request's `.docx` within the isolate's budgets ([`DOCX_MAX_PART_BYTES`],
+/// [`DOCX_MAX_TOTAL_BYTES`]): a package that inflates past them is refused, never opened under
+/// the reader's desktop-sized defaults. A protected package is refused; the API takes no password.
+fn read_request_docx(bytes: &[u8]) -> Result<wordcraft_doc::Document, wordcraft_docx::DocxError> {
+    read_docx_within(bytes, DOCX_MAX_PART_BYTES, DOCX_MAX_TOTAL_BYTES)
+}
+
+/// [`read_request_docx`] with the budgets given, so a test can reach them with a small file.
+fn read_docx_within(bytes: &[u8], max_part: u64, max_total: u64) -> Result<wordcraft_doc::Document, wordcraft_docx::DocxError> {
+    wordcraft_docx::from_shared_model(craft_docx::read_limited(bytes, &craft_docx::ReadOptions::default(), max_part, max_total)?)
+}
 
 /// The 413 message both endpoints share.
 const BODY_TOO_LARGE: &str = "Document exceeds 4 MiB Cloudflare edge cap; use Local WASM mode instead.";
@@ -266,7 +278,7 @@ async fn main(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
             _ => return json_error(400, "Unsupported preview format (expected md or docxBase64)"),
         };
         let doc = match parsed.from.as_str() {
-            "docxBase64" => match wordcraft_docx::read_limited(&input_bytes, DOCX_MAX_PART_BYTES, DOCX_MAX_TOTAL_BYTES) {
+            "docxBase64" => match read_request_docx(&input_bytes) {
                 Ok(d) => d,
                 Err(e) => return json_error(422, &format!("DOCX import error: {e}")),
             },
@@ -279,9 +291,7 @@ async fn main(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
         let Some(png) = preview_png(&doc) else {
             return json_error(422, "Document produced no previewable page");
         };
-        let mut resp = Response::from_body(ResponseBody::Body(png))?
-            .with_status(200)
-            .with_headers(no_store_headers("image/png")?);
+        let mut resp = Response::from_body(ResponseBody::Body(png))?.with_status(200).with_headers(no_store_headers("image/png")?);
         // The Worker has only the four bundled faces, so fonts the document asks for may be
         // substituted: say so on the wire, next to the `approximate` flag in /api/health.
         if let Err(e) = resp.headers_mut().set("X-Wordcraft-Preview", "approximate; fonts=bundled-4") {
@@ -314,7 +324,7 @@ async fn main(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
         };
 
         let doc = match parsed.from.as_str() {
-            "docxBase64" => match wordcraft_docx::read_limited(&input_bytes, DOCX_MAX_PART_BYTES, DOCX_MAX_TOTAL_BYTES) {
+            "docxBase64" => match read_request_docx(&input_bytes) {
                 Ok(d) => d,
                 Err(e) => return json_error(422, &format!("DOCX import error: {e}")),
             },
@@ -403,9 +413,7 @@ mod tests {
 
         // docx (the fourth advertised format): write with the same call `/api/convert` uses,
         // then read it back and convert it out to every advertised text target.
-        let doc = wordcraft_formats::import("md", sources[0].1)
-            .expect("md import")
-            .expect("md import ok");
+        let doc = wordcraft_formats::import("md", sources[0].1).expect("md import").expect("md import ok");
         let docx = wordcraft_docx::write(&doc).expect("docx write");
         assert!(docx.len() > 100, "docx output suspiciously small: {}", docx.len());
         let reread = wordcraft_docx::read(&docx).expect("docx read");
@@ -415,6 +423,30 @@ mod tests {
                 .unwrap_or_else(|e| panic!("export({target}) of round-tripped docx failed: {e}"));
             assert!(!out.is_empty(), "export({target}) of docx produced empty output");
         }
+    }
+
+    /// A request's `.docx` is read within the budgets given: over either one it is refused as a
+    /// limit, not opened. The same file passes the Worker's own budgets and reads as `read` does.
+    #[test]
+    fn a_request_docx_is_read_within_the_budgets_or_refused() {
+        let doc = wordcraft_formats::import("md", b"# Budget\n\nHello **world**.\n").expect("md import").expect("md import ok");
+        let docx = wordcraft_docx::write(&doc).expect("docx write");
+        // Its parts are far larger than 16 bytes each, and than 16 bytes together.
+        for (max_part, max_total) in [(16, DOCX_MAX_TOTAL_BYTES), (DOCX_MAX_PART_BYTES, 16)] {
+            match read_docx_within(&docx, max_part, max_total) {
+                Err(wordcraft_docx::DocxError::Limit(_)) => {}
+                Err(e) => panic!("({max_part}, {max_total}): refused, but not as a limit: {e}"),
+                Ok(_) => panic!("({max_part}, {max_total}): read past its budget"),
+            }
+        }
+        let within = read_request_docx(&docx).expect("within the Worker's budgets");
+        let plain = wordcraft_docx::read(&docx).expect("docx read");
+        let text = |d: &wordcraft_doc::Document| wordcraft_formats::export("txt", d).expect("txt").expect("txt ok");
+        assert_eq!(text(&within), text(&plain));
+        assert!(String::from_utf8_lossy(&text(&within)).contains("Hello world."));
+        // Not a package at all: an error, never a panic.
+        assert!(read_request_docx(b"not a package").is_err());
+        assert!(read_request_docx(b"").is_err());
     }
 
     /// S4: sidecar responses must not pin the un-hashed dedicated-worker modules for a year;
@@ -448,11 +480,11 @@ mod tests {
             (" br ; q=1 ", true),
             ("", false),
             ("gzip", false),
-            ("zbr", false),          // substring trap: token is not `br`
-            ("brotli", false),       // likewise a different token
-            ("br;q=0", false),        // explicit refusal
+            ("zbr", false),    // substring trap: token is not `br`
+            ("brotli", false), // likewise a different token
+            ("br;q=0", false), // explicit refusal
             ("gzip, br;q=0.0", false),
-            ("*", false),             // only an explicit `br` token opts in
+            ("*", false), // only an explicit `br` token opts in
         ];
         for (header, expected) in cases {
             assert_eq!(accepts_brotli(header), expected, "Accept-Encoding {header:?}");
