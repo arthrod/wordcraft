@@ -26,6 +26,10 @@ wasm-bindgen = "0.2"
 worker = "0.9"
 wordcraft-doc = { path = "../../../../crates/doc" }
 wordcraft-docx = { path = "../../../../crates/docx" }
+# `read_limited` (a caller's decompression budgets) is the shared reader's own; the wrapper above
+# converts its document. Same source and commit as the root workspace's craft crates, or the
+# document types are two different ones and this does not compile.
+craft-docx = { git = "https://github.com/arthrod/craft-libs", rev = "6ee18f41c60b1f0a4691c3d2857bb6895fc41f64", version = "=0.1.0" }
 # The same four core faces the browser build carries: the edge preview is approximate
 # (documents asking for other fonts render through the substitutes).
 wordcraft-fonts = { path = "../../../../crates/fonts", features = ["minimal-wasm-fonts"] }
