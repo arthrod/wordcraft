@@ -135,17 +135,21 @@ impl FontDb {
     /// life of the process: `room` is the caller's bound on them.
     pub fn add_document_fonts_scoped(&self, files: Vec<(Vec<u8>, String)>, room: usize) -> DocumentFaces {
         let mut kept = self.document_files.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut known = Vec::new();
-        let mut fresh = Vec::new();
+        /// One input file: the faces the database kept for it before, or the file to admit.
+        enum KnownOrFresh {
+            Known(Vec<Arc<FontFace>>),
+            Fresh(FileKey, KeptFile),
+        }
+        let mut ordered = Vec::new();
         for (data, name) in files {
             let key = kept.key(&data, given_name(&name));
             match kept.find(&key, &data) {
-                Some(k) => known.extend(k.faces.iter().cloned()),
+                Some(k) => ordered.push(KnownOrFresh::Known(k.faces.to_vec())),
                 None if data.len() > room => {}
                 None => {
                     let data = Arc::new(data);
                     let faces = file_faces(&data, key.name.as_deref());
-                    fresh.push((key, KeptFile { data, faces }));
+                    ordered.push(KnownOrFresh::Fresh(key, KeptFile { data, faces }));
                 }
             }
         }
@@ -155,27 +159,35 @@ impl FontDb {
         // holds it too.
         let listed: HashSet<u32> = list.iter().map(|g| g.id).collect();
         let (mut shared, mut added) = (Vec::new(), Vec::new());
-        for f in known {
-            if listed.contains(&f.id) {
-                shared.push(f);
-            } else if present.insert(key(&f)) {
-                added.push(f);
-            }
-        }
         let (mut room, mut new_bytes) = (room, 0usize);
-        for (file_key, file) in fresh {
-            let mut own = HashSet::new();
-            let from_file: Vec<_> = file.faces.iter().filter(|f| !present.contains(&key(f)) && own.insert(key(f))).cloned().collect();
-            // A file adding no face keeps nothing and costs nothing; one adding faces is kept
-            // while it fits.
-            let Some(left) = room.checked_sub(file.data.len()).filter(|_| !from_file.is_empty()) else {
-                continue;
-            };
-            room = left;
-            new_bytes = new_bytes.saturating_add(file.data.len());
-            present.extend(own);
-            added.extend(from_file);
-            kept.files.entry(file_key).or_default().push(file);
+        // Kept and new files compete for the same family and style in the order given: the
+        // first file's face wins, whether the database kept it from an earlier document or not.
+        for file in ordered {
+            match file {
+                KnownOrFresh::Known(faces) => {
+                    for f in faces {
+                        if listed.contains(&f.id) {
+                            shared.push(f);
+                        } else if present.insert(key(&f)) {
+                            added.push(f);
+                        }
+                    }
+                }
+                KnownOrFresh::Fresh(file_key, file) => {
+                    let mut own = HashSet::new();
+                    let from_file: Vec<_> = file.faces.iter().filter(|f| !present.contains(&key(f)) && own.insert(key(f))).cloned().collect();
+                    // A file adding no face keeps nothing and costs nothing; one adding faces is
+                    // kept while it fits.
+                    let Some(left) = room.checked_sub(file.data.len()).filter(|_| !from_file.is_empty()) else {
+                        continue;
+                    };
+                    room = left;
+                    new_bytes = new_bytes.saturating_add(file.data.len());
+                    present.extend(own);
+                    added.extend(from_file);
+                    kept.files.entry(file_key).or_default().push(file);
+                }
+            }
         }
         list.extend(added.iter().cloned());
         drop(list);

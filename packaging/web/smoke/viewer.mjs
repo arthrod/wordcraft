@@ -874,7 +874,11 @@ try {
     await waitAttr(kept.page, "data-wordcraft-phase", "editing", 120000).catch(() => {});
     const handed = await kept.page.evaluate(() => Promise.resolve(window.wordcraft?.getMarkdown?.()).catch(() => null));
     const state = { opened, phase: await attr(kept.page, "data-wordcraft-phase"), notice: await attr(kept.page, "data-wordcraft-notice") };
-    check(`host buffer ${what} after open(): the editor gets the document the viewer showed`, typeof handed === "string" && handed.includes(SAMPLE_TEXT), JSON.stringify(state));
+    check(
+      `host buffer ${what} after open(): the editor gets the document the viewer showed`,
+      typeof opened.got === "number" && opened.got > 0 && typeof handed === "string" && handed.includes(SAMPLE_TEXT),
+      JSON.stringify(state),
+    );
     check(`host buffer ${what} after open(): no uncaught errors`, kept.log.uncaught.length === 0, kept.log.uncaught.join(" | "));
     await kept.page.close();
   }
