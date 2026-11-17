@@ -69,6 +69,33 @@ fn forbidden_symbols_for(worker_stem: &str) -> &[&str] {
     }
 }
 
+/// The view-only module's artifact stem (`wordcraft-viewer_bg.wasm`; plan Phase 8). It is not a
+/// dedicated worker and no Trunk link builds it, so it has its own row and its own run
+/// (`cargo xtask wasm-budget --viewer`) instead of a place in [`WORKER_CEILINGS`].
+pub const VIEWER_STEM: &str = "wordcraft-viewer";
+
+/// The view-only module's ceilings, at measured size plus the headroom the multi-megabyte
+/// workers got (about 3% raw, 4% gzip). Measured 2026-11-16 on the SIMD release build
+/// (`cargo build -p wordcraft-viewer --bin wordcraft-viewer --target wasm32-unknown-unknown
+/// --profile wasm-release`, `wasm-bindgen --target web --weak-refs`, then `wasm-opt -Oz` with
+/// the flags `apps/wordcraft-web/index.html` gives the workers): 7,496,105 raw / 3,198,016
+/// gzip / 2,537,321 Brotli q11. The first measurement (8,159,381 / 3,440,073) was of a `cdylib`
+/// built beside an `rlib`, which cargo builds without link-time optimisation; the module is a
+/// bin since. Measured again 2026-11-16 after `wordcraft_docx::read_with_password` stopped
+/// linking the write direction of the model bridge: 6,809,726 raw / 3,106,857 gzip /
+/// 2,486,942 Brotli q11. Ceilings ratchet down; raising one is a recorded decision in the plan.
+pub const VIEWER_CEILING: WorkerCeiling = WorkerCeiling { name: VIEWER_STEM, max_raw: 7_015_000, max_gzip: 3_230_000 };
+
+/// Crates the view-only module must never link (plan 8.2): it opens a document and paints its
+/// pages, so the editor (`wordcraft-engine`, `wordcraft-ui-egui`, `egui`, `eframe`), PDF export
+/// (`krilla`) and the DOM (`web-sys`: the host passes bytes in, which is what lets one module
+/// serve a worker, the main thread or a server) stay out of its dependency graph.
+pub const VIEWER_FORBIDDEN_CRATES: &[&str] = &["egui", "eframe", "wordcraft-engine", "wordcraft-ui-egui", "krilla", "web-sys"];
+
+/// The byte-scan form of [`VIEWER_FORBIDDEN_CRATES`], supplementary like [`FORBIDDEN_SYMBOLS`]:
+/// the dependency graph is the check that holds on a stripped module.
+pub const VIEWER_FORBIDDEN_SYMBOLS: &[&str] = &["egui::", "eframe::", "wordcraft_engine::", "wordcraft_ui_egui::", "krilla::", "web_sys::"];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasmReport {
     pub path: PathBuf,
@@ -320,10 +347,16 @@ pub const FORBIDDEN_CRATES: &[&str] = &["krilla", "wordcraft-docbin", "wgpu", "n
 
 /// Forbidden crate names found in `cargo tree --prefix none --format {p}` output.
 pub fn forbidden_crates_in_tree(tree: &str) -> Vec<String> {
+    crates_in_tree(tree, FORBIDDEN_CRATES)
+}
+
+/// The crates of `forbidden` named in `cargo tree --prefix none --format {p}` output, each once,
+/// in the order first met. Names match whole: `krilla-svg` is not `krilla`.
+pub fn crates_in_tree(tree: &str, forbidden: &[&str]) -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
     for line in tree.lines() {
         let Some(name) = line.split_whitespace().next() else { continue };
-        if FORBIDDEN_CRATES.contains(&name) && !found.iter().any(|f| f == name) {
+        if forbidden.contains(&name) && !found.iter().any(|f| f == name) {
             found.push(name.to_string());
         }
     }
@@ -331,10 +364,15 @@ pub fn forbidden_crates_in_tree(tree: &str) -> Vec<String> {
 }
 
 fn wasm_dependency_tree(root: &Path) -> Result<String, String> {
+    wasm_dependency_tree_of(root, "wordcraft-web")
+}
+
+/// The wasm32 normal-dependency tree of workspace package `package`, one `name version` a line.
+fn wasm_dependency_tree_of(root: &Path, package: &str) -> Result<String, String> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let out = Command::new(cargo)
         .current_dir(root)
-        .args(["tree", "-p", "wordcraft-web", "--target", "wasm32-unknown-unknown", "-e", "normal"])
+        .args(["tree", "-p", package, "--target", "wasm32-unknown-unknown", "-e", "normal"])
         .args(["--prefix", "none", "--format", "{p}"])
         .output()
         .map_err(|e| format!("cargo tree failed: {e}"))?;
@@ -599,6 +637,84 @@ pub fn run(root: &Path, report_only: bool) -> Result<(), String> {
     }
 }
 
+/// The view-only module's budget errors: its own ceilings, the `name`-section guard and the
+/// byte scan, as [`check_worker_budget`] does for a worker.
+fn check_viewer_budget(r: &WasmReport) -> Vec<String> {
+    let mut errs = Vec::new();
+    if r.has_name_section {
+        errs.push(format!(
+            "{VIEWER_STEM} carries a `name` custom section: `wasm-opt` did not run, so this artifact is unoptimized and cannot be measured or shipped"
+        ));
+    }
+    if r.total_bytes > VIEWER_CEILING.max_raw {
+        errs.push(format!("{VIEWER_STEM} uncompressed {} bytes > ceiling {} bytes", r.total_bytes, VIEWER_CEILING.max_raw));
+    }
+    if r.gzip_bytes > VIEWER_CEILING.max_gzip {
+        errs.push(format!("{VIEWER_STEM} gzipped {} bytes > ceiling {} bytes", r.gzip_bytes, VIEWER_CEILING.max_gzip));
+    }
+    if !r.found_forbidden.is_empty() {
+        errs.push(format!("forbidden symbols found in {VIEWER_STEM}: {}", r.found_forbidden.join(", ")));
+    }
+    errs
+}
+
+/// The path after `--wasm` in `args`, if any.
+fn wasm_arg(args: &[&str]) -> Option<PathBuf> {
+    args.iter().position(|a| *a == "--wasm").and_then(|i| args.get(i + 1)).map(PathBuf::from)
+}
+
+/// `cargo xtask wasm-budget --viewer [--wasm <path>] [--report-only]`: the view-only module's
+/// row (plan Phase 8), alone. It needs no web build: the artifact is `--wasm <path>`, else
+/// `dist/web/wordcraft-viewer_bg.wasm`, and a missing one is an error, not a pass. The
+/// forbidden-crate check reads the module's wasm32 dependency graph, so it reports whether or
+/// not the artifact exists.
+pub fn run_viewer(root: &Path, args: &[&str]) -> Result<(), String> {
+    let report_only = args.contains(&"--report-only");
+    let path = wasm_arg(args).unwrap_or_else(|| root.join("dist/web").join(format!("{VIEWER_STEM}_bg.wasm")));
+    let mut errs = Vec::new();
+
+    println!("WordCraft view-only module WASM Budget Report ({}):", path.display());
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let gz = gzip_size(&path, &bytes)?;
+            let br = brotli_size(&path, &bytes)?;
+            let report = analyze_wasm_bytes_with(path.clone(), &bytes, gz, VIEWER_FORBIDDEN_SYMBOLS)?.with_brotli(br);
+            println!("  uncompressed: {:>10} bytes (budget {:>10})", report.total_bytes, VIEWER_CEILING.max_raw);
+            println!("  gzip -9:      {:>10} bytes (budget {:>10})", report.gzip_bytes, VIEWER_CEILING.max_gzip);
+            println!("  brotli q11:   {:>10} bytes (report column, no ceiling)", report.brotli_bytes);
+            println!("  code (sec10): {:>10} bytes", report.code_bytes);
+            println!("  data (sec11): {:>10} bytes", report.data_bytes);
+            println!("  custom (sec0):{:>10} bytes", report.custom_bytes);
+            errs.extend(check_viewer_budget(&report));
+        }
+        Err(e) => {
+            println!("  artifact:     MISSING ({e})");
+            errs.push(format!(
+                "{VIEWER_STEM}: no artifact at {} ({e}); build it (cargo build -p {VIEWER_STEM} --bin {VIEWER_STEM} --target wasm32-unknown-unknown --profile wasm-release, then wasm-bindgen --target web and wasm-opt -Oz) or pass --wasm <path>",
+                path.display()
+            ));
+        }
+    }
+
+    let forbidden_crates = crates_in_tree(&wasm_dependency_tree_of(root, VIEWER_STEM)?, VIEWER_FORBIDDEN_CRATES);
+    if forbidden_crates.is_empty() {
+        println!("  forbidden crates: none of {} in the wasm32 dependency graph", VIEWER_FORBIDDEN_CRATES.join(", "));
+    } else {
+        println!("  forbidden crates in the wasm32 dependency graph: {}", forbidden_crates.join(", "));
+        errs.push(format!("forbidden crates in the {VIEWER_STEM} wasm32 dependency graph: {}", forbidden_crates.join(", ")));
+    }
+
+    if report_only {
+        return Ok(());
+    }
+    if errs.is_empty() {
+        println!("OK: {VIEWER_STEM} satisfies its WASM budget.");
+        Ok(())
+    } else {
+        Err(errs.join("; "))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -746,6 +862,45 @@ mod tests {
             forbidden_crates_in_tree(dirty),
             vec!["krilla".to_string(), "wordcraft-docbin".to_string(), "wgpu".to_string(), "naga".to_string()]
         );
+    }
+
+    #[test]
+    fn viewer_forbidden_crates_detected_in_dependency_tree() {
+        let clean = "wordcraft-viewer v0.1.0 (/x)\nwordcraft-render v0.1.0 (/x)\nwasm-bindgen v0.2.0\negui_extras v0.37.0\n";
+        assert!(crates_in_tree(clean, VIEWER_FORBIDDEN_CRATES).is_empty());
+        let dirty = "wordcraft-viewer v0.1.0 (/x)\nwordcraft-engine v0.1.0 (/x)\negui v0.37.0\neframe v0.37.0\nwordcraft-ui-egui v0.1.0 (/x)\nkrilla v0.4.0\nweb-sys v0.3.0\negui v0.37.0 (*)\n";
+        assert_eq!(
+            crates_in_tree(dirty, VIEWER_FORBIDDEN_CRATES),
+            vec!["wordcraft-engine", "egui", "eframe", "wordcraft-ui-egui", "krilla", "web-sys"]
+        );
+    }
+
+    #[test]
+    fn viewer_budget_flags_over_limit_forbidden_and_unoptimized() {
+        let path = || PathBuf::from("wordcraft-viewer_bg.wasm");
+        let forbidden = minimal_wasm(1024, 512, b"wordcraft_engine::Session");
+        let rep = analyze_wasm_bytes_with(path(), &forbidden, 400, VIEWER_FORBIDDEN_SYMBOLS).unwrap();
+        assert!(check_viewer_budget(&rep).iter().any(|e| e.contains("forbidden symbols")), "{:?}", check_viewer_budget(&rep));
+
+        let padded = minimal_wasm(VIEWER_CEILING.max_raw + 1, 512, b"safe_symbol");
+        let rep = analyze_wasm_bytes_with(path(), &padded, VIEWER_CEILING.max_gzip + 1, VIEWER_FORBIDDEN_SYMBOLS).unwrap();
+        let errs = check_viewer_budget(&rep);
+        assert!(errs.iter().any(|e| e.contains("uncompressed")) && errs.iter().any(|e| e.contains("gzipped")), "{errs:?}");
+
+        let named = minimal_wasm(1024, 512, &named_custom_section("name"));
+        let rep = analyze_wasm_bytes_with(path(), &named, 400, VIEWER_FORBIDDEN_SYMBOLS).unwrap();
+        assert!(check_viewer_budget(&rep).iter().any(|e| e.contains("`name` custom section")));
+    }
+
+    #[test]
+    fn viewer_run_fails_without_an_artifact() {
+        let missing = std::env::temp_dir().join(format!("wc_viewer_missing_{}_bg.wasm", std::process::id()));
+        let _ = std::fs::remove_file(&missing);
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+        let err = run_viewer(&root, &["--viewer", "--wasm", &missing.to_string_lossy()]).unwrap_err();
+        assert!(err.contains("no artifact at"), "{err}");
+        assert_eq!(wasm_arg(&["--viewer"]), None);
+        assert_eq!(wasm_arg(&["--wasm"]), None);
     }
 
     /// A custom section with a proper `name_len name contents` payload, the way a real module

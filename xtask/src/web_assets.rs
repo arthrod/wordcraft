@@ -316,7 +316,7 @@ mod tests {
         assert!(locales.contains(&"ar".to_string()));
         assert!(locales.contains(&"pt-br".to_string()));
         assert!(!locales.contains(&"en".to_string()));
-        assert_eq!(locales.len(), 27);
+        assert_eq!(locales.len(), 28);
     }
 
     #[test]
@@ -331,7 +331,7 @@ mod tests {
 
         // Stub emission succeeds when optional.
         let count = emit_web_assets(&root, &out, None, false).unwrap();
-        assert_eq!(count, 27);
+        assert_eq!(count, 28);
         assert!(out.join("i18n/manifest.json").is_file());
         assert!(out.join("i18n/fr/wordcraft.tsv").is_file());
         assert!(out.join("samples/spec.md").is_file());

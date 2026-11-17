@@ -1,8 +1,6 @@
 //! Alternative format chunks (`w:altChunk`, ECMA-376 §17.17.2.1): content in another format that
 //! is brought in where the chunk stands. All markup here is synthetic.
 
-use std::io::Write;
-
 use wordcraft_doc::{Block, Document, InlineObject, StoryRef};
 use wordcraft_docx::{AltChunk, ReadOptions, read, read_with};
 
@@ -46,12 +44,11 @@ fn package_styled(body: &str, chunk: Option<(&str, &str, &[u8])>, styles: Option
     }
     types.push_str(r#"<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#);
     files.push(("[Content_Types].xml".into(), types.into_bytes()));
-    let mut zw = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let mut zw = craft_zip::Writer::new();
     for (name, bytes) in files {
-        zw.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
-        zw.write_all(&bytes).unwrap();
+        zw.add(&name, &bytes, craft_zip::Compression::Deflated).unwrap();
     }
-    zw.finish().unwrap().into_inner()
+    zw.finish().unwrap()
 }
 
 const CHUNK: &str = r#"<w:altChunk r:id="rIdC"/>"#;
@@ -67,7 +64,7 @@ fn a_chunk_comes_in_through_the_importer_where_it_stands() {
     let seen = std::cell::RefCell::new(Vec::new());
     let import = |c: &AltChunk| {
         seen.borrow_mut().push((c.content_type.to_string(), c.part.to_string(), c.bytes.to_vec()));
-        Ok(Document::from_text("Chunk one\nChunk two"))
+        Some(Document::from_text("Chunk one\nChunk two"))
     };
     let d = read_with(&bytes, &ReadOptions { chunks: Some(&import), ..Default::default() }).unwrap();
     assert_eq!(body_lines(&d), ["Before", "Chunk one", "Chunk two", "After"]);
@@ -80,7 +77,7 @@ fn a_chunk_comes_in_through_the_importer_where_it_stands() {
 fn a_bookmark_opened_before_a_chunk_at_the_start_of_the_body_is_kept() {
     let body = format!(r#"<w:bookmarkStart w:id="0" w:name="Here"/>{CHUNK}<w:bookmarkEnd w:id="0"/>{}"#, p("After"));
     let bytes = package(&body, Some(("htm", "application/xhtml+xml", b"<p>Chunk</p>")));
-    let import = |_: &AltChunk| Ok(Document::from_text("Chunk"));
+    let import = |_: &AltChunk| Some(Document::from_text("Chunk"));
     let d = read_with(&bytes, &ReadOptions { chunks: Some(&import), ..Default::default() }).unwrap();
     assert_eq!(body_lines(&d), ["Chunk", "After"]);
     let marks = d.bookmarks();
@@ -93,7 +90,7 @@ fn a_bookmark_opened_between_a_table_and_a_chunk_starts_the_chunk() {
     let table = format!("<w:tbl><w:tr><w:tc>{}</w:tc></w:tr></w:tbl>", p("Cell"));
     let body = format!(r#"{table}<w:bookmarkStart w:id="0" w:name="Here"/>{CHUNK}<w:bookmarkEnd w:id="0"/>{}"#, p("After"));
     let bytes = package(&body, Some(("htm", "application/xhtml+xml", b"<p>Chunk</p>")));
-    let import = |_: &AltChunk| Ok(Document::from_text("Chunk"));
+    let import = |_: &AltChunk| Some(Document::from_text("Chunk"));
     let d = read_with(&bytes, &ReadOptions { chunks: Some(&import), ..Default::default() }).unwrap();
     let marks = d.bookmarks();
     assert_eq!(marks.len(), 1);
@@ -144,12 +141,11 @@ fn package_with_stories(body: &str, stories: &[(&str, &str, String)], chunk: Opt
     if let Some(c) = chunk {
         files.push(("word/afchunk.docx".into(), c.to_vec()));
     }
-    let mut zw = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let mut zw = craft_zip::Writer::new();
     for (name, bytes) in files {
-        zw.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
-        zw.write_all(&bytes).unwrap();
+        zw.add(&name, &bytes, craft_zip::Compression::Deflated).unwrap();
     }
-    zw.finish().unwrap().into_inner()
+    zw.finish().unwrap()
 }
 
 /// A paragraph `text` that comment `id` (in the file) is anchored around.
@@ -329,7 +325,7 @@ fn a_chunks_pictures_come_with_it() {
         };
         para.insert_object(0, image, &Default::default()).unwrap();
         d.body = vec![std::sync::Arc::new(Block::Para(para))];
-        Ok(d)
+        Some(d)
     };
     let d = read_with(&bytes, &ReadOptions { chunks: Some(&import), ..Default::default() }).unwrap();
     let keys: Vec<String> = d
@@ -353,7 +349,7 @@ fn a_file_brings_in_a_bounded_number_of_chunks() {
     let calls = std::cell::Cell::new(0);
     let import = |_: &AltChunk| {
         calls.set(calls.get() + 1);
-        Ok(Document::from_text("x"))
+        Some(Document::from_text("x"))
     };
     let d = read_with(&bytes, &ReadOptions { chunks: Some(&import), ..Default::default() }).unwrap();
     assert_eq!(calls.get(), 256);
@@ -364,21 +360,10 @@ fn a_file_brings_in_a_bounded_number_of_chunks() {
 fn hostile_chunks_never_panic() {
     for (ext, ct, bytes) in [("docx", DOCX_MAIN, &b"PK\x03\x04 not a zip"[..]), ("htm", "text/html", b""), ("bin", "", b"\x00\xff")] {
         let bytes = package(&format!("{CHUNK}{CHUNK}{}", p("x")), Some((ext, ct, bytes)));
-        let import = |_: &AltChunk| Err("unsupported chunk".into());
-        let res = read_with(&bytes, &ReadOptions { chunks: Some(&import), ..Default::default() });
-        if ext == "docx" {
-            assert_eq!(body_lines(&res.unwrap()), ["x"]);
-        } else {
-            assert!(res.is_err(), "{ext} chunk should return Err");
-        }
+        let import = |_: &AltChunk| None;
+        let d = read_with(&bytes, &ReadOptions { chunks: Some(&import), ..Default::default() }).unwrap();
+        assert_eq!(body_lines(&d), ["x"]);
     }
-    // A valid nested .docx whose inner non-Word altChunk fails import propagates DocxError::AltChunk.
-    let inner_failing = package(&format!("{CHUNK}{}", p("inner")), Some(("htm", "text/html", b"<p>fail</p>")));
-    let outer_nested = package(&format!("{CHUNK}{}", p("outer")), Some(("docx", DOCX_MAIN, &inner_failing)));
-    let import = |_: &AltChunk| Err("nested chunk error".into());
-    let res = read_with(&outer_nested, &ReadOptions { chunks: Some(&import), ..Default::default() });
-    assert!(matches!(res, Err(wordcraft_docx::DocxError::AltChunk(ref msg)) if msg == "nested chunk error"));
-
     // A chunk naming a missing part or another relationship type is left out.
     let bytes = package(&format!(r#"<w:altChunk r:id="nope"/><w:altChunk/>{}"#, p("y")), None);
     assert_eq!(body_lines(&read(&bytes).unwrap()), ["y"]);
@@ -406,17 +391,16 @@ fn inner_with_dropped_pictures(n: usize, external: bool) -> Vec<u8> {
         (0..n).map(image).collect::<String>()
     );
     let types = r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#;
-    let mut zw = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let mut zw = craft_zip::Writer::new();
     for (name, bytes) in [
         ("[Content_Types].xml", types.as_bytes()),
         ("_rels/.rels", ROOT_RELS.as_bytes()),
         ("word/document.xml", doc.as_bytes()),
         ("word/_rels/document.xml.rels", rels.as_bytes()),
     ] {
-        zw.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
-        zw.write_all(bytes).unwrap();
+        zw.add(name, bytes, craft_zip::Compression::Deflated).unwrap();
     }
-    zw.finish().unwrap().into_inner()
+    zw.finish().unwrap()
 }
 
 /// A picture the chunk's own reader dropped is the file's too (#6005), named by the chunk part.

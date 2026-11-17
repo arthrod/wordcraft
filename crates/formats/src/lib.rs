@@ -13,9 +13,6 @@
 pub mod comments;
 #[cfg(feature = "all-formats")]
 pub mod html;
-#[cfg(not(feature = "all-formats"))]
-#[path = "html/entity.rs"]
-pub(crate) mod html_entity;
 #[cfg(feature = "all-formats")]
 pub mod latex;
 pub mod markdown;
@@ -32,7 +29,38 @@ pub mod rtf;
 pub mod sheet;
 #[cfg(not(feature = "all-formats"))]
 pub mod sheet {
-    pub use crate::field_names;
+    use std::collections::{HashMap, HashSet};
+
+    /// Field names from a header row, as the spreadsheet codec's `sheet::field_names` gives them:
+    /// trimmed, blanks named `Column N` and repeats numbered, ignoring case. Delimited text
+    /// recipient lists need it in builds without the codec.
+    pub fn field_names(row: &[String]) -> Vec<String> {
+        let mut out: Vec<String> = Vec::with_capacity(row.len());
+        let mut taken: HashSet<String> = HashSet::with_capacity(row.len());
+        let mut next: HashMap<String, usize> = HashMap::new();
+        for (i, h) in row.iter().enumerate() {
+            let base = match h.trim() {
+                "" => format!("Column {}", i.saturating_add(1)),
+                t => t.to_string(),
+            };
+            let key = base.to_ascii_lowercase();
+            if taken.insert(key.clone()) {
+                out.push(base);
+                continue;
+            }
+            let mut n = next.get(&key).copied().unwrap_or(2);
+            loop {
+                let candidate = format!("{base} {n}");
+                n = n.saturating_add(1);
+                if taken.insert(candidate.to_ascii_lowercase()) {
+                    next.insert(key, n);
+                    out.push(candidate);
+                    break;
+                }
+            }
+        }
+        out
+    }
 
     /// File extensions read as spreadsheets.
     pub const EXTENSIONS: &[&str] = &["xlsx", "xlsm", "xls", "ods"];
@@ -45,40 +73,7 @@ pub mod sheet {
 }
 pub mod txt;
 
-use std::collections::{HashMap, HashSet};
-
 use wordcraft_doc::Document;
-
-/// Field names from a header row: trimmed, blanks named `Column N` (N = 1-based column) and
-/// repeats numbered (`Name`, `Name 2`), ignoring case as merge fields do.
-pub fn field_names(row: &[String]) -> Vec<String> {
-    let mut out: Vec<String> = Vec::with_capacity(row.len());
-    // The names given so far, ASCII-lowercased, and per base name the next number to try: a set
-    // lookup per candidate, and each base resumes where it stopped, instead of rescanning every
-    // name from `2` for every repeat (cubic on a row of equal headers).
-    let mut taken: HashSet<String> = HashSet::with_capacity(row.len());
-    let mut next: HashMap<String, usize> = HashMap::new();
-    for (i, h) in row.iter().enumerate() {
-        let base = match h.trim() {
-            "" => format!("Column {}", i + 1),
-            t => t.to_string(),
-        };
-        let mut name = base.clone();
-        if taken.contains(&name.to_ascii_lowercase()) {
-            let k = next.entry(base.to_ascii_lowercase()).or_insert(2);
-            loop {
-                name = format!("{base} {k}");
-                *k = k.saturating_add(1);
-                if !taken.contains(&name.to_ascii_lowercase()) {
-                    break;
-                }
-            }
-        }
-        taken.insert(name.to_ascii_lowercase());
-        out.push(name);
-    }
-    out
-}
 
 /// Most entries an ODT or spreadsheet package may declare, as many as a Word package
 /// (`wordcraft_docx::package::MAX_ENTRIES`); checked before `zip` parses them (#3660).

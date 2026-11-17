@@ -32,6 +32,8 @@ use std::num::NonZeroU16;
 use std::sync::Arc;
 
 #[cfg(feature = "writer")]
+use craft_metafile::{Picture, PlacedItem};
+#[cfg(feature = "writer")]
 use craft_pdf::write::{self, Metadata, WriteError, Writer, backend as krilla};
 #[cfg(feature = "writer")]
 use krilla::annotation::{Annotation, LinkAnnotation, Target};
@@ -80,8 +82,6 @@ use wordcraft_layout::para::{ClKind, LineEnd};
 use wordcraft_layout::{DocLayout, NumeralMode};
 #[cfg(feature = "writer")]
 use wordcraft_layout::{LayoutCache, Page, Placed, layout};
-#[cfg(feature = "writer")]
-use wordcraft_metafile::{Picture, PlacedItem};
 
 #[cfg(feature = "writer")]
 mod export;
