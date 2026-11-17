@@ -1,0 +1,3 @@
+*.wasm.gz
+*.d.ts
+.trunk-lock

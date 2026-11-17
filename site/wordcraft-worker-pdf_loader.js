@@ -1,0 +1,1 @@
+import init from './wordcraft-worker-pdf.js';await init();

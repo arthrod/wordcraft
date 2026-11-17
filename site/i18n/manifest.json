@@ -1,0 +1,200 @@
+{
+  "locales": {
+    "ar": {
+      "common": "ar/common.tsv",
+      "populated": false,
+      "sha256_common": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "sha256_wordcraft": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "wordcraft": "ar/wordcraft.tsv"
+    },
+    "bg": {
+      "common": "bg/common.tsv",
+      "populated": false,
+      "sha256_common": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "sha256_wordcraft": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "wordcraft": "bg/wordcraft.tsv"
+    },
+    "bs": {
+      "common": "bs/common.tsv",
+      "populated": false,
+      "sha256_common": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "sha256_wordcraft": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "wordcraft": "bs/wordcraft.tsv"
+    },
+    "cs": {
+      "common": "cs/common.tsv",
+      "populated": false,
+      "sha256_common": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "sha256_wordcraft": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "wordcraft": "cs/wordcraft.tsv"
+    },
+    "da": {
+      "common": "da/common.tsv",
+      "populated": false,
+      "sha256_common": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "sha256_wordcraft": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "wordcraft": "da/wordcraft.tsv"
+    },
+    "de": {
+      "common": "de/common.tsv",
+      "populated": false,
+      "sha256_common": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "sha256_wordcraft": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "wordcraft": "de/wordcraft.tsv"
+    },
+    "es": {
+      "common": "es/common.tsv",
+      "populated": false,
+      "sha256_common": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "sha256_wordcraft": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "wordcraft": "es/wordcraft.tsv"
+    },
+    "et": {
+      "common": "et/common.tsv",
+      "populated": false,
+      "sha256_common": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "sha256_wordcraft": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "wordcraft": "et/wordcraft.tsv"
+    },
+    "fr": {
+      "common": "fr/common.tsv",
+      "populated": false,
+      "sha256_common": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "sha256_wordcraft": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "wordcraft": "fr/wordcraft.tsv"
+    },
+    "hr": {
+      "common": "hr/common.tsv",
+      "populated": false,
+      "sha256_common": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "sha256_wordcraft": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "wordcraft": "hr/wordcraft.tsv"
+    },
+    "hu": {
+      "common": "hu/common.tsv",
+      "populated": false,
+      "sha256_common": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "sha256_wordcraft": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "wordcraft": "hu/wordcraft.tsv"
+    },
+    "it": {
+      "common": "it/common.tsv",
+      "populated": false,
+      "sha256_common": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "sha256_wordcraft": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "wordcraft": "it/wordcraft.tsv"
+    },
+    "ja": {
+      "common": "ja/common.tsv",
+      "populated": false,
+      "sha256_common": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "sha256_wordcraft": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "wordcraft": "ja/wordcraft.tsv"
+    },
+    "ko": {
+      "common": "ko/common.tsv",
+      "populated": false,
+      "sha256_common": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "sha256_wordcraft": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "wordcraft": "ko/wordcraft.tsv"
+    },
+    "nl": {
+      "common": "nl/common.tsv",
+      "populated": false,
+      "sha256_common": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "sha256_wordcraft": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "wordcraft": "nl/wordcraft.tsv"
+    },
+    "pl": {
+      "common": "pl/common.tsv",
+      "populated": false,
+      "sha256_common": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "sha256_wordcraft": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "wordcraft": "pl/wordcraft.tsv"
+    },
+    "pt-br": {
+      "common": "pt-br/common.tsv",
+      "populated": false,
+      "sha256_common": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "sha256_wordcraft": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "wordcraft": "pt-br/wordcraft.tsv"
+    },
+    "ro": {
+      "common": "ro/common.tsv",
+      "populated": false,
+      "sha256_common": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "sha256_wordcraft": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "wordcraft": "ro/wordcraft.tsv"
+    },
+    "ru": {
+      "common": "ru/common.tsv",
+      "populated": false,
+      "sha256_common": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "sha256_wordcraft": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "wordcraft": "ru/wordcraft.tsv"
+    },
+    "sl": {
+      "common": "sl/common.tsv",
+      "populated": false,
+      "sha256_common": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "sha256_wordcraft": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "wordcraft": "sl/wordcraft.tsv"
+    },
+    "sr": {
+      "common": "sr/common.tsv",
+      "populated": false,
+      "sha256_common": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "sha256_wordcraft": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "wordcraft": "sr/wordcraft.tsv"
+    },
+    "sr-latn": {
+      "common": "sr-latn/common.tsv",
+      "populated": false,
+      "sha256_common": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "sha256_wordcraft": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "wordcraft": "sr-latn/wordcraft.tsv"
+    },
+    "sv": {
+      "common": "sv/common.tsv",
+      "populated": false,
+      "sha256_common": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "sha256_wordcraft": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "wordcraft": "sv/wordcraft.tsv"
+    },
+    "tr": {
+      "common": "tr/common.tsv",
+      "populated": false,
+      "sha256_common": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "sha256_wordcraft": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "wordcraft": "tr/wordcraft.tsv"
+    },
+    "uk": {
+      "common": "uk/common.tsv",
+      "populated": false,
+      "sha256_common": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "sha256_wordcraft": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "wordcraft": "uk/wordcraft.tsv"
+    },
+    "vi": {
+      "common": "vi/common.tsv",
+      "populated": false,
+      "sha256_common": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "sha256_wordcraft": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "wordcraft": "vi/wordcraft.tsv"
+    },
+    "zh-hans": {
+      "common": "zh-hans/common.tsv",
+      "populated": false,
+      "sha256_common": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "sha256_wordcraft": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "wordcraft": "zh-hans/wordcraft.tsv"
+    },
+    "zh-hant": {
+      "common": "zh-hant/common.tsv",
+      "populated": false,
+      "sha256_common": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "sha256_wordcraft": "614887d01a2a5a21bf4b774c547278e184d001650d6297b23f8ab213674e810c",
+      "wordcraft": "zh-hant/wordcraft.tsv"
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  // The built light viewer site, deployed as it is: no build step. `site/` is the output of
+  // `packaging/web/package.sh --static` on the `wordcraft-web` branch, copied here by hand.
+  "name": "wordcraft-light-demo",
+  "compatibility_date": "2026-11-13",
+  "workers_dev": true,
+  "routes": [{ "pattern": "wordcraft-light-demo.benchmarks.law", "custom_domain": true }],
+  "assets": { "directory": "./site" },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": { "enabled": true, "invocation_logs": true, "head_sampling_rate": 1 }
+  },
+  // `wrangler preview`, which Workers Builds runs for other branches, wants this block.
+  "previews": {}
+}

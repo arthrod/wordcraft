@@ -1,0 +1,1 @@
+import init from './wordcraft-worker-codecs.js';await init();

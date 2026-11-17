@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Open-source word processor built in Rust and WebAssembly. Open, edit and save .docx, Markdown and plain text documents in your browser. Files stay on your device unless you choose edge conversion.">
+  <title>WordCraft</title>
+  <link rel="icon" href="./wordcraft-fa59e09a3f921e03.ico" integrity="sha384-99DzWb82rFgkdw7hjKziyDQaHbMTklb9MWeLKF7LcVUnq80H4nDrc/pjHJtAj/AA"/>
+  
+  
+  
+  
+  
+  <!-- Plan 10.3: the page's first module is the small viewer-first page module. It paints the
+       document from the view-only worker and adds the editor's script element only on an edit
+       action. Content-hashed, with SRI, like every Trunk main target. -->
+  
+<script type="module">
+import init, * as bindings from './wordcraft-viewer-web-316e882bdc8f692f.js';
+const wasm = await init({ module_or_path: './wordcraft-viewer-web-ad7d09608ac3c8f2_bg.wasm' });
+
+
+window.wasmBindings = bindings;
+
+
+dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
+
+</script>
+  <!-- The editor. Trunk allows one main target a page, so the editor is built as a secondary
+       target: `data-type="worker"` only means "emit the files, inject nothing". It runs on the
+       main thread: the page module adds `<script type="module" src="wordcraft-web_loader.js">`
+       (Trunk's loader shim: `import init from './wordcraft-web.js'; await init();`). Its names
+       are un-hashed so they can be named at run time, and so are served `no-cache`. -->
+  
+  <!-- Plan 10.3: the view-only dedicated worker (the view-only core behind the worker
+       envelope), started by the page module on load. -->
+  
+  <!-- §3.2: the proofing dedicated worker. `data-loader-shim` makes Trunk emit a same-origin
+       `wordcraft-worker-proof_loader.js` (no `blob:` URL — `worker-src 'self'`); the shell
+       lazily `new Worker(assetBase + file, {type: "module"})`s it on the ?proof-worker flag.
+       Trunk keeps worker names un-hashed (they must be named at runtime). -->
+  
+  <!-- §3.3: the codec dedicated worker (extra formats ⇄ .docx off the main thread), started
+       lazily on the first conversion, never on page load. -->
+  
+  <!-- §3.4: the PDF export dedicated worker (krilla off the main thread), started lazily on the
+       first PDF export. -->
+  
+  <style>
+    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #e6e6e6; font-family: system-ui, -apple-system, sans-serif; }
+    #wordcraft_canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+    #wordcraft_viewer_loading { position: absolute; inset: 0; display: flex; flex-direction: column; pointer-events: none; background: #e6e6e6; color: #334155; z-index: 500; }
+    .wc-skel-bar { height: 34px; background: #2b47b5; color: #fff; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; font-size: 13px; font-weight: 600; }
+    .wc-skel-ribbon { height: 76px; background: #f8fafc; border-bottom: 1px solid #cbd5e1; display: flex; align-items: center; gap: 12px; padding: 0 16px; }
+    .wc-skel-pill { height: 14px; border-radius: 4px; background: #e2e8f0; }
+    .wc-skel-page-wrap { flex: 1; display: flex; justify-content: center; padding: 28px 16px; overflow: hidden; }
+    .wc-skel-page { width: min(720px, 92%); height: 100%; background: #ffffff; border: 1px solid #cbd5e1; box-shadow: 0 4px 16px rgba(15, 23, 42, 0.08); padding: 48px 56px; box-sizing: border-box; }
+    .wc-skel-line { height: 11px; border-radius: 3px; background: #eef2f6; margin-bottom: 12px; }
+    .wc-skel-title { height: 22px; width: 52%; background: #e2e8f0; margin-bottom: 24px; border-radius: 4px; }
+  </style>
+<link rel="modulepreload" href="./wordcraft-viewer-web-316e882bdc8f692f.js" crossorigin="anonymous" integrity="sha384-uoXJWr0ZH8I4iUiEcgqWWlQTPo8MGJwgtojbOr+6iQ6Q/BYa1c317noAQd3KxhIy"><link rel="preload" href="./wordcraft-viewer-web-ad7d09608ac3c8f2_bg.wasm" crossorigin="anonymous" integrity="sha384-KkPrCv/AzIhKKYSMdgr7ywJcsvspFrnnzy5vR/4QKA39GJjLAerQ6/s4h/C7bTiZ" as="fetch" type="application/wasm"></head>
+<body>
+  <!-- The viewer mounts here; the page module adds the editor's canvas when it loads the editor. -->
+  <div id="wordcraft_viewer"></div>
+  <div id="wordcraft_viewer_loading" aria-live="polite">
+    <div class="wc-skel-bar">
+      <span>WordCraftWeb</span>
+      <span style="font-weight: 400; opacity: 0.9;">Streaming WebAssembly runtime&hellip;</span>
+    </div>
+    <div class="wc-skel-ribbon">
+      <div class="wc-skel-pill" style="width: 64px;"></div>
+      <div class="wc-skel-pill" style="width: 96px;"></div>
+      <div class="wc-skel-pill" style="width: 78px;"></div>
+      <div class="wc-skel-pill" style="width: 110px;"></div>
+    </div>
+    <div class="wc-skel-page-wrap">
+      <div class="wc-skel-page">
+        <div class="wc-skel-title"></div>
+        <div class="wc-skel-line" style="width: 94%;"></div>
+        <div class="wc-skel-line" style="width: 88%;"></div>
+        <div class="wc-skel-line" style="width: 91%;"></div>
+        <div class="wc-skel-line" style="width: 62%;"></div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
