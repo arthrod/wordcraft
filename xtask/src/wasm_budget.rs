@@ -22,9 +22,17 @@ use sha2::{Digest as _, Sha384};
 /// of `main` (which is what grew it past the old ceiling) and the typed model bridge. The
 /// editor is no longer on the first-load path (plan 10.3), so this ceiling watches the file a
 /// reader fetches on the first edit action, not the first visit.
-pub const MAX_UNCOMPRESSED_BYTES: usize = 18_227_000;
-pub const MAX_GZIPPED_BYTES: usize = 7_494_000;
-pub const MAX_DATA_SECTION_BYTES: usize = 2_750_000;
+///
+/// Raised 2026-11-16 on `wordcraft-web`: every ceiling in this file (this row, the data section,
+/// the first load, each worker, the page and the view-only module) is its previous value plus
+/// 10%, the owner's decision, so a merge of `main` does not stop the build while the split is
+/// kept in step with it (the data section had 2,263 bytes left: 2,747,737 of 2,750,000).
+/// Measured that day on the release build: editor data 2,747,737; page 212,845 raw / 95,138
+/// gzip; view-only worker 5,882,913; codecs 4,415,295; PDF 6,484,751; proofing 1,011,555; first
+/// load 6,095,758 raw. The headroom is now 12% to 14% a row, where it was 3% to 4%.
+pub const MAX_UNCOMPRESSED_BYTES: usize = 20_049_700;
+pub const MAX_GZIPPED_BYTES: usize = 8_243_400;
+pub const MAX_DATA_SECTION_BYTES: usize = 3_025_000;
 pub const CLOUDFLARE_MAX_FILE_BYTES: usize = 25 * 1024 * 1024;
 
 /// The first-load ceiling (plan 10.5): the wasm a first visit fetches, which is the page
@@ -37,8 +45,8 @@ pub const CLOUDFLARE_MAX_FILE_BYTES: usize = 25 * 1024 * 1024;
 /// 2026-11-14), which summed the editor and every worker. No session loads them all at once
 /// any more, and the sum had been over its ceiling since the third worker landed. The sum is
 /// still printed, without a ceiling.
-pub const MAX_FIRST_LOAD_UNCOMPRESSED_BYTES: usize = 6_233_000;
-pub const MAX_FIRST_LOAD_GZIPPED_BYTES: usize = 2_992_000;
+pub const MAX_FIRST_LOAD_UNCOMPRESSED_BYTES: usize = 6_856_300;
+pub const MAX_FIRST_LOAD_GZIPPED_BYTES: usize = 3_291_200;
 
 /// File-name stems the first-load page must not name outside a comment: the editor and the
 /// three on-demand workers. `wordcraft-web` does not occur inside `wordcraft-viewer-web`.
@@ -65,10 +73,10 @@ pub struct WorkerCeiling {
 /// build (no optional inputs): 5,845,030 raw / 2,784,071 gzip / 2,285,910 Brotli q11, ceilings
 /// about 3% raw and 4% gzip above.
 pub const WORKER_CEILINGS: &[WorkerCeiling] = &[
-    WorkerCeiling { name: "wordcraft-worker-proof", max_raw: 1_042_000, max_gzip: 662_000 },
-    WorkerCeiling { name: "wordcraft-worker-codecs", max_raw: 4_540_000, max_gzip: 1_941_000 },
-    WorkerCeiling { name: "wordcraft-worker-pdf", max_raw: 6_639_000, max_gzip: 3_121_000 },
-    WorkerCeiling { name: VIEWER_WORKER_STEM, max_raw: 6_021_000, max_gzip: 2_896_000 },
+    WorkerCeiling { name: "wordcraft-worker-proof", max_raw: 1_146_200, max_gzip: 728_200 },
+    WorkerCeiling { name: "wordcraft-worker-codecs", max_raw: 4_994_000, max_gzip: 2_135_100 },
+    WorkerCeiling { name: "wordcraft-worker-pdf", max_raw: 7_302_900, max_gzip: 3_433_100 },
+    WorkerCeiling { name: VIEWER_WORKER_STEM, max_raw: 6_623_100, max_gzip: 3_185_600 },
 ];
 
 /// Offloaded symbols that must not appear in the *main module's* bytes: `krilla` (PDF export
@@ -112,7 +120,7 @@ pub const PAGE_STEM: &str = "wordcraft-viewer-web";
 /// 212,300 / 96,200 (measured then: 206,075 / 92,450 / 78,819): the page now reads a document
 /// it fetches as a bounded stream, refuses a cross-origin answer, and puts the document on
 /// screen back when a replacement is refused, which is 6,770 bytes of page code.
-pub const PAGE_CEILING: WorkerCeiling = WorkerCeiling { name: PAGE_STEM, max_raw: 219_200, max_gzip: 98_900 };
+pub const PAGE_CEILING: WorkerCeiling = WorkerCeiling { name: PAGE_STEM, max_raw: 241_120, max_gzip: 108_790 };
 
 /// Crates the page module must never link: it is `web-sys` glue that starts the view-only
 /// worker and loads the editor on an edit action. The editor, PDF export and the whole document
@@ -153,7 +161,7 @@ pub const VIEWER_STEM: &str = "wordcraft-viewer";
 /// 3,106,872 gzip: the same tree as the 6,809,726 / 3,106,857 measurement, built again, and two
 /// builds of one tree differ by a few hundred bytes. Ceilings ratchet down; raising one is a
 /// recorded decision in the plan.
-pub const VIEWER_CEILING: WorkerCeiling = WorkerCeiling { name: VIEWER_STEM, max_raw: 5_980_000, max_gzip: 2_881_000 };
+pub const VIEWER_CEILING: WorkerCeiling = WorkerCeiling { name: VIEWER_STEM, max_raw: 6_578_000, max_gzip: 3_169_100 };
 
 /// Crates the view-only module must never link (plan 8.2): it opens a document and paints its
 /// pages, so the editor (`wordcraft-engine`, `wordcraft-ui-egui`, `egui`, `eframe`), PDF export
