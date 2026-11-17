@@ -229,7 +229,7 @@ impl WordApp {
             // A format the host writes in a module it loads on first use is its job from here.
             if let Some(taken) = self.lazy_export(&name, password, &opts) {
                 // A job that could not start is a failed save too: the stamps go back.
-                if taken.is_err() {
+                return taken.inspect_err(|_| {
                     (
                         self.session.doc.settings.zoom,
                         self.session.doc.core.last_modified_by,
@@ -237,8 +237,7 @@ impl WordApp {
                         self.session.doc.core.modified,
                         self.session.doc.core.revision,
                     ) = before_stamp;
-                }
-                return taken;
+                });
             }
             let bytes = match wordcraft_engine::io::save_bytes_with(&name, &self.session.doc, password, &opts) {
                 Ok(bytes) => bytes,
