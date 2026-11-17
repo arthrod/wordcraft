@@ -16,7 +16,8 @@
 //!
 //! Bounds: at most [`IN_FLIGHT`] unanswered checks, [`SCAN_PER_TICK`] paragraphs compared per
 //! frame, [`MAX_TRACKED`] paragraphs remembered, and the worker protocol caps each request; the
-//! worker itself starts lazily on the first tick with a document ([`proof_worker::ensure`]).
+//! worker itself starts on the first edit ([`StartGate`]), never on page load: a document that
+//! is opened and only read fetches no proofing files (plan 10.1).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -112,11 +113,122 @@ fn check_key(doc: &wordcraft_doc::Document, p: &wordcraft_doc::Paragraph) -> u64
     h.finish()
 }
 
+/// Commands that ask for proofing outright: they start the worker even on a document nobody
+/// has edited. Read from the engine and the UI: Spelling & Grammar and Editor (both open the
+/// spelling pane, `WordApp::execute_user`), the issue and suggestion lists a script or the pane
+/// reads, the pane's Add to Dictionary and Ignore All, and Check Spelling as You Type. Most are
+/// `pure` (they change nothing a later frame could see), so the gate hears them as they run
+/// ([`StartGate::observe`], fed by `Services::on_command`), not from the session afterwards.
+const PROOFING_COMMANDS: &[&str] =
+    &["review.spelling", "review.editor", "review.issues", "review.suggestions", "review.addToDictionary", "review.ignoreAll", "review.proofing"];
+
+/// What [`StartGate::poll`] answers for one frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Gate {
+    /// Nothing has asked for proofing yet: the worker's files stay unfetched.
+    Wait,
+    /// The first edit (or proofing command) was just seen: start the worker now. Answered once.
+    Start,
+    /// The worker was started on an earlier frame.
+    Started,
+}
+
+/// Holds the proofing worker back until the first use (plan 10.1): the worker is about
+/// 0.64 MB gzip that a reader never needs. Once open it stays open — a later save or a newly
+/// opened document does not close it, so squiggles behave as they did before the gate.
+#[derive(Default)]
+pub(crate) struct StartGate {
+    started: bool,
+    /// A proofing command ran ([`PROOFING_COMMANDS`]); latched, however many commands follow
+    /// before the next frame.
+    asked: bool,
+}
+
+impl StartGate {
+    /// Hear one command as it runs.
+    pub(crate) fn observe(&mut self, id: &str) {
+        if PROOFING_COMMANDS.contains(&id) {
+            self.asked = true;
+        }
+    }
+
+    /// Whether the session has been used in a way that wants squiggles: the document was edited
+    /// (`dirty` — opening a file, loading the sample or a new blank document leave it clear), or
+    /// a proofing command ran.
+    pub(crate) fn poll(&mut self, session: &wordcraft_engine::Session) -> Gate {
+        if self.started {
+            return Gate::Started;
+        }
+        if !(session.dirty || self.asked) {
+            return Gate::Wait;
+        }
+        self.started = true;
+        Gate::Start
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static GATE: RefCell<StartGate> = RefCell::new(StartGate::default());
+    /// `?proof-worker`: log what the smoke harness waits for ([`enable_smoke`]).
+    static SMOKE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The smoke path (`?proof-worker`): when the worker starts, run one known-bad check through
+/// it and log its issue count, and log each document paragraph's issue count as replies
+/// arrive. The flag adds console lines only; it never starts the worker by itself.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn enable_smoke() {
+    SMOKE.with(|s| s.set(true));
+}
+
+/// `Services::on_command`: every command the app runs passes the gate ([`StartGate::observe`]).
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn observe_command(id: &str) {
+    GATE.with(|g| g.borrow_mut().observe(id));
+}
+
+/// The known-bad check of the smoke path, sent once when the worker starts.
+#[cfg(target_arch = "wasm32")]
+fn smoke_check() {
+    crate::web::proof_worker::with(|w| {
+        if let Err(e) = w.ping() {
+            log::warn!("proofing worker ping failed to send: {e}");
+        }
+        let req = proto::CheckRequest {
+            para_id: 0,
+            text: "Ths is a tst.".to_string(),
+            spans: Vec::new(),
+            skip: Vec::new(),
+            options: None,
+            typing: None,
+            list_item: false,
+        };
+        if let Err(e) = w.check(&req, |res| match res {
+            Ok(reply) => log::info!("proofing worker: {} issue(s) in the smoke check", reply.issues.len()),
+            Err(e) => log::warn!("proofing worker smoke check: {} ({:?})", e.message, e.code),
+        }) {
+            log::warn!("proofing worker check failed to send: {e}");
+        }
+    });
+}
+
 /// One frame: apply what arrived, then send what changed. `session.doc` is only read.
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn tick(session: &wordcraft_engine::Session, asset_base: &str, ctx: &Context) {
+    let gate = GATE.with(|g| g.borrow_mut().poll(session));
+    if gate == Gate::Wait {
+        return; // Nobody has edited or asked for proofing: fetch nothing.
+    }
     if !crate::web::proof_worker::ensure(asset_base) {
         return; // Unavailable in this browser (§3.1): squiggles are off, never a panic.
+    }
+    let smoke = SMOKE.with(std::cell::Cell::get);
+    if gate == Gate::Start {
+        log::info!("proofing worker: started on first use");
+        if smoke {
+            smoke_check();
+        }
     }
     let (applied, sends) = pump(session);
     // Send outside the borrow: the reply closures push into the same scheduler.
@@ -124,6 +236,9 @@ pub(crate) fn tick(session: &wordcraft_engine::Session, asset_base: &str, ctx: &
         let key = (story, path.clone());
         let sent = crate::web::proof_worker::with(|w| {
             w.check(&req, move |reply| {
+                if smoke && let Ok(r) = &reply {
+                    log::info!("proofing squiggles: {} issue(s) in a document paragraph", r.issues.len());
+                }
                 SCHED.with(|s| {
                     s.borrow_mut().replies.push(Apply { id, story, path, checked_key, reply });
                 });
@@ -259,6 +374,72 @@ fn pump(session: &wordcraft_engine::Session) -> (bool, Vec<(u32, proto::CheckReq
 mod tests {
     use super::*;
     use wordcraft_doc::{Document, Pos};
+
+    /// Plan 10.1: a document that is opened and only read never starts the worker; the first
+    /// edit starts it exactly once; later frames (and a save, which clears `dirty`) neither
+    /// start it again nor close the gate.
+    #[test]
+    fn worker_starts_on_the_first_edit_only() {
+        let mut gate = StartGate::default();
+        // Opened, with text, and only read: frames pass, caret moves, nothing starts.
+        let mut session = wordcraft_engine::Session::new(Document::from_text("Ths is a tst."));
+        for _ in 0..3 {
+            assert_eq!(gate.poll(&session), Gate::Wait);
+        }
+        session.run("select.all", &serde_json::json!({})).unwrap();
+        session.run("caret.docEnd", &serde_json::json!({})).unwrap();
+        assert_eq!(gate.poll(&session), Gate::Wait, "moving the caret is not an edit");
+        // Opening another document is not an edit either.
+        session.set_document(Document::from_text("another"));
+        assert_eq!(gate.poll(&session), Gate::Wait, "opening a document is not an edit");
+        session.set_document(wordcraft_engine::sample::sample_document());
+        assert_eq!(gate.poll(&session), Gate::Wait, "loading the sample is not an edit");
+        // The first edit starts it, once.
+        session.run("text.insert", &serde_json::json!({"text": "x"})).unwrap();
+        assert_eq!(gate.poll(&session), Gate::Start);
+        assert_eq!(gate.poll(&session), Gate::Started);
+        session.run("text.insert", &serde_json::json!({"text": "y"})).unwrap();
+        assert_eq!(gate.poll(&session), Gate::Started);
+        // Saved, or replaced by a fresh document: the worker stays, nothing starts twice.
+        session.dirty = false;
+        assert_eq!(gate.poll(&session), Gate::Started);
+        session.set_document(Document::from_text("next"));
+        assert_eq!(gate.poll(&session), Gate::Started);
+    }
+
+    /// Review finding 7: an explicit proofing command starts the worker on a document nobody
+    /// edited, heard as it runs through the app — even a `pure` one that leaves no trace in the
+    /// session, and even when other commands run before the next frame. Other commands do not.
+    #[test]
+    fn a_proofing_command_starts_the_worker_without_an_edit() {
+        use std::{cell::RefCell, rc::Rc};
+        for id in PROOFING_COMMANDS {
+            let gate = Rc::new(RefCell::new(StartGate::default()));
+            let hear = gate.clone();
+            let services =
+                wordcraft_ui_egui::Services { on_command: Some(Box::new(move |id: &str| hear.borrow_mut().observe(id))), ..Default::default() };
+            let mut app = wordcraft_ui_egui::WordApp::new(wordcraft_engine::Session::new(Document::from_text("Ths is a tst.")), services);
+            for other in ["view.zoom", "review.newComment", "caret.docEnd"] {
+                let _ = app.execute(other, serde_json::json!({}));
+            }
+            app.session.dirty = false;
+            assert_eq!(gate.borrow_mut().poll(&app.session), Gate::Wait, "no proofing asked yet ({id})");
+            let _ = app.execute(id, serde_json::json!({"word": "Ths", "value": true}));
+            let _ = app.execute("caret.docEnd", serde_json::json!({}));
+            app.session.dirty = false;
+            assert_eq!(gate.borrow_mut().poll(&app.session), Gate::Start, "{id}, then another command, before the frame");
+            assert_eq!(gate.borrow_mut().poll(&app.session), Gate::Started);
+        }
+    }
+
+    /// The gate's list names commands that exist: every id is one the engine registers.
+    #[test]
+    fn every_proofing_command_is_registered() {
+        let session = wordcraft_engine::Session::new(Document::new());
+        for id in PROOFING_COMMANDS {
+            assert!(session.registry.get(id).is_some(), "{id} is not an engine command");
+        }
+    }
 
     /// Paragraphs deleted between path refreshes must not leave `scan` indexing past the new
     /// list: the refresh clamps it to a valid position (0 when nothing is left).

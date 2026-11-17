@@ -114,6 +114,24 @@ async fn execute_command(queue: Sender<ControlRequest>, ctx: egui::Context, comm
     }
 }
 
+/// The bytes a page passed as `val`, without copying them: a `Uint8Array` as it is (`new
+/// Uint8Array(typedArray)` would clone its buffer, ECMA-262 InitializeTypedArrayFromTypedArray),
+/// a view on an `ArrayBuffer`; `None` for anything else. The caller bounds the length, then
+/// copies once.
+fn byte_view(val: &JsValue) -> Option<js_sys::Uint8Array> {
+    match val.dyn_ref::<js_sys::Uint8Array>() {
+        Some(view) => Some(view.clone()),
+        None => val.is_instance_of::<js_sys::ArrayBuffer>().then(|| js_sys::Uint8Array::new(val)),
+    }
+}
+
+/// Whether the page's string `s` holds a character no base64 has
+/// ([`crate::lazy_formats::not_base64_pattern`]), found by the browser's own `RegExp` on the
+/// string where it is: nothing is copied into this module.
+fn has_non_base64(s: &js_sys::JsString) -> bool {
+    s.search(&js_sys::RegExp::new(&crate::lazy_formats::not_base64_pattern(), "")) >= 0
+}
+
 fn json_to_js(v: &Value) -> JsValue {
     js_sys::JSON::parse(&v.to_string()).unwrap_or(JsValue::NULL)
 }
@@ -171,11 +189,22 @@ fn attach_doc_helpers(api: &js_sys::Object, queue: Sender<ControlRequest>, ctx: 
         let q = queue.clone();
         let c = ctx.clone();
         future_to_promise(async move {
-            let b64 = if let Some(s) = val.as_string() {
-                s
-            } else if val.is_instance_of::<js_sys::Uint8Array>() || val.is_instance_of::<js_sys::ArrayBuffer>() {
-                let bytes = js_sys::Uint8Array::new(&val).to_vec();
-                base64_encode(&bytes)
+            // Bounded before any copy, with `doc.loadDocx`'s own refusals: a string past the
+            // bound, or with a character no base64 has (so the copy is one byte per unit).
+            let b64 = if let Some(s) = val.dyn_ref::<js_sys::JsString>() {
+                let not_base64 = crate::lazy_formats::load_docx_not_base64();
+                let units = s.length() as usize;
+                if let Some(refused) =
+                    crate::lazy_formats::base64_string_error(units, crate::lazy_formats::load_docx_error, || has_non_base64(s), &not_base64)
+                {
+                    return Err(js_err(&refused));
+                }
+                String::from(s)
+            } else if let Some(view) = byte_view(&val) {
+                if let Some(refused) = crate::lazy_formats::load_docx_error(crate::lazy_formats::base64_len(view.length() as usize)) {
+                    return Err(js_err(&refused));
+                }
+                base64_encode(&view.to_vec())
             } else {
                 return Err(js_err("loadDocx expects Uint8Array, ArrayBuffer, or base64 string"));
             };
@@ -234,105 +263,86 @@ fn attach_doc_helpers(api: &js_sys::Object, queue: Sender<ControlRequest>, ctx: 
             // flavors too — `from: "docx", to: "docm"` rewraps the package).
             let format = if direction == wordcraft_worker_proto::ConvertDirection::Import { from } else { to };
             let data = js_sys::Reflect::get(&val, &JsValue::from_str("data")).unwrap_or(JsValue::UNDEFINED);
-            let input = if let Some(s) = data.as_string() {
-                base64_decode(&s).unwrap_or_default()
-            } else if data.is_instance_of::<js_sys::Uint8Array>() || data.is_instance_of::<js_sys::ArrayBuffer>() {
-                js_sys::Uint8Array::new(&data).to_vec()
+            let input = if let Some(s) = data.dyn_ref::<js_sys::JsString>() {
+                // Bounded by its length, and refused with a character no base64 has, before it
+                // is copied here or decoded, with the conversion's own refusals; then the exact
+                // cap on the decoded bytes.
+                let units = s.length() as usize;
+                if let Some(refused) = crate::lazy_formats::base64_string_error(
+                    units,
+                    crate::lazy_formats::convert_base64_error,
+                    || has_non_base64(s),
+                    crate::lazy_formats::CONVERT_NOT_BASE64,
+                ) {
+                    return fail(&reject, refused);
+                }
+                match crate::lazy_formats::decode_convert_base64(&String::from(s)) {
+                    Ok(bytes) => bytes,
+                    Err(e) => return fail(&reject, e),
+                }
+            } else if let Some(view) = byte_view(&data) {
+                // Bounded before the copy, with the conversion's own refusal.
+                if let Some(refused) = crate::lazy_formats::convert_input_error(view.length() as usize) {
+                    return fail(&reject, refused);
+                }
+                view.to_vec()
             } else {
                 return fail(&reject, "convertDocument expects `data` as Uint8Array, ArrayBuffer, or base64 string".into());
             };
             if input.is_empty() {
                 return fail(&reject, "convertDocument expects a non-empty `data`".into());
             }
-            if input.len() > wordcraft_worker_proto::MAX_CONVERT_BYTES {
-                return fail(&reject, format!("the document is too large to convert in the browser ({} bytes)", input.len()));
-            }
             let password = str_prop("password");
-            let req = wordcraft_worker_proto::ConvertRequest { format, direction, password, input };
-            let asset_base = asset_base_convert.clone();
-            if !crate::web::codec_worker::ensure(&asset_base) {
-                return fail(&reject, "the codec worker is unavailable in this browser".into());
-            }
-            let reject_for_reply = reject.clone();
-            let sent = crate::web::codec_worker::with(|w| {
-                w.convert(&req, move |reply| match reply {
-                    Ok(bytes) => {
-                        let _ = resolve.call1(&wasm_bindgen::JsValue::NULL, &js_sys::Uint8Array::from(bytes.as_slice()));
-                    }
-                    Err(e) => fail(&reject_for_reply, format!("conversion failed: {}", e.message)),
-                })
+            // A page-level conversion has no session, so no region: a file without a page size
+            // converts on a new blank document's page.
+            let req = wordcraft_worker_proto::ConvertRequest { format, direction, password, input, page: None };
+            // The same job the app's own Open and Save As run (`lazy_io`): starts the worker on
+            // first use and answers once, with the bytes or the reason there are none.
+            crate::web::lazy_io::convert(&asset_base_convert, &req, move |reply| match reply {
+                Ok(bytes) => {
+                    let _ = resolve.call1(&wasm_bindgen::JsValue::NULL, &js_sys::Uint8Array::from(bytes.as_slice()));
+                }
+                Err(e) => fail(&reject, e),
             });
-            match sent {
-                Some(Ok(_)) => {}
-                Some(Err(e)) => fail(&reject, format!("the codec worker could not take the conversion: {e}")),
-                None => fail(&reject, "the codec worker is unavailable in this browser".into()),
-            }
         })
     });
     let _ = js_sys::Reflect::set(api, &JsValue::from_str("convertDocument"), convert_document.as_ref().unchecked_ref());
     convert_document.forget();
 
-    // PDF export through the dedicated worker (plan §3.4): the document crosses as the same
-    // `.docx` interchange package `exportDocx` writes, with the non-bundled font faces as copies
-    // (user fonts, pack faces, fonts embedded in the document) so the worker lays out with
-    // exactly the faces the page shows — its bundled four are compiled in. The worker starts
-    // lazily here, never on page load. Resolves to the PDF bytes as a `Uint8Array`; rejects
-    // with an `Error` carrying the worker's message (a password-protected session exports an
-    // encrypted package the worker cannot read, and its error says so).
-    let asset_base_pdf = asset_base.clone();
+    // PDF export through the dedicated worker (plan §3.4), as the app's own File › Export runs
+    // it: the API runs `file.exportPdf` with a tag it claims (`lazy_io::claim_api_export`), so
+    // the document as printed, the export options (Print Markup, comments, digits), the strict
+    // check and the font copies are the command's, and the finished bytes come back here
+    // instead of a download. `markup` overrides Print Markup, as the command's own parameter.
+    // The worker starts lazily, never on page load. Resolves to the PDF bytes as a
+    // `Uint8Array`; rejects with an `Error` carrying the reason there are none.
     let export_pdf = wasm_bindgen::closure::Closure::<dyn Fn(JsValue) -> js_sys::Promise>::new(move |val: JsValue| {
         let q = queue_for_pdf.clone();
         let c = ctx_for_pdf.clone();
-        let asset_base = asset_base_pdf.clone();
         future_to_promise(async move {
-            let mut params = json!({});
-            if js_sys::Reflect::get(&val, &JsValue::from_str("markup")).ok().and_then(|v| v.as_bool()) == Some(true) {
-                params["markup"] = json!(true);
-            }
-            let res = execute_command(q, c, "doc.exportDocx", params).await?;
-            let b64 = res.get("docxBase64").and_then(Value::as_str).ok_or_else(|| js_err("missing docxBase64"))?;
-            let docx = base64_decode(b64).ok_or_else(|| js_err("invalid docxBase64"))?;
-            if docx.is_empty() {
-                return Err(js_err("nothing to export"));
-            }
-            if docx.len() > wordcraft_worker_proto::MAX_PDF_DOC_BYTES {
-                return Err(js_err(&format!("the document is too large to export as PDF in the browser ({} bytes)", docx.len())));
-            }
-            // The font copies: every face beyond the worker's compiled-in set, within the
-            // protocol's count and byte budgets (what does not fit is left out with a log, and
-            // the export still runs — those faces fall back inside the worker).
-            let mut fonts: Vec<wordcraft_worker_proto::FontCopy> = Vec::new();
-            let mut total = 0usize;
-            for (family, style, bytes) in wordcraft_fonts::FontDb::global().runtime_faces() {
-                if fonts.len() >= wordcraft_worker_proto::MAX_FONT_COPIES
-                    || total.saturating_add(bytes.len()) > wordcraft_worker_proto::MAX_FONT_TOTAL_BYTES
-                {
-                    log::warn!("pdf export: the font copies hit a protocol budget; {family:?} is left to the worker's fallback");
-                    continue;
-                }
-                total = total.saturating_add(bytes.len());
-                fonts.push(wordcraft_worker_proto::FontCopy { family, style, bytes: (*bytes).clone() });
-            }
-            let req = wordcraft_worker_proto::PdfRenderRequest { docx, fonts };
-            if !crate::web::pdf_worker::ensure(&asset_base) {
-                return Err(js_err("the pdf worker is unavailable in this browser"));
-            }
+            let markup = js_sys::Reflect::get(&val, &JsValue::from_str("markup")).ok().and_then(|v| v.as_bool());
             // The reply lands on a later task turn; the shared waker set (drained every shell
             // frame by `wake_waiters`, and woken here from the reply closure) completes it.
             let (tx, rx) = std::sync::mpsc::channel::<Result<Vec<u8>, String>>();
-            let sent = crate::web::pdf_worker::with(|w| {
-                w.render_pdf(&req, move |reply| {
-                    let _ = tx.send(reply.map_err(|e| format!("pdf export failed: {}", e.message)));
-                    wake_waiters();
-                })
-            });
-            if !matches!(sent, Some(Ok(_))) {
-                return Err(js_err("the pdf worker is unavailable in this browser"));
+            let (tag, name) = crate::web::lazy_io::claim_api_export(Box::new(move |reply| {
+                let _ = tx.send(reply);
+                wake_waiters();
+            }))
+            .map_err(|e| js_err(&e))?;
+            let params = crate::lazy_formats::api_pdf_params(&name, tag, markup);
+            match execute_command(q, c, "file.exportPdf", params).await {
+                // The worker has the job (or already answered it).
+                Ok(res) if res.get("pending").and_then(Value::as_bool) == Some(true) => {}
+                Ok(_) => {
+                    crate::web::lazy_io::release_api_export(tag);
+                    return Err(js_err("the PDF export did not run in the PDF worker"));
+                }
+                Err(e) => {
+                    crate::web::lazy_io::release_api_export(tag);
+                    return Err(e);
+                }
             }
             let bytes = ChannelFuture(rx).await.map_err(|e| js_err(&e))?;
-            if !bytes.starts_with(b"%PDF") {
-                return Err(js_err("the pdf worker answered bytes that are not a PDF"));
-            }
             Ok(wasm_bindgen::JsValue::from(js_sys::Uint8Array::from(bytes.as_slice())))
         })
     });

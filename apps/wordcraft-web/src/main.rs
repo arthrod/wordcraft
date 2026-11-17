@@ -39,6 +39,12 @@ mod proof_squiggles;
 #[cfg(any(target_arch = "wasm32", test))]
 mod font_pack_manifest;
 
+// Which files go to the on-demand workers is decided from names and first bytes alone, so host
+// tests cover it; the workers themselves are driven from `web/lazy_io.rs`.
+#[cfg(any(target_arch = "wasm32", test))]
+#[path = "web/lazy_formats.rs"]
+mod lazy_formats;
+
 // The canvas launch book (`start(options)` vs the automatic standalone start) lives beside the
 // other web modules but has no wasm-only dependencies of its own, so host tests compile and
 // drive it too.

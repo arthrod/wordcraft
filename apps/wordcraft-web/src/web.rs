@@ -95,8 +95,80 @@ const RECIPIENT_EXTS: &[&str] = wordcraft_engine::cmd::mailings::RECIPIENT_EXTEN
 pub(crate) mod codec_worker;
 pub(crate) mod font_packs;
 mod font_store;
+pub(crate) mod lazy_io;
 pub(crate) mod pdf_worker;
 pub(crate) mod proof_worker;
+
+/// A dedicated worker's `error` event in words, for the log. A script error is an `ErrorEvent`
+/// with a message and a place. A worker whose script could not be fetched (a 404, no network)
+/// fires a plain `Event` with neither: reading them through `ErrorEvent`'s string getters
+/// throws out of the handler, before it has failed the requests that were waiting — so the
+/// fields are read as whatever they are.
+pub(crate) fn worker_error_text(event: &web_sys::Event) -> String {
+    let field = |key: &str| js_sys::Reflect::get(event, &wasm_bindgen::JsValue::from_str(key)).ok();
+    match field("message").and_then(|v| v.as_string()).filter(|m| !m.is_empty()) {
+        Some(message) => {
+            let file = field("filename").and_then(|v| v.as_string()).unwrap_or_default();
+            let line = field("lineno").and_then(|v| v.as_f64()).unwrap_or_default();
+            format!("{message} ({file}:{line})")
+        }
+        None => "its script could not be loaded".to_string(),
+    }
+}
+
+/// Why an on-demand worker failed its waiting requests: before its `ready` notice its files never
+/// arrived or would not run; after it, it died with work in hand (out of memory on a large
+/// document, a fault). `lazy_formats::failure_message` words the two differently.
+pub(crate) fn worker_failure(worker: &str, ready: bool) -> String {
+    if ready {
+        format!("the {worker} worker {}", crate::lazy_formats::STOPPED_WORKING)
+    } else {
+        format!("the {worker} worker {}", crate::lazy_formats::NOT_LOADED)
+    }
+}
+
+/// Read one `[headerJson, payloadBuffer]` message from the `worker` worker, checked as the
+/// workers check a request ([`crate::lazy_formats::inbound`]): it is an array, its header a
+/// string no longer than a JSON payload, its payload an `ArrayBuffer` or `Uint8Array` within the
+/// reply kind's bound — all before anything is copied. A reply that fails the checks comes back
+/// as a typed `error` reply for its own job; a message that answers no job is logged and `None`.
+pub(crate) fn read_worker_message(worker: &str, data: &wasm_bindgen::JsValue) -> Option<(wordcraft_worker_proto::Envelope, Vec<u8>)> {
+    use crate::lazy_formats::{Inbound, inbound};
+    // `is_array` before the cast: an array-like object never goes through `Array.from`.
+    let (header, payload) = if js_sys::Array::is_array(data) {
+        let arr: &js_sys::Array = data.unchecked_ref();
+        (arr.get(0), arr.get(1))
+    } else {
+        (wasm_bindgen::JsValue::UNDEFINED, wasm_bindgen::JsValue::UNDEFINED)
+    };
+    let limit = u32::try_from(wordcraft_worker_proto::MAX_PAYLOAD_BYTES).unwrap_or(u32::MAX);
+    let header = header.dyn_ref::<js_sys::JsString>().filter(|s| s.length() <= limit).and_then(|s| s.as_string());
+    // A `Uint8Array` (what the workers post) is used as it is: `new Uint8Array(typedArray)` would
+    // copy every byte (ECMA-262 InitializeTypedArrayFromTypedArray clones the buffer) before the
+    // length check. An `ArrayBuffer` gets a view, which copies nothing.
+    let bytes = match payload.dyn_into::<js_sys::Uint8Array>() {
+        Ok(view) => Some(view),
+        Err(other) if other.is_instance_of::<js_sys::ArrayBuffer>() => Some(js_sys::Uint8Array::new(&other)),
+        Err(_) => None,
+    };
+    match inbound(header.as_deref(), bytes.as_ref().map(|b| b.length() as usize)) {
+        Inbound::Route(env) => {
+            // `ready` carries nothing read; anything else is within its bound by now.
+            let copied = if env.kind == wordcraft_worker_proto::Kind::Ready { Vec::new() } else { bytes.map(|b| b.to_vec()).unwrap_or_default() };
+            Some((env, copied))
+        }
+        Inbound::Refuse(env, reply) => {
+            log::warn!("{worker} worker: {}", reply.message);
+            let payload = wordcraft_worker_proto::encode_payload(&reply).ok()?;
+            Some((env, payload))
+        }
+        Inbound::Drop(why) => {
+            log::warn!("{worker} worker: dropped {why}");
+            None
+        }
+    }
+}
+
 const CANVAS_ID: &str = "wordcraft_canvas";
 const LOADING_ID: &str = "wordcraft_loading";
 
@@ -336,9 +408,19 @@ fn launch_with_config(config: StartConfig) -> js_sys::Promise {
                     let mut session = Session::new(doc);
                     session.system_region = region;
                     let messages = Rc::new(RefCell::new(Vec::new()));
-                    let mut services = services(inbox.clone(), cc.egui_ctx.clone(), dirty, saves.clone(), messages.clone());
+                    let mut services = services(inbox.clone(), cc.egui_ctx.clone(), dirty, saves.clone(), messages.clone(), &initial_asset_base);
                     if let Some(bridge) = &app_bridge {
                         bridge.connect(&mut services, inbox.clone(), cc.egui_ctx.clone());
+                        // A worker's export goes to the host too, as a copy (the document keeps
+                        // its unsaved changes, so it never becomes the document's file).
+                        let host = bridge.clone();
+                        let exporter = lazy_io::Exporter {
+                            asset_base: initial_asset_base.clone(),
+                            messages: messages.clone(),
+                            ctx: cc.egui_ctx.clone(),
+                            deliver: Rc::new(move |name: &str, bytes: &[u8]| host.post_copy(name, bytes)),
+                        };
+                        services.lazy_export = Some(lazy_export_hook(exporter));
                     }
                     let (control, api_obj) = crate::api::install_with_global(cc.egui_ctx.clone(), install_global, &initial_asset_base);
                     *created_api_slot.borrow_mut() = Some(api_obj);
@@ -351,31 +433,12 @@ fn launch_with_config(config: StartConfig) -> js_sys::Promise {
                     crate::prefs::restore(&mut app, stored.as_deref());
                     let asset_base = initial_asset_base;
                     font_packs::init(&asset_base, messages.clone());
-                    // §3.2's smoke path (`?proof-worker`): squiggles themselves are always on
-                    // (proof_squiggles::tick starts the worker lazily with the first
-                    // document); the flag only adds a known-bad check whose console line the
-                    // smoke harness waits for.
-                    if query().contains("proof-worker") && proof_worker::ensure(&asset_base) {
-                        proof_worker::with(|w| {
-                            if let Err(e) = w.ping() {
-                                log::warn!("proofing worker ping failed to send: {e}");
-                            }
-                            let req = wordcraft_worker_proto::CheckRequest {
-                                para_id: 0,
-                                text: "Ths is a tst.".to_string(),
-                                spans: Vec::new(),
-                                skip: Vec::new(),
-                                options: None,
-                                typing: None,
-                                list_item: false,
-                            };
-                            if let Err(e) = w.check(&req, |res| match res {
-                                Ok(reply) => log::info!("proofing worker: {} issue(s) in the smoke check", reply.issues.len()),
-                                Err(e) => log::warn!("proofing worker smoke check: {} ({:?})", e.message, e.code),
-                            }) {
-                                log::warn!("proofing worker check failed to send: {e}");
-                            }
-                        });
+                    // §3.2's smoke path (`?proof-worker`): the flag adds console lines once the
+                    // proofing worker starts, and never starts it. The worker starts on the first
+                    // edit or proofing command (`proof_squiggles::StartGate`, plan 10.1), so a
+                    // page nobody edits prints none of them; the smoke harnesses type first.
+                    if query().contains("proof-worker") {
+                        crate::proof_squiggles::enable_smoke();
                     }
                     let initial_lang = app.ui.language.clone();
                     ensure_locale_loaded(&initial_lang, &asset_base, cc.egui_ctx.clone());
@@ -512,6 +575,9 @@ impl eframe::App for WebShell {
             ensure_locale_loaded(&self.last_lang_pref, &self.asset_base, ctx.clone());
             label_ime_input(&self.canvas);
         }
+        // Picked, dropped or host-sent files only the codecs worker reads leave the inbox here
+        // and come back as Word packages on a later frame (plan 10.2); the app opens the rest.
+        lazy_io::take_foreign_opens(&self.inbox, &self.asset_base, &self.messages, ctx, || self.app.session.region());
         self.app.logic(ctx);
         // Wanted pack faces are recorded during layout, so drain them after the app ran.
         font_packs::drain_wanted(ctx);
@@ -611,8 +677,35 @@ fn listen_for_pasted_pictures(inbox: Inbox, ctx: egui::Context) -> Result<(), St
     Ok(())
 }
 
+/// [`wordcraft_ui_egui::Services::lazy_export`] answered by `exporter`.
+fn lazy_export_hook(exporter: lazy_io::Exporter) -> wordcraft_ui_egui::LazyExportFn {
+    Box::new(
+        move |name: &str,
+              password: Option<&str>,
+              opts: &wordcraft_engine::io::ExportOptions,
+              docx: &dyn Fn() -> Result<Vec<u8>, String>,
+              used: &dyn Fn() -> wordcraft_engine::strict::PdfFaces| exporter.export(name, password, opts, docx, used),
+    )
+}
+
 /// `dirty` is the flag the `beforeunload` guard reads ([`guard_unload`]).
-fn services(inbox: Inbox, ctx: egui::Context, dirty: Rc<Cell<bool>>, saves: AsyncSaves, messages: Rc<RefCell<Vec<String>>>) -> Services {
+fn services(
+    inbox: Inbox,
+    ctx: egui::Context,
+    dirty: Rc<Cell<bool>>,
+    saves: AsyncSaves,
+    messages: Rc<RefCell<Vec<String>>>,
+    asset_base: &str,
+) -> Services {
+    // Save As and Export in a format a worker writes (plan 10.2): the worker is fetched on the
+    // first such save, and the finished file is an anchor download (the host page's, when one
+    // hosts the app: see the bridge's wiring).
+    let exporter = lazy_io::Exporter {
+        asset_base: asset_base.to_string(),
+        messages: messages.clone(),
+        ctx: ctx.clone(),
+        deliver: Rc::new(lazy_io::anchor_download),
+    };
     let open_inbox = inbox.clone();
     let save_ctx = ctx.clone();
     let font_ctx = ctx.clone();
@@ -653,10 +746,13 @@ fn services(inbox: Inbox, ctx: egui::Context, dirty: Rc<Cell<bool>>, saves: Asyn
         // Exports ask for a name; the browser decides where the download goes.
         pick_save: Some(Box::new(|name: &str| Some(name.to_string()))),
         async_saves: Some(saves.clone()),
+        lazy_export: Some(lazy_export_hook(exporter)),
         download: Some(Box::new(move |path: &str, bytes: &[u8]| download(&saves, &save_ctx, path, bytes))),
         print: Some(Box::new(print_pdf)),
         inbox: Some(inbox),
         on_dirty: Some(Box::new(move |d| dirty.set(d))),
+        // The proofing worker starts on the first proofing command too, heard as it runs (plan 10.1).
+        on_command: Some(Box::new(crate::proof_squiggles::observe_command)),
         animations_enabled: Some(animations_enabled()),
         store_font: Some(Box::new(font_store::store)),
         forget_font: Some(Box::new(font_store::forget)),
@@ -797,8 +893,9 @@ fn animations_enabled() -> Box<dyn Fn() -> Option<bool>> {
 fn guard_unload(dirty: Rc<Cell<bool>>, saves: AsyncSaves) -> Result<(), String> {
     let window = web_sys::window().ok_or("no window")?;
     let on_unload = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::BeforeUnloadEvent)>::new(move |e: web_sys::BeforeUnloadEvent| {
-        // A save still in the browser's picker hasn't written anything yet.
-        if dirty.get() || saves.pending() > 0 {
+        // A save still in the browser's picker hasn't written anything yet, nor has an export a
+        // worker is still writing.
+        if dirty.get() || saves.pending() > 0 || lazy_io::exports_in_flight() > 0 {
             e.prevent_default();
             // Older browsers ask only when `returnValue` is set.
             e.set_return_value("unsaved changes");

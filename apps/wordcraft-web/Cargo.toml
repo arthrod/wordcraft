@@ -37,10 +37,21 @@ craft-web-api = { git = "https://github.com/storytold/craft-libs", rev = "fd5e2f
 craft-web-host = { git = "https://github.com/storytold/craft-libs", rev = "fd5e2feff6ea25bed371a99cc732b3968d621505", version = "0.1.0" }
 egui = { workspace = true }
 wordcraft-fonts = { workspace = true, default-features = false, features = ["minimal-wasm-fonts"] }
+# `is_encrypted` alone: a password-protected Word package under a legacy name stays with the
+# engine (which asks for the password) instead of going to the codecs worker. Already linked
+# through the engine.
+wordcraft-docx = { workspace = true }
 wordcraft-geom = { workspace = true }
 eframe = { workspace = true, features = ["accesskit"] }
 rfd = { workspace = true }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlCollection", "HtmlElement", "HtmlCanvasElement", "HtmlAnchorElement", "HtmlIFrameElement", "HtmlInputElement", "HtmlTextAreaElement", "Blob", "BlobPropertyBag", "Url", "Location", "History", "CssStyleDeclaration", "Event", "EventTarget", "BeforeUnloadEvent", "ClipboardEvent", "DataTransfer", "FileList", "File", "DomStringList", "IdbFactory", "IdbOpenDbRequest", "IdbRequest", "IdbDatabase", "IdbObjectStore", "IdbTransaction", "IdbTransactionMode", "MediaQueryList", "Storage", "MessageEvent", "UrlSearchParams", "CustomEvent", "CustomEventInit", "Response", "Request", "RequestInit", "Headers", "Worker", "WorkerOptions", "WorkerType", "ErrorEvent"] }
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlCollection", "HtmlElement", "HtmlCanvasElement", "HtmlAnchorElement", "HtmlIFrameElement", "HtmlInputElement", "HtmlTextAreaElement", "Blob", "BlobPropertyBag", "Url", "Location", "History", "CssStyleDeclaration", "Event", "EventTarget", "BeforeUnloadEvent", "ClipboardEvent", "DataTransfer", "FileList", "File", "DomStringList", "IdbFactory", "IdbOpenDbRequest", "IdbRequest", "IdbDatabase", "IdbObjectStore", "IdbTransaction", "IdbTransactionMode", "MediaQueryList", "Storage", "MessageEvent", "UrlSearchParams", "CustomEvent", "CustomEventInit", "Response", "Request", "RequestInit", "Headers", "Worker", "WorkerOptions", "WorkerType", "ErrorEvent", "Crypto"] }
+
+[dev-dependencies]
+# The routing tests (`src/web/lazy_formats.rs`) check the on-demand workers' format tables against
+# the readers and writers the codecs worker calls, and make an encrypted Word package with our own
+# encryptor. Test builds only: the browser build keeps leaving the extra formats out.
+wordcraft-docx = { workspace = true }
+wordcraft-formats = { workspace = true, features = ["all-formats"] }

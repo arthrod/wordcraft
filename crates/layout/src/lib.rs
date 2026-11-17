@@ -88,7 +88,7 @@ use headers::MAX_HEADER_ITEMS;
 use headers::placed_cost;
 use headers::placed_cost_by;
 pub use metafile::{MAX_METAFILE_DASHES, crop_sides, crop_window, metafile_average_color, metafile_dashes, metafile_miter_limit};
-pub use missing::{MAX_MISSING_GLYPHS, MissingGlyphs, metafile_text_run, missing_watermark_glyphs, watermark_run};
+pub use missing::{MAX_MISSING_GLYPHS, MissingGlyphs, metafile_text_faces, metafile_text_run, missing_watermark_glyphs, watermark_run};
 pub use notes::DECOR_STORY;
 pub(crate) use notes::NOTE_SEP_W;
 use notes::{MAX_NOTE_PASSES, footnote_pages};

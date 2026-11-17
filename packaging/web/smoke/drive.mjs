@@ -54,16 +54,29 @@ function serveFile(res, path) {
 // Static server: `/wordcraft-web/*` → the unpacked npm package (assetBase),
 // everything else → the fixture's dist. Mirrors how a consumer serves the
 // runtime files bundlers don't copy.
-function startServer(distDir, pkgDir) {
+//
+// `opts.log` (an array) receives one `{ path, served, status, bytes }` per
+// request — `path` as the page requested it, `served` the file sent for it (null
+// for none) — and `opts.miss(path)` answering true makes that request a 404 —
+// lazy.mjs uses both to measure what a page fetches and to simulate a missing
+// worker file.
+export function startServer(distDir, pkgDir, opts = {}) {
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
-    let pathname = decodeURIComponent(url.pathname);
+    const requested = decodeURIComponent(url.pathname);
+    let pathname = requested;
+    const note = (status, bytes, served = null) => opts.log?.push({ path: requested, served, status, bytes });
+    if (opts.miss?.(pathname)) {
+      note(404, 0);
+      res.writeHead(404).end("not found");
+      return;
+    }
     let root = distDir;
     if (pathname === "/favicon.ico") {
       res.writeHead(204).end();
       return;
     }
-    if (pathname.startsWith("/wordcraft-web/")) {
+    if (pkgDir && pathname.startsWith("/wordcraft-web/")) {
       pathname = pathname.slice("/wordcraft-web".length);
       root = pkgDir;
     }
@@ -74,8 +87,10 @@ function startServer(distDir, pkgDir) {
     }
     const file = existsSync(path) && statSync(path).isDirectory() ? join(path, "index.html") : path;
     if (existsSync(file) && statSync(file).isFile()) {
+      note(200, statSync(file).size, file);
       serveFile(res, file);
     } else {
+      note(404, 0);
       res.writeHead(404).end("not found");
     }
   });
@@ -91,7 +106,7 @@ export function isChromeExecutable(path) {
   return /(?:^|\/)(?:chrome|chrome-headless-shell|Google Chrome for Testing)$/.test(path);
 }
 
-function findChrome() {
+export function findChrome() {
   const candidates = [process.env.CHROME_PATH];
   if (process.platform === "darwin") {
     candidates.push("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome");
@@ -206,8 +221,9 @@ async function drive({ fixture, dist, pkg, out }) {
         /* storage or navigator overrides unavailable */
       }
     });
-    // `?proof-worker` opts into the dedicated proofing worker and makes the
-    // shell run one `check` request through it (apps/wordcraft-web web.rs).
+    // `?proof-worker` makes the shell run one known-bad `check` through the
+    // dedicated proofing worker when it starts — on the first edit, which the
+    // fixture page makes (fixtures/main.shared.js).
     await page.goto(`http://127.0.0.1:${port}/?proof-worker`, { waitUntil: "domcontentloaded", timeout: 60_000 });
 
     await page.waitForFunction(() => globalThis.__SMOKE && (globalThis.__SMOKE.phase === "done" || globalThis.__SMOKE.phase === "failed"), {
@@ -216,7 +232,7 @@ async function drive({ fixture, dist, pkg, out }) {
     });
     const smoke = await page.evaluate(() => globalThis.__SMOKE);
 
-    // The worker's smoke check runs after start() resolves; give it time.
+    // The worker's smoke check runs after the fixture's first edit; give it time.
     const workerLine = await waitForConsole(consoleLog, (m) => /proofing worker: \d+ issue\(s\) in the smoke check/.test(m.text), 90_000);
 
     // Malformed messages must get a typed `error` reply, never silence or a throw out of

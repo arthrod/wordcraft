@@ -211,6 +211,15 @@ main() {
   done
 
   node "$HERE/drive.mjs" --report --results "$RESULTS" | tee "$RESULTS/report.md"
+
+  # What a visitor's page fetches, and when (README: lazy-loading checks). Needs the
+  # standalone site, which a --tarball or npm-stage run may not have built.
+  if [[ -z "$ONLY" && -f "$STATIC_DIST/index.html" ]]; then
+    echo "=== lazy-loading checks: $STATIC_DIST"
+    node "$HERE/lazy.mjs" --site "$STATIC_DIST" --out "$RESULTS/lazy.json" >/dev/null || status=1
+  elif [[ -z "$ONLY" ]]; then
+    echo "note: $STATIC_DIST has no index.html; lazy-loading checks skipped (trunk build --release, then lazy.mjs)" >&2
+  fi
   echo "results in $RESULTS"
   return "$status"
 }
