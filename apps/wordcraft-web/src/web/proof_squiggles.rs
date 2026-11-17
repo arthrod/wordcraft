@@ -142,6 +142,9 @@ pub(crate) struct StartGate {
     /// A proofing command ran ([`PROOFING_COMMANDS`]); latched, however many commands follow
     /// before the next frame.
     asked: bool,
+    /// The document was edited, latched from [`Session::changed_since_made`]: `dirty` alone
+    /// misses an edit a synchronous save already cleared before the first frame that polls.
+    edited: bool,
 }
 
 impl StartGate {
@@ -153,13 +156,14 @@ impl StartGate {
     }
 
     /// Whether the session has been used in a way that wants squiggles: the document was edited
-    /// (`dirty` — opening a file, loading the sample or a new blank document leave it clear), or
-    /// a proofing command ran.
+    /// (`dirty`, or an edit the save already cleared — opening a file, loading the sample or a
+    /// new blank document leave both clear), or a proofing command ran.
     pub(crate) fn poll(&mut self, session: &wordcraft_engine::Session) -> Gate {
         if self.started {
             return Gate::Started;
         }
-        if !(session.dirty || self.asked) {
+        self.edited |= session.changed_since_made();
+        if !(session.dirty || self.edited || self.asked) {
             return Gate::Wait;
         }
         self.started = true;
@@ -407,6 +411,19 @@ mod tests {
         assert_eq!(gate.poll(&session), Gate::Started);
     }
 
+    /// Review finding (the poll gate): an edit a synchronous save already undid (`dirty` clear
+    /// again before the first frame polls) still starts the worker — the gate latches that the
+    /// document changed since it was made, which a save does not reset.
+    #[test]
+    fn an_edit_saved_before_the_first_poll_still_starts_the_worker() {
+        let mut gate = StartGate::default();
+        let mut session = wordcraft_engine::Session::new(Document::from_text("Ths is a tst."));
+        session.run("text.insert", &serde_json::json!({"text": "x"})).unwrap();
+        session.dirty = false; // a synchronous save before the first frame
+        assert_eq!(gate.poll(&session), Gate::Start);
+        assert_eq!(gate.poll(&session), Gate::Started);
+    }
+
     /// Review finding 7: an explicit proofing command starts the worker on a document nobody
     /// edited, heard as it runs through the app — even a `pure` one that leaves no trace in the
     /// session, and even when other commands run before the next frame. Other commands do not.
@@ -419,7 +436,7 @@ mod tests {
             let services =
                 wordcraft_ui_egui::Services { on_command: Some(Box::new(move |id: &str| hear.borrow_mut().observe(id))), ..Default::default() };
             let mut app = wordcraft_ui_egui::WordApp::new(wordcraft_engine::Session::new(Document::from_text("Ths is a tst.")), services);
-            for other in ["view.zoom", "review.newComment", "caret.docEnd"] {
+            for other in ["view.zoom", "select.all", "caret.docEnd"] {
                 let _ = app.execute(other, serde_json::json!({}));
             }
             app.session.dirty = false;

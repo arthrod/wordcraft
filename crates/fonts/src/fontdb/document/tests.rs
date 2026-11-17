@@ -133,6 +133,25 @@ fn files_of_one_length_and_name_are_told_apart_by_their_bytes() {
     }
 }
 
+/// Review finding (the kept-and-new order): files are considered in the order given, kept or
+/// not. B is embedded alone and its document closed (its file stays kept); a later document
+/// embeds `[A, B]`, two files going by the same family and style. A, first in the list, wins —
+/// B's faces waiting in the kept files must not jump it.
+#[test]
+fn a_kept_file_loses_to_an_earlier_new_file_of_the_same_family_and_style() {
+    let db = FontDb::with_font_dirs(vec![]);
+    let (a, b) = (renamed("SourceSans3-Regular.ttf", "Aaaa Sans Abc"), renamed("SourceSans3-Regular.ttf", "Bbbb Sans Abc"));
+    let first = db.add_document_fonts_scoped(vec![(b.clone(), "Same Name".to_string())], usize::MAX);
+    let b_id = first.faces[0].id;
+    db.withdraw_document_fonts(&first);
+    let both = db.add_document_fonts_scoped(vec![(a.clone(), "Same Name".to_string()), (b.clone(), "Same Name".to_string())], usize::MAX);
+    let listed: Vec<u32> = db.read_faces().iter().filter(|f| f.named("Same Name")).map(|f| f.id).collect();
+    assert_eq!(listed.len(), 1, "one face for the family and style");
+    assert_ne!(listed[0], b_id, "the earlier file's face wins, not the kept one's");
+    assert!(both.faces.iter().any(|f| f.id == listed[0]));
+    db.withdraw_document_fonts(&both);
+}
+
 #[test]
 fn new_document_files_are_kept_while_they_fit_the_room() {
     // Room for two files of one length and a smaller one. A hosted font (its faces present)

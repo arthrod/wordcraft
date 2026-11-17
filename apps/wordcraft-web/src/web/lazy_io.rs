@@ -102,7 +102,9 @@ fn with_deadline(kind: JobKind, input_bytes: usize, on_reply: impl FnOnce(Result
             JobKind::Pdf => pdf_worker::stop(),
         }
     };
-    deadline_job(queue, job_budget_ms(kind, input_bytes), what, on_reply, arm, stop)
+    // The clock the queue's absolute deadlines are in, in the milliseconds `setTimeout` takes.
+    let now = || js_sys::Date::now() as u64;
+    deadline_job(queue, job_budget_ms(kind, input_bytes), what, on_reply, arm, stop, now)
 }
 
 /// Convert between `.docx` and another format in the codecs worker, starting it on first

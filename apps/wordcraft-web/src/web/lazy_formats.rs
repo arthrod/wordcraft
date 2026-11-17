@@ -647,23 +647,28 @@ pub(crate) fn job_budget_ms(kind: JobKind, input_bytes: usize) -> u64 {
 
 /// The jobs one worker holds, oldest first, for their deadlines. A worker runs one job at a time,
 /// so a job sent behind others waits for them: its deadline is its own budget after theirs.
-/// Then a job queued behind a slow one never times out before the slow one does, and the job
-/// that times out first is the one the worker is stuck on, so stopping the worker for it is
-/// right. Plain state: the caller arms a timer with what [`JobQueue::admit`] answers.
+/// Deadlines are absolute (in the clock [`JobQueue::admit`] is given), chained on the last
+/// outstanding job's, so a job admitted after another finished early still waits out every job
+/// ahead of it and can never time out before one. Then the job that times out first is the one
+/// the worker is stuck on, so stopping the worker for it is right. Plain state: the caller arms
+/// a timer with what [`JobQueue::admit`] answers.
 #[derive(Default)]
 pub(crate) struct JobQueue {
     next: u64,
+    /// `(token, deadline)`: the deadline in the same `now_ms` the admits take.
     jobs: Vec<(u64, u64)>,
 }
 
 impl JobQueue {
-    /// A new job with its own `budget_ms`: its token, and how long from now it may take before
-    /// it is stuck (the budgets of the jobs ahead of it, then its own).
-    pub(crate) fn admit(&mut self, budget_ms: u64) -> (u64, u64) {
+    /// A new job with its own `budget_ms`, at `now_ms`: its token, and how long from `now_ms` it
+    /// may take before it is stuck. Its deadline is the last outstanding job's — `now_ms` when
+    /// none is left — plus its own budget.
+    pub(crate) fn admit(&mut self, now_ms: u64, budget_ms: u64) -> (u64, u64) {
         self.next = self.next.wrapping_add(1);
-        let ahead = self.jobs.iter().fold(0u64, |sum, (_, b)| sum.saturating_add(*b));
-        self.jobs.push((self.next, budget_ms));
-        (self.next, ahead.saturating_add(budget_ms))
+        let base = self.jobs.last().map_or(now_ms, |(_, deadline)| (*deadline).max(now_ms));
+        let deadline = base.saturating_add(budget_ms);
+        self.jobs.push((self.next, deadline));
+        (self.next, deadline.saturating_sub(now_ms))
     }
 
     /// Job `token` was answered (or failed, or timed out): it no longer holds up the others.
@@ -688,12 +693,14 @@ pub(crate) type Job = (Once<Reply>, Box<dyn FnOnce()>);
 /// The deadline starts when the second half runs, which the worker client does when it posts
 /// the job to a worker that said it is ready — never while the worker is still being fetched
 /// (that has its own bound, [`LOAD_MS`]). From then `arm` is asked to call its continuation in
-/// `due_ms` (the budgets of the jobs posted ahead of it, then its own); if the job is still
+/// `due_ms`: `now` gives the clock the queue's absolute deadlines are in, and the job's is the
+/// last outstanding job's deadline (the current time when none is left) plus its own budget, so
+/// a job admitted later can never fire before one still ahead of it. If the job is still
 /// unanswered by then it answers "did not answer" and `stop`s the stuck worker, so the next job
 /// starts a fresh one. A reply first makes the timer do nothing; a job answered before it was
 /// posted starts no clock and holds up no other job; every answer, whichever path gives it,
 /// releases the job's place in `queue`. No browser types: `lazy_io` passes `setTimeout` as
-/// `arm` and the worker's stop, and host tests drive both by hand.
+/// `arm`, the worker's stop, and the browser's clock, and host tests drive all three by hand.
 pub(crate) fn deadline_job(
     queue: Rc<RefCell<JobQueue>>,
     budget_ms: u64,
@@ -701,6 +708,7 @@ pub(crate) fn deadline_job(
     on_reply: impl FnOnce(Result<Vec<u8>, String>) + 'static,
     arm: impl FnOnce(u64, Box<dyn FnOnce()>) + 'static,
     stop: impl FnOnce() + 'static,
+    now: impl Fn() -> u64 + 'static,
 ) -> Job {
     // Set when the job is posted: until then it holds up no other job.
     let token: Rc<std::cell::Cell<Option<u64>>> = Rc::default();
@@ -717,7 +725,7 @@ pub(crate) fn deadline_job(
         if on_timeout.answered() {
             return;
         }
-        let (admitted, due_ms) = queue.borrow_mut().admit(budget_ms);
+        let (admitted, due_ms) = queue.borrow_mut().admit(now(), budget_ms);
         token.set(Some(admitted));
         let minutes = due_ms.div_ceil(60_000);
         arm(
@@ -990,19 +998,47 @@ mod tests {
     #[test]
     fn a_queued_job_waits_for_the_jobs_ahead() {
         let mut q = JobQueue::default();
-        let (a, a_due) = q.admit(120_000);
-        let (b, b_due) = q.admit(60_000);
+        let (a, a_due) = q.admit(0, 120_000);
+        let (b, b_due) = q.admit(0, 60_000);
         assert_eq!((a_due, b_due), (120_000, 180_000));
         assert!(b_due > a_due, "the job ahead times out first");
         q.finish(a);
-        let (_, c_due) = q.admit(30_000);
-        assert_eq!(c_due, 90_000, "a finished job no longer counts");
+        // Admitted after A finished: C's deadline is still B's absolute one (180_000) plus its
+        // own budget — it waits out B however early A finished, and never fires before it.
+        let (_, c_due) = q.admit(60_000, 30_000);
+        assert_eq!(c_due, 150_000);
         q.finish(b);
         q.finish(b);
         assert_eq!(q.len(), 1);
         let mut q = JobQueue::default();
-        q.admit(u64::MAX);
-        assert_eq!(q.admit(5).1, u64::MAX, "saturates");
+        q.admit(0, u64::MAX);
+        assert_eq!(q.admit(0, 5).1, u64::MAX, "saturates");
+    }
+
+    /// Review finding (the deadline bookkeeping): elapsed time and a completion between
+    /// admissions must not let a later job's timer fire before a job still outstanding ahead of
+    /// it. A admits (10) and B (100) at t=0, so B's absolute deadline is 110; A answers at t=9
+    /// and C admits then with no budget of its own. C's armed delay still reaches B's deadline:
+    /// summing the budgets left would arm it for t=109, before B. And a job admitted once every
+    /// deadline passed waits only its own budget.
+    #[test]
+    fn a_finished_job_cannot_pull_a_later_deadline_before_an_outstanding_one() {
+        let rig = Rig::default();
+        let queue: Rc<RefCell<JobQueue>> = Rc::default();
+        let (a, start_a) = rig.job(&queue, "a", 10);
+        let (_b, start_b) = rig.job(&queue, "b", 100);
+        start_a();
+        start_b();
+        rig.now.set(9);
+        assert!(a.call(Ok(b"%PDF a".to_vec())), "A answers before its deadline");
+        let (_c, start_c) = rig.job(&queue, "c", 0);
+        start_c();
+        let dues: Vec<(&str, u64)> = rig.timers.borrow().iter().map(|(n, d, _)| (*n, *d)).collect();
+        assert_eq!(dues, [("a", 10), ("b", 110), ("c", 101)], "C fires no earlier than B's deadline at t=110");
+        rig.now.set(200);
+        let (_d, start_d) = rig.job(&queue, "d", 7);
+        start_d();
+        assert_eq!(rig.timers.borrow().iter().find(|(n, _, _)| *n == "d").map(|(_, d, _)| *d), Some(7), "every deadline past: only its own budget");
     }
 
     /// Review finding (the job deadline): a job submitted while its worker is still loading is
@@ -1277,17 +1313,19 @@ mod tests {
         assert_eq!(claims.take(guess.host_tag), None);
     }
 
-    /// A job's answers, its armed timers and the worker stops, recorded for the deadline tests.
+    /// A job's answers, its armed timers, the worker stops and the clock, for the deadline tests.
     #[derive(Default)]
     struct Rig {
         answers: Rc<RefCell<Vec<(&'static str, Result<Vec<u8>, String>)>>>,
         timers: Rc<RefCell<Vec<(&'static str, u64, Box<dyn FnOnce()>)>>>,
         stops: Rc<std::cell::Cell<usize>>,
+        /// The clock the deadlines are taken on, in milliseconds.
+        now: Rc<std::cell::Cell<u64>>,
     }
 
     impl Rig {
         fn job(&self, queue: &Rc<RefCell<JobQueue>>, name: &'static str, budget_ms: u64) -> Job {
-            let (answers, timers, stops) = (self.answers.clone(), self.timers.clone(), self.stops.clone());
+            let (answers, timers, stops, now) = (self.answers.clone(), self.timers.clone(), self.stops.clone(), self.now.clone());
             deadline_job(
                 queue.clone(),
                 budget_ms,
@@ -1295,6 +1333,7 @@ mod tests {
                 move |reply| answers.borrow_mut().push((name, reply)),
                 move |due, fire| timers.borrow_mut().push((name, due, fire)),
                 move || stops.set(stops.get() + 1),
+                move || now.get(),
             )
         }
 
