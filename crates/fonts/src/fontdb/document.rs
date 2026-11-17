@@ -144,7 +144,7 @@ impl FontDb {
         for (data, name) in files {
             let key = kept.key(&data, given_name(&name));
             match kept.find(&key, &data) {
-                Some(k) => ordered.push(KnownOrFresh::Known(k.faces.iter().cloned().collect())),
+                Some(k) => ordered.push(KnownOrFresh::Known(k.faces.to_vec())),
                 None if data.len() > room => {}
                 None => {
                     let data = Arc::new(data);
