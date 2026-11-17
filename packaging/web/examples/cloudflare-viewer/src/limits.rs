@@ -16,6 +16,10 @@ pub const MAX_INFLATED_BYTES: u64 = 24 << 20;
 /// Most entries a package may declare. A real `.docx` has tens; the reader's own bound is 20,000.
 pub const MAX_ZIP_ENTRIES: u64 = 2_000;
 
+/// Most pages one viewer page lists, each an image the browser fetches when the reader nears
+/// it. About 150 bytes of HTML a page; past this the page links to the next ones.
+pub const MAX_LISTED_PAGES: usize = 1_000;
+
 /// Pages rendered inline in an upload result. Each one is a PNG in the HTML; past this the page
 /// says how many were left out.
 pub const MAX_INLINE_PAGES: usize = 12;

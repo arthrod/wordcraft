@@ -12,7 +12,7 @@ It runs beside the static site (`dist/web`) as one deployment: the Worker answer
 
 | Route | Answer |
 |---|---|
-| `GET /view?doc=samples/welcome.docx&page=1&scale=1` | The viewer page for a document of this deployment: the page image (with its `width` and `height`), "Page N of M", previous and next links, a link to the site's own page for the document (`/?doc=…`, which has the editor's Edit button) and the upload form. `page` defaults to 1, `scale` to 1. |
+| `GET /view?doc=samples/welcome.docx&page=1&scale=1` | The viewer page for a document of this deployment: the document from page `page` on as one scroll of page images (each with its `width` and `height`; the first is fetched with the page, the others by the browser as the reader nears them, `loading="lazy"`, at most 1,000 on one page with a link to the next ones), "Pages N–M of T", a link to the page before, a link to the site's own page for the document (`/?doc=…`, which has the editor's Edit button) and the upload form. `page` defaults to 1, `scale` to 1. |
 | `GET /view/page.png?doc=…&page=N&scale=S` | One page as `image/png`. |
 | `HEAD` on either `GET` route | The `GET`'s status and headers, no body and no `Content-Length`. The document is opened (for the page count and the page's size) but no page is drawn or encoded: measured on `wrangler dev`, 7 ms against 150 ms for the `GET` of page 1 at scale 2. |
 | `GET /view` (no `doc`) | The upload form: a file, an optional password, a submit button. |

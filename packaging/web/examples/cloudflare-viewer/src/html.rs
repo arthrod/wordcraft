@@ -51,28 +51,53 @@ fn scale_value(scale: f32) -> String {
     format!("{scale}")
 }
 
-/// The viewer page for page `page` (1-based) of the deployed document `doc`, which has `pages`
-/// pages; the image is `width`×`height` pixels at `scale`.
-pub fn viewer_page(doc: &DocPath, page: u32, pages: usize, width: u32, height: u32, scale: f32) -> String {
+/// One page image of the viewer page: its 1-based number and its size in pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageBox {
+    pub number: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// The viewer page of the deployed document `doc`, which has `pages` pages, from page `page`
+/// (1-based) on: `shown` are the pages it shows, one under the other, each an image of the
+/// PNG route at `scale` with its size (so nothing moves as they arrive). The first is fetched
+/// with the page; the browser fetches each of the others as the reader scrolls near it
+/// (`loading="lazy"`), so a long document is read by scrolling and costs only the pages seen.
+pub fn viewer_page(doc: &DocPath, page: u32, pages: usize, shown: &[PageBox], scale: f32) -> String {
     // `doc` is validated: letters, digits, `._-/` only, so it goes into URLs and attributes as is.
     let (d, s) = (doc.as_str(), scale_value(scale));
     let name = escape(doc.file_name());
     let link = |n: u32, label: &str| format!("<a href=\"/view?doc={d}&amp;page={n}&amp;scale={s}\">{label}</a>");
+    let last = shown.last().map_or(page, |b| b.number);
     let mut nav = String::new();
     if page > 1 {
         nav.push_str(&link(page - 1, "Previous"));
         nav.push_str(" · ");
     }
-    nav.push_str(&format!("Page {page} of {pages}"));
-    if usize::try_from(page).is_ok_and(|p| p < pages) {
-        nav.push_str(" · ");
-        nav.push_str(&link(page.saturating_add(1), "Next"));
+    if last > page {
+        nav.push_str(&format!("Pages {page}–{last} of {pages}"));
+    } else {
+        nav.push_str(&format!("Page {page} of {pages}"));
     }
-    format!(
-        "{}<nav>{nav} · <a href=\"/?doc={d}\">Open in the editor</a> · <a href=\"/view\">Upload</a></nav>\
-<img src=\"/view/page.png?doc={d}&amp;page={page}&amp;scale={s}\" width=\"{width}\" height=\"{height}\" alt=\"Page {page} of {name}\"></html>",
+    let more = usize::try_from(last).is_ok_and(|l| l < pages).then(|| link(last.saturating_add(1), "More pages"));
+    let mut out = format!(
+        "{}<nav>{nav} · <a href=\"/?doc={d}\">Open in the editor</a> · <a href=\"/view\">Upload</a></nav>",
         head(&format!("{} – page {page} of {pages}", doc.file_name())),
-    )
+    );
+    for (i, b) in shown.iter().enumerate() {
+        let n = b.number;
+        let wait = if i == 0 { "" } else { " loading=\"lazy\" decoding=\"async\"" };
+        out.push_str(&format!(
+            "<img id=\"page-{n}\"{wait} src=\"/view/page.png?doc={d}&amp;page={n}&amp;scale={s}\" width=\"{}\" height=\"{}\" alt=\"Page {n} of {name}\">",
+            b.width, b.height
+        ));
+    }
+    if let Some(more) = more {
+        out.push_str(&format!("<nav>{more}</nav>"));
+    }
+    out.push_str("</html>");
+    out
 }
 
 /// The upload form. `notice` is a sentence of the Worker's own (never anything from a request).
@@ -173,27 +198,55 @@ pub(crate) mod tests {
         assert_eq!(escape("plain"), "plain");
     }
 
+    fn boxes(numbers: std::ops::RangeInclusive<u32>) -> Vec<PageBox> {
+        numbers.map(|number| PageBox { number, width: 612, height: 792 }).collect()
+    }
+
     #[test]
     fn viewer_page_is_small_inert_and_complete() {
-        let html = viewer_page(&sample(), 2, 3, 612, 792, 1.0);
+        let html = viewer_page(&sample(), 2, 3, &boxes(2..=3), 1.0);
         assert_inert(&html);
         assert!(html.len() < 2_000, "{} bytes", html.len());
         assert!(html.starts_with("<!doctype html>"));
         // An empty icon, so the browser does not ask the server for /favicon.ico.
         assert!(html.contains(r#"<link rel="icon" href="data:,">"#), "{html}");
-        // The image, with its size so the layout doesn't shift, pointing at the PNG route.
-        assert!(html.contains(r#"<img src="/view/page.png?doc=samples/welcome.docx&amp;page=2&amp;scale=1" width="612" height="792""#), "{html}");
-        // Page number and count, previous and next, the editor.
-        assert!(html.contains("Page 2 of 3"), "{html}");
+        // The first image, with its size so the layout doesn't shift, pointing at the PNG route.
+        assert!(
+            html.contains(r#"<img id="page-2" src="/view/page.png?doc=samples/welcome.docx&amp;page=2&amp;scale=1" width="612" height="792""#),
+            "{html}"
+        );
+        // The pages shown and the count, the page before, the editor.
+        assert!(html.contains("Pages 2–3 of 3"), "{html}");
         assert!(html.contains(r#"href="/view?doc=samples/welcome.docx&amp;page=1&amp;scale=1""#), "{html}");
-        assert!(html.contains(r#"href="/view?doc=samples/welcome.docx&amp;page=3&amp;scale=1""#), "{html}");
         // The site's own page for the same document (viewer first, with its Edit button).
         assert!(html.contains(r#"href="/?doc=samples/welcome.docx""#), "{html}");
         // No link before the first page or past the last.
-        let first = viewer_page(&sample(), 1, 1, 612, 792, 1.25);
+        let first = viewer_page(&sample(), 1, 1, &boxes(1..=1), 1.25);
         assert_inert(&first);
+        assert!(first.contains("Page 1 of 1"), "{first}");
         assert!(!first.contains("page=0") && !first.contains("page=2"), "{first}");
         assert!(first.contains("scale=1.25"), "{first}");
+    }
+
+    /// The pages follow one another down one page, so the reader scrolls instead of asking for
+    /// each: the first is fetched at once, the others when the browser comes near them.
+    #[test]
+    fn viewer_page_lists_the_following_pages_for_the_browser_to_fetch_as_they_near() {
+        let html = viewer_page(&sample(), 1, 550, &boxes(1..=550), 1.0);
+        assert_inert(&html);
+        assert_eq!(html.matches("<img ").count(), 550);
+        assert_eq!(html.matches(r#" loading="lazy""#).count(), 549, "every page but the first waits");
+        let first = html.find(r#"<img id="page-1" "#).unwrap();
+        let first_tag = &html[first..first + html[first..].find('>').unwrap()];
+        assert!(!first_tag.contains("lazy"), "{first_tag}");
+        assert!(html.contains(r#"<img id="page-550" loading="lazy" decoding="async" src="/view/page.png?doc=samples/welcome.docx&amp;page=550&amp;scale=1" width="612" height="792" alt="Page 550 of welcome.docx">"#), "{html}");
+        assert!(html.contains("Pages 1–550 of 550"), "{html}");
+        assert!(html.len() < 550 * 200 + 2_000, "{} bytes", html.len());
+        // A list that stops before the end links to the page after it; a whole one does not.
+        assert!(!html.contains("More pages"), "{html}");
+        let part = viewer_page(&sample(), 1, 550, &boxes(1..=100), 1.0);
+        assert!(part.contains(r#"<a href="/view?doc=samples/welcome.docx&amp;page=101&amp;scale=1">More pages</a>"#), "{part}");
+        assert!(part.contains("Pages 1–100 of 550"), "{part}");
     }
 
     #[test]

@@ -29,7 +29,7 @@ use futures_util::StreamExt;
 use worker::{ByteStream, Context, Env, Headers, Method, Request, Response, Url, event};
 
 use crate::document::OpenError;
-use crate::limits::{ASSET_CACHE_CONTROL, DEFAULT_SCALE, MAX_BODY_BYTES, MAX_INLINE_PAGES, MAX_MANIFEST_BYTES, MAX_RESPONSE_BYTES};
+use crate::limits::{ASSET_CACHE_CONTROL, DEFAULT_SCALE, MAX_BODY_BYTES, MAX_INLINE_PAGES, MAX_LISTED_PAGES, MAX_MANIFEST_BYTES, MAX_RESPONSE_BYTES};
 use crate::params::{DocPath, ParamError, ViewQuery};
 
 const HTML_TYPE: &str = "text/html; charset=utf-8";
@@ -130,7 +130,16 @@ async fn view_page(env: &Env, url: &Url) -> worker::Result<Response> {
         Ok(px) => px,
         Err(e) => return error_response(e.status(), "The page can't be drawn", &e.to_string()),
     };
-    html_response(200, caching, html::viewer_page(doc, query.page, session.page_count(), width, height, query.scale))
+    // The pages after it follow on the same page, each sized the same way; one the core would
+    // refuse is left out (its image would answer with that refusal).
+    let mut shown = vec![html::PageBox { number: query.page, width, height }];
+    let pages = u32::try_from(session.page_count()).unwrap_or(u32::MAX);
+    for next in (index.saturating_add(1)..pages).take(MAX_LISTED_PAGES.saturating_sub(1)) {
+        if let Ok((width, height)) = document::page_raster(&session, next, query.scale) {
+            shown.push(html::PageBox { number: next.saturating_add(1), width, height });
+        }
+    }
+    html_response(200, caching, html::viewer_page(doc, query.page, session.page_count(), &shown, query.scale))
 }
 
 /// `GET /view/page.png`: one page of `doc` as a PNG. For a `head` request, the status and headers
