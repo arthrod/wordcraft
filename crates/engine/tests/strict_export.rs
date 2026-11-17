@@ -322,3 +322,120 @@ fn strict_off_gives_the_same_png_as_before_even_with_a_missing_character() {
     assert_eq!(png[0], png[1]);
     std::fs::remove_dir_all(d).unwrap();
 }
+
+/// `pdf_faces` lists the faces a PDF of the document draws its text in, from the export's own
+/// layout: the face each run's font resolves to, once each, and no face it never draws in.
+#[test]
+fn pdf_faces_lists_the_faces_the_text_is_drawn_in() {
+    let opts = wordcraft_engine::io::ExportOptions::default();
+    let mut s = Session::new(Document::from_text("Quarterly figures"));
+    let primary = wordcraft_fonts::word::resolve(&s.doc.settings.minor_font, false, false).face;
+    let drawn = (primary.get().family.clone(), primary.get().style.clone());
+    let faces = wordcraft_engine::strict::pdf_faces(&s.doc, &opts);
+    assert!(!faces.cut);
+    assert_eq!(faces.faces, std::slice::from_ref(&drawn), "one font, one face");
+    // A second family on part of the text: both are drawn in, each listed once.
+    let other = if drawn.0 == "Source Serif 4" { "Source Sans 3" } else { "Source Serif 4" };
+    s.run("select.text", &json!({"text": "figures"})).unwrap();
+    s.run("format.font", &json!({"name": other})).unwrap();
+    let faces = wordcraft_engine::strict::pdf_faces(&s.doc, &opts).faces;
+    assert!(faces.contains(&drawn) && faces.iter().any(|(f, _)| *f == other), "{faces:?}");
+    assert_eq!(faces.len(), 2, "{faces:?}");
+    // A blank document draws no text.
+    assert_eq!(wordcraft_engine::strict::pdf_faces(&Document::default(), &opts), Default::default());
+}
+
+/// Review finding (gate 3, F1): the list stopped at its bound in silence, so a face past it
+/// looked unused and a strict export decided from the cut list. Past the bound the list now
+/// says it was cut; at the bound it is whole.
+#[test]
+fn pdf_faces_says_when_its_list_was_cut() {
+    use wordcraft_engine::strict::pdf_faces_within;
+    let opts = wordcraft_engine::io::ExportOptions::default();
+    let mut s = Session::new(Document::from_text("Quarterly figures"));
+    let primary = wordcraft_fonts::word::resolve(&s.doc.settings.minor_font, false, false).face;
+    let other = if primary.get().family == "Source Serif 4" { "Source Sans 3" } else { "Source Serif 4" };
+    s.run("select.text", &json!({"text": "figures"})).unwrap();
+    s.run("format.font", &json!({"name": other})).unwrap();
+    let whole = pdf_faces_within(&s.doc, &opts, 2);
+    assert_eq!((whole.faces.len(), whole.cut), (2, false), "two faces fit a bound of two");
+    let cut = pdf_faces_within(&s.doc, &opts, 1);
+    assert_eq!((cut.faces.len(), cut.cut), (1, true), "the second face is left out, and the list says so");
+    assert_eq!(cut.faces[0], whole.faces[0]);
+    assert_eq!(pdf_faces_within(&Document::default(), &opts, 0), Default::default(), "nothing drawn, nothing cut");
+}
+
+/// An EMF file of `records`, with a 25 mm frame and 1000 device pixels across.
+fn emf_file(records: &[Vec<u8>]) -> Vec<u8> {
+    let le32 = |vals: &[i32]| -> Vec<u8> { vals.iter().flat_map(|v| v.to_le_bytes()).collect() };
+    let mut h = vec![0u8; 88];
+    h[0..4].copy_from_slice(&1u32.to_le_bytes());
+    h[4..8].copy_from_slice(&88u32.to_le_bytes());
+    h[8..24].copy_from_slice(&le32(&[0, 0, 100, 100]));
+    h[24..40].copy_from_slice(&le32(&[0, 0, 2500, 2500]));
+    h[40..44].copy_from_slice(&0x464D_4520u32.to_le_bytes());
+    h[72..88].copy_from_slice(&le32(&[1000, 1000, 250, 250]));
+    [h, records.concat()].concat()
+}
+
+/// One EMF record of type `typ` with little-endian i32 `fields`.
+fn emf_rec(typ: u32, fields: &[i32]) -> Vec<u8> {
+    let mut v = typ.to_le_bytes().to_vec();
+    let payload: Vec<u8> = fields.iter().flat_map(|f| f.to_le_bytes()).collect();
+    v.extend(((8 + payload.len()) as u32).to_le_bytes());
+    v.extend(payload);
+    v
+}
+
+/// An EMF picture that draws `text` in the font named `font` (EXTCREATEFONTINDIRECTW in slot 1,
+/// SELECTOBJECT, SETTEXTCOLOR, EXTTEXTOUTW at (5, 40)), then EOF.
+fn emf_with_text(font: &str, text: &str) -> Vec<u8> {
+    let mut logfont = [82i32.to_le_bytes(), 104u32.to_le_bytes(), 1i32.to_le_bytes(), (-20i32).to_le_bytes()].concat();
+    logfont.extend([0i32, 0, 0, 400, 0, 0].iter().flat_map(|v| v.to_le_bytes()));
+    let mut name: Vec<u8> = font.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    name.resize(64, 0);
+    logfont.extend(name);
+    let units: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let padded = units.len().div_ceil(4) * 4;
+    let mut out = [84u32.to_le_bytes(), ((76 + padded) as u32).to_le_bytes()].concat();
+    out.extend([0i32, 0, 100, 100, 1, 0, 0, 5, 40, text.encode_utf16().count() as i32, 76, 0, 0, 0, 0, 0, 0].iter().flat_map(|v| v.to_le_bytes()));
+    out.extend(units);
+    out.resize(76 + padded, 0);
+    emf_file(&[logfont, emf_rec(37, &[1]), emf_rec(24, &[0]), out, emf_rec(14, &[0; 3])])
+}
+
+/// Review finding (gate 3, F2): the PDF draws the text inside a metafile picture as text, in
+/// the face the picture's own font name resolves to, and the page picture behind every page
+/// too; `pdf_faces` walked only the glyph runs of the display list, so a face only such a
+/// picture draws in was missing and a strict host could leave its copy behind. Both are listed
+/// now, and a document without the picture still does not list the face.
+#[test]
+fn pdf_faces_lists_the_faces_a_metafile_pictures_text_is_drawn_in() {
+    use wordcraft_doc::{InlineObject, Pos};
+    let opts = wordcraft_engine::io::ExportOptions::default();
+    let plain = Document::from_text("Quarterly figures");
+    let primary = wordcraft_fonts::word::resolve(&plain.settings.minor_font, false, false).face;
+    let font = if primary.get().family == "Source Serif 4" { "Source Sans 3" } else { "Source Serif 4" };
+    let listed = |d: &Document| wordcraft_engine::strict::pdf_faces(d, &opts).faces.iter().any(|(f, _)| f == font);
+    assert!(!listed(&plain), "the text alone is not drawn in {font}");
+
+    let mut inline = plain.clone();
+    let media = inline.add_media(emf_with_text(font, "Cell42"), "emf");
+    let picture = InlineObject::Image {
+        media,
+        w: 70.0,
+        h: 70.0,
+        alt: String::new(),
+        float: Default::default(),
+        crop: [0.0; 4],
+        fx: Default::default(),
+        ole: None,
+    };
+    inline.insert_object(&Pos::body(0, 0), picture, &Default::default()).unwrap();
+    assert!(listed(&inline), "an inline metafile's text is drawn in {font}");
+
+    let mut background = plain.clone();
+    let media = background.add_media(emf_with_text(font, "Cell42"), "emf");
+    background.settings.page_picture = Some(wordcraft_doc::PagePicture { media, ..Default::default() });
+    assert!(listed(&background), "the page picture's text is drawn in {font}");
+}

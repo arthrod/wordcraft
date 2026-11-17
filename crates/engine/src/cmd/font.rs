@@ -23,6 +23,10 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("font.list", "Added Fonts", "Home › Font", list).params(r#"{"all"?: bool (also every available family)}"#).pure(),
         CommandSpec::new("font.remove", "Remove Added Font", "Home › Font", remove).params(r#"{"family": string}"#).pure(),
         CommandSpec::new("font.loadSystem", "Load System Installed Fonts…", "Home › Font", load_system).pure(),
+        CommandSpec::new("font.installPack", "Install Font Packs", "Home › Font", install_pack)
+            .params(r#"{"families"?: string[] (only these families' pack faces; default: every pack face)} — downloads the faces the browser build doesn't bundle from the app's own fonts/ directory; enabled only in the browser, where font packs exist. Opens nothing."#)
+            .pure()
+            .when(pack_available),
         CommandSpec::new("font.missing", "Missing Fonts", "Status Bar", missing)
             .params(r#"{} → {"missing": [{"font": string, "shownAs": [string] (the families drawn instead), "metricCompatible": bool (its substitute measures like the font)}]} — the text the current view shows"#)
             .pure(),
@@ -31,6 +35,21 @@ pub fn specs() -> Vec<CommandSpec> {
 
 fn load_system(s: &mut Session, _v: &Value) -> CmdResult {
     s.push_ui_request(json!({"open": "loadSystemFonts"}));
+    Ok(json!({"pending": true}))
+}
+
+/// Font packs exist only on the browser build; every face the desktop needs is bundled.
+fn pack_available(_: &Session) -> Option<&'static str> {
+    if cfg!(target_arch = "wasm32") { None } else { Some("Font packs aren't available outside the browser") }
+}
+
+fn install_pack(s: &mut Session, v: &Value) -> CmdResult {
+    let families: Vec<String> = v
+        .get("families")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|f| f.as_str().filter(|f| !f.is_empty())).take(64).map(|f| f.chars().take(256).collect()).collect())
+        .unwrap_or_default();
+    s.push_ui_request(json!({"open": "installFontPacks", "families": families}));
     Ok(json!({"pending": true}))
 }
 

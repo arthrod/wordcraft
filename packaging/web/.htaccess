@@ -2,8 +2,40 @@
 AddType application/wasm .wasm
 AddType text/javascript .js
 
+# Serve the precompressed <name>.wasm.br to clients that offer Brotli (plan §2.2). The .wasm
+# itself stays untouched — fallback clients and Range requests get the plain asset. The rewrite
+# runs only with mod_headers loaded: its FilesMatch below is what labels the .br payload
+# Content-Encoding: br, so without it the plain .wasm is served rather than br bytes the
+# browser can't decode. (mod_mime's AddEncoding can't be scoped to .wasm.br — it would also
+# mark the .ttf.br font packs, which the app downloads and decompresses itself.)
+<IfModule mod_rewrite.c>
+  <IfModule mod_headers.c>
+    RewriteEngine On
+    # `br` only counts with a quality above zero: `br;q=0` / `br;q=0.000` must fall back to
+    # the plain .wasm, so the token's optional q value must contain a nonzero digit.
+    RewriteCond %{HTTP:Accept-Encoding} "(^|,)\s*br\s*(;\s*q=\s*0*\.?0*[1-9][0-9]*)?\s*(,|$)" [NC]
+    RewriteCond %{HTTP:Range} !^.
+    RewriteCond %{REQUEST_FILENAME}.br -f
+    RewriteRule ^(.+\.wasm)$ $1.br [L]
+    # The .br payload must not be gzip'd by mod_deflate below. The rewrite above lands here
+    # after an internal redirect (where [E=] vars would gain a REDIRECT_ prefix mod_deflate
+    # can't see), and Request_URI still shows the original .wasm, so SetEnvIf can't match
+    # either. Rewriting to `-` sets the env var on this final pass without another redirect;
+    # it also covers clients that ask for the .wasm.br sidecar directly.
+    RewriteRule \.wasm\.br$ - [E=no-gzip:1]
+  </IfModule>
+</IfModule>
+
 <IfModule mod_deflate.c>
   AddOutputFilterByType DEFLATE application/wasm text/javascript text/html
+</IfModule>
+
+<IfModule mod_headers.c>
+  <FilesMatch "\.wasm\.br$">
+    Header set Content-Type "application/wasm"
+    Header set Content-Encoding "br"
+    Header set Vary "Accept-Encoding"
+  </FilesMatch>
 </IfModule>
 
 <IfModule mod_headers.c>
@@ -12,5 +44,44 @@ AddType text/javascript .js
   </FilesMatch>
   <FilesMatch "^index\.html$">
     Header set Cache-Control "no-cache"
+  </FilesMatch>
+  # Trunk keeps dedicated-worker names un-hashed (wordcraft-worker-proof{,_loader}.js,
+  # _bg.wasm) because they must be named at runtime, so the generic rule above must not pin
+  # them for a year — same exception as in packaging/web/_headers. `no-cache` (S4), not a
+  # short max-age window: the hashed main module updates at once on a deploy, and a cached
+  # worker older than the module would fail the protocol version check for the window's whole
+  # duration. One revalidation per load (a 304 when unchanged) closes the window entirely.
+  # FilesMatch blocks apply in order, so this later `Header set` overrides the generic one.
+  <FilesMatch "^wordcraft-worker-.*\.(wasm\.br|wasm|js)$">
+    Header set Cache-Control "no-cache"
+  </FilesMatch>
+  # The editor (wordcraft-web{.js,_loader.js,_bg.wasm}) has un-hashed names too since the
+  # viewer-first page (plan 10.3): the page module fetches it on an edit action, so it must be
+  # named at run time. A year-pinned editor would outlive every deploy: `no-cache`, as in
+  # _headers. (The page module, wordcraft-viewer-web-<hash>, stays immutable above.)
+  <FilesMatch "^wordcraft-web(\.js|_loader\.js|_bg\.wasm|_bg\.wasm\.br)$">
+    Header set Cache-Control "no-cache"
+  </FilesMatch>
+</IfModule>
+
+# By directory, after the by-name rules above so these win (Apache 2.4 `<If>` is merged last).
+# snippets/: wasm-bindgen's `snippets/<crate>-<id>/inlineN.js` names carry the crate's identity,
+# not a hash of the file, so the `\.(wasm|js)$` rule above must not pin them for a year.
+# i18n/ and samples/: un-hashed names, one hour then revalidate, as in _headers.
+<IfModule mod_headers.c>
+  <If "%{REQUEST_URI} =~ m#/snippets/#">
+    Header set Cache-Control "no-cache"
+  </If>
+  <If "%{REQUEST_URI} =~ m#/(i18n|samples)/#">
+    Header set Cache-Control "public, max-age=3600, must-revalidate"
+  </If>
+</IfModule>
+
+<IfModule mod_headers.c>
+  <FilesMatch "^(manifest\.json)$">
+    Header set Cache-Control "no-cache"
+  </FilesMatch>
+  <FilesMatch "\.ttf\.br$">
+    Header set Cache-Control "public, max-age=31536000, immutable"
   </FilesMatch>
 </IfModule>

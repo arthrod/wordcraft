@@ -726,16 +726,29 @@ fn inline_objects(ctx: &LineContext<'_, '_, '_>, out: &mut Vec<Draw>) {
 }
 
 fn proofing_marks(ctx: &LineContext<'_, '_, '_>, out: &mut Vec<Draw>) {
-    for (start, end, grammar) in &ctx.pl.issues {
-        if *end <= ctx.line.start || *start >= ctx.line.stop {
+    // Worker-found spans (§3.2) draw exactly where inline issues draw: same offsets (both are
+    // proof-text bytes), same marks. Only a paragraph the inline check left empty takes them —
+    // a build with `inline-proof` has already checked it, and its overlays are stale by design.
+    let overlays = if ctx.pl.issues.is_empty() {
+        let text_len = ctx.pl.text_len;
+        Some(crate::proof_overlay::spans_for(ctx.story, ctx.path).filter_map(move |(a, b, g)| {
+            let (a, b) = (a as usize, b as usize);
+            (a < b && b <= text_len).then_some((a, b, g))
+        }))
+    } else {
+        None
+    };
+    let inline = ctx.pl.issues.iter().map(|(a, b, g)| (*a, *b, *g));
+    for (start, end, grammar) in overlays.into_iter().flatten().chain(inline) {
+        if end <= ctx.line.start || start >= ctx.line.stop {
             continue;
         }
-        for (x0, x1) in ctx.pl.x_spans(ctx.li, (*start).max(ctx.line.start), (*end).min(ctx.line.stop)) {
+        for (x0, x1) in ctx.pl.x_spans(ctx.li, start.max(ctx.line.start), end.min(ctx.line.stop)) {
             if x1 - x0 < 1.0 {
                 continue;
             }
             let y = ctx.base + 2.5;
-            let color = if *grammar { Rgb(0x2B, 0x57, 0xC0) } else { Rgb(0xE0, 0x24, 0x24) };
+            let color = if grammar { Rgb(0x2B, 0x57, 0xC0) } else { Rgb(0xE0, 0x24, 0x24) };
             out.push(Draw::Line {
                 x0: ctx.x + x0,
                 y0: y,
@@ -743,7 +756,7 @@ fn proofing_marks(ctx: &LineContext<'_, '_, '_>, out: &mut Vec<Draw>) {
                 y1: y,
                 width: 0.8,
                 color,
-                stroke: if *grammar { Stroke::Double } else { Stroke::Wave },
+                stroke: if grammar { Stroke::Double } else { Stroke::Wave },
                 alpha: ctx.alpha,
                 text_bg: None,
             });

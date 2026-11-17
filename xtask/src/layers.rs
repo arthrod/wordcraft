@@ -36,6 +36,8 @@ pub const TABLE: &[(&str, Class)] = &[
     ("geom", Class::Layer(0)),
     ("control-key", Class::Standalone),
     ("doc", Class::Layer(1)),
+    // The mapping between `doc` and the shared craft-wordmodel, for the L2 format adapters.
+    ("model-bridge", Class::Layer(1)),
     ("fonts", Class::Layer(1)),
     ("layout", Class::Layer(2)),
     ("docx", Class::Layer(2)),
@@ -48,10 +50,21 @@ pub const TABLE: &[(&str, Class)] = &[
     ("zotero", Class::Layer(5)),
     ("ui-egui", Class::Layer(6)),
     ("testkit", Class::Testkit),
+    // The worker wire protocol: pure Rust + serde, no workspace crates (plan §3.1).
+    ("worker-proto", Class::Standalone),
     // apps and tooling
     ("wordcraft", Class::Exempt),
     ("cli", Class::Exempt),
     ("web", Class::Exempt),
+    // Dedicated web workers use wasm-bindgen, which is forbidden below L6: they are apps (§3.1).
+    ("worker-proof", Class::Exempt),
+    ("worker-codecs", Class::Exempt),
+    ("worker-pdf", Class::Exempt),
+    ("worker-viewer", Class::Exempt),
+    // The viewer-first page module: web-sys glue around the worker protocol, an app.
+    ("viewer-web", Class::Exempt),
+    // The view-only module exposes its handle through wasm-bindgen, like the workers: an app.
+    ("viewer", Class::Exempt),
     ("xtask", Class::Exempt),
 ];
 
@@ -59,7 +72,7 @@ pub const TABLE: &[(&str, Class)] = &[
 /// The L0 foundation is a small chain: `raster` builds on `color` and
 /// `geom`, which the §3 diagram draws on one line. The GPU backend (`gpu`)
 /// reuses the CPU reference (`compose`) for LUTs and parity tests.
-pub const INTRA_LAYER_ORDER: &[&[&str]] = &[&["doc", "fonts"], &["docx", "formats"]];
+pub const INTRA_LAYER_ORDER: &[&[&str]] = &[&["doc", "fonts"], &["doc", "model-bridge"], &["docx", "formats"]];
 
 fn intra_layer_allowed(from: &str, to: &str) -> bool {
     let (from, to) = (short_name(from), short_name(to));
@@ -73,7 +86,11 @@ fn intra_layer_allowed(from: &str, to: &str) -> bool {
 /// Entries ending in `*` are prefixes.
 pub const UI_CRATES: &[&str] = &["egui", "eframe", "winit", "egui_kittest", "rfd", "bevy*"];
 
-/// First layer allowed to use UI crates.
+/// External crates that bind directly to browser / JS host APIs.
+/// Entries ending in `*` are prefixes.
+pub const WEB_CRATES: &[&str] = &["js-sys", "web-sys", "wasm-bindgen*"];
+
+/// First layer allowed to use UI or browser host crates.
 pub const UI_MIN_LAYER: u8 = 6;
 
 pub fn short_name(pkg: &str) -> &str {
@@ -85,11 +102,19 @@ pub fn classify(pkg: &str) -> Option<Class> {
     TABLE.iter().find(|(n, _)| *n == s).map(|(_, c)| *c)
 }
 
-fn is_ui_crate(name: &str) -> bool {
-    UI_CRATES.iter().any(|p| match p.strip_suffix('*') {
+fn matches_crate_pattern(list: &[&str], name: &str) -> bool {
+    list.iter().any(|p| match p.strip_suffix('*') {
         Some(prefix) => name.starts_with(prefix),
         None => name == *p,
     })
+}
+
+fn is_ui_crate(name: &str) -> bool {
+    matches_crate_pattern(UI_CRATES, name)
+}
+
+fn is_web_crate(name: &str) -> bool {
+    matches_crate_pattern(WEB_CRATES, name)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +145,7 @@ pub enum Violation {
     StandaloneHasWorkspaceDep { krate: String, dep: String },
     TestkitAsNormalDep { krate: String },
     UiBelowL6 { krate: String, dep: String, layer: u8 },
+    WebBelowL6 { krate: String, dep: String, layer: u8 },
 }
 
 impl std::fmt::Display for Violation {
@@ -139,6 +165,9 @@ impl std::fmt::Display for Violation {
             }
             Violation::UiBelowL6 { krate, dep, layer } => {
                 write!(f, "{krate} (L{layer}) depends on UI crate `{dep}`; UI toolkits are only allowed in L6+")
+            }
+            Violation::WebBelowL6 { krate, dep, layer } => {
+                write!(f, "{krate} (L{layer}) depends on browser crate `{dep}`; JS/WASM host bindings are only allowed in L6+")
             }
         }
     }
@@ -187,6 +216,8 @@ pub fn check(crates: &[Crate]) -> Vec<Violation> {
                 }
             } else if layer < UI_MIN_LAYER && is_ui_crate(&d.name) {
                 out.push(Violation::UiBelowL6 { krate: c.name.clone(), dep: d.name.clone(), layer });
+            } else if layer < UI_MIN_LAYER && is_web_crate(&d.name) {
+                out.push(Violation::WebBelowL6 { krate: c.name.clone(), dep: d.name.clone(), layer });
             }
         }
     }
@@ -288,6 +319,15 @@ mod tests {
         }
         assert!(check(&[c("wordcraft-engine", &[("egui_extras_not", Normal, false)])]).is_empty());
         assert!(!check(&[c("wordcraft-mcp", &[("winit", Normal, false)])]).is_empty());
+    }
+
+    #[test]
+    fn web_crates_below_l6_flagged() {
+        for dep in ["js-sys", "web-sys", "wasm-bindgen", "wasm-bindgen-futures"] {
+            let v = check(&[c("wordcraft-layout", &[(dep, Normal, false)])]);
+            assert!(matches!(v[..], [Violation::WebBelowL6 { layer: 2, .. }]), "{dep}");
+        }
+        assert!(check(&[c("wordcraft-ui-egui", &[("wasm-bindgen", Normal, false), ("js-sys", Normal, false)])]).is_empty());
     }
 
     #[test]

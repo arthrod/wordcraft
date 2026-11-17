@@ -280,6 +280,7 @@ fn content(app: &mut WordApp, ui: &mut egui::Ui, t: &Tokens, preview_on_hover: b
             && let Some(f) = widgets::take_hover(ui.ctx())
             && f != crate::widgets::ADD_FONT
             && f != crate::widgets::LOAD_SYSTEM_FONTS
+            && f != crate::widgets::INSTALL_FONT_PACKS
         {
             app.canvas.command_preview = Some(("format.font".to_string(), json!({"name": app.previews.font_stored(&f)})));
         }
@@ -288,6 +289,8 @@ fn content(app: &mut WordApp, ui: &mut egui::Ui, t: &Tokens, preview_on_hover: b
                 app.run("font.add", json!({}))
             } else if f == crate::widgets::LOAD_SYSTEM_FONTS {
                 app.run("font.loadSystem", json!({}))
+            } else if f == crate::widgets::INSTALL_FONT_PACKS {
+                app.run("font.installPack", json!({}))
             } else {
                 let f = app.previews.font_stored(&f);
                 app.run("format.font", json!({"name": f}))

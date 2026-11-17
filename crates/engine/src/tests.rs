@@ -2,6 +2,7 @@
 // craft-libs, which a dependency's tests can't share); its install helper resolves this parent import.
 use wordcraft_proof::cs::install_dictionary;
 mod czech_test_dict;
+mod wasm_slim;
 
 use serde_json::json;
 use std::sync::Arc;
@@ -1416,6 +1417,7 @@ fn copying_bold_text_puts_html_on_the_clipboard() {
 }
 
 /// Bold and italic of a paragraph's character, in a document.
+#[cfg(feature = "extra-formats")]
 fn emphasis_at(d: &wordcraft_doc::Document, block: usize, off: usize) -> (bool, bool) {
     match d.body.get(block).map(|b| &**b) {
         Some(wordcraft_doc::Block::Para(p)) => {
@@ -1426,6 +1428,7 @@ fn emphasis_at(d: &wordcraft_doc::Document, block: usize, off: usize) -> (bool, 
     }
 }
 
+#[cfg(feature = "extra-formats")]
 #[test]
 fn copying_puts_rtf_on_the_clipboard() {
     // gap-clipboard-rtf: a copy carries RTF beside its text and HTML, for programs that read RTF.
@@ -5560,6 +5563,7 @@ fn arrange_bounds_resizes_and_moves_objects() {
 
 /// A frame anchored to a page and moved in WordCraft is placed by its paragraph from then on: the
 /// file's page number goes, or the save would put it back. Only resized, it stays on that page.
+#[cfg(feature = "extra-formats")]
 #[test]
 fn an_odt_frame_moved_from_its_page_loses_the_page_number() {
     let ns = r#"xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0""#;
@@ -12213,6 +12217,7 @@ fn typing_after_a_note_number_is_not_superscript() {
 
 /// Gap 19, review: text inserted by one author and deleted by another keeps both marks through
 /// an ODT save, so Reject All (undo the deletion, then the insertion) and Accept All both remove it.
+#[cfg(feature = "extra-formats")]
 #[test]
 fn odt_inserted_then_deleted_text_round_trips() {
     let ns = r#"xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:dc="http://purl.org/dc/elements/1.1/""#;
@@ -12266,6 +12271,7 @@ fn odt_tracked_changes_accept_and_reject_all() {
 
 /// Gap 19, review 2: a paragraph break deleted inside an insertion range is not itself
 /// inserted, so Reject All keeps the two paragraphs (after an ODT save, too).
+#[cfg(feature = "extra-formats")]
 #[test]
 fn odt_deleted_mark_inside_an_insertion_survives_reject_all() {
     let ns = r#"xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:dc="http://purl.org/dc/elements/1.1/""#;
@@ -13085,6 +13091,7 @@ fn what_the_opendocument_settings_saved_still_reads() {
     assert!(layout.tabs_from_indent);
 }
 
+#[cfg(feature = "extra-formats")]
 #[test]
 fn an_odt_charts_paragraph_is_written_as_read_after_drawing_it() {
     // Opening an ODT draws its charts (from their data); that changes nothing in the document,
@@ -13101,6 +13108,7 @@ fn an_odt_charts_paragraph_is_written_as_read_after_drawing_it() {
 
 /// A picture an OpenDocument file makes wider than the text (a rule across the whole page) stays
 /// that wide, and its paragraph is written as read: opening a file changes nothing in it.
+#[cfg(feature = "extra-formats")]
 #[test]
 fn an_odts_picture_wider_than_the_text_keeps_its_size() {
     let ns = r#"xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" xmlns:xlink="http://www.w3.org/1999/xlink""#;
@@ -13137,6 +13145,7 @@ fn an_odts_picture_wider_than_the_text_keeps_its_size() {
 
 /// Numbering or a new style makes the styles be written from the model on save: a document in
 /// German stays in German, rather than taking the default language of what opens it next.
+#[cfg(feature = "extra-formats")]
 #[test]
 fn an_odts_language_survives_a_save_after_numbering_or_a_new_style() {
     let ns = r#"xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0""#;

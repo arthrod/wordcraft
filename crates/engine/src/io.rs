@@ -70,6 +70,10 @@ pub struct ExportOptions {
     /// face can draw, a picture that is missing or can't be decoded); else the save fails with
     /// `strict: …` (#6005). Ignored for other formats.
     pub strict: bool,
+    /// A host's own id for this export (`hostTag`; 0 when none), handed back with the options
+    /// to a host that writes the export later (the web app's workers), so it can tell which
+    /// caller asked for it. Never written anywhere; the engine's own writers ignore it.
+    pub host_tag: u64,
 }
 
 /// A document password: wiped from memory when dropped, never printed (`Debug` shows `***`).
@@ -145,6 +149,7 @@ pub fn can_encrypt(name: &str) -> bool {
 /// Open a password-protected ODT package (ODF 1.3 Part 2 §3.4). The errors for a missing or
 /// wrong password are the `.docx` reader's texts, so [`needs_password`] and [`wrong_password`]
 /// recognise them.
+#[cfg(feature = "extra-formats")]
 fn open_encrypted_odt(bytes: &[u8], password: Option<&str>, page: &wordcraft_doc::SectionProps) -> Result<Document, String> {
     let pw = password.ok_or_else(|| format!("ODT: {}", wordcraft_docx::PASSWORD_REQUIRED))?;
     let plain = wordcraft_formats::odt::decrypt(bytes, pw).map_err(|e| match e {
@@ -155,6 +160,12 @@ fn open_encrypted_odt(bytes: &[u8], password: Option<&str>, page: &wordcraft_doc
         Some(r) => r,
         None => Err("ODT: no reader".into()),
     }
+}
+
+#[cfg(not(feature = "extra-formats"))]
+#[allow(dead_code)]
+fn open_encrypted_odt(_bytes: &[u8], _password: Option<&str>, _page: &wordcraft_doc::SectionProps) -> Result<Document, String> {
+    Err("ODT import is not included in this build".into())
 }
 
 /// Finish a document just read from a file: never leave it empty, and bring its unlocked
@@ -173,6 +184,7 @@ pub fn open_bytes(name: &str, bytes: &[u8]) -> Result<Document, String> {
 /// Open a Word 97-2003 binary file, decrypting it with `password` when it is password-protected
 /// (XOR, RC4, RC4 CryptoAPI). The errors for a missing or wrong password are the same texts the
 /// `.docx` reader gives, so [`needs_password`] and [`wrong_password`] recognise them.
+#[cfg(feature = "legacy-doc")]
 fn open_binary_doc(bytes: &[u8], password: Option<&str>) -> Result<(Document, bool), String> {
     use wordcraft_docbin::DocbinError;
     let encrypted = wordcraft_docbin::is_encrypted(bytes);
@@ -182,6 +194,11 @@ fn open_binary_doc(bytes: &[u8], password: Option<&str>) -> Result<(Document, bo
         Err(DocbinError::WrongPassword) => Err(wordcraft_docx::WRONG_PASSWORD.to_string()),
         Err(e) => Err(e.to_string()),
     }
+}
+
+#[cfg(not(feature = "legacy-doc"))]
+fn open_binary_doc(_bytes: &[u8], _password: Option<&str>) -> Result<(Document, bool), String> {
+    Err("Word 97–2003 (.doc) import is not included in this build".into())
 }
 
 /// [`open_bytes`] for a file that may be password-protected: a Word document encrypted with a
@@ -230,6 +247,7 @@ fn read_bytes(name: &str, bytes: &[u8], password: Option<&str>, page: &wordcraft
         opened(&mut doc);
         return Ok((doc, true));
     }
+    #[cfg(feature = "extra-formats")]
     if (ext == "odt" || ext == "ott") && wordcraft_formats::odt::is_encrypted(bytes) {
         let mut doc = open_encrypted_odt(bytes, password, page)?;
         opened(&mut doc);
@@ -253,6 +271,10 @@ fn read_bytes(name: &str, bytes: &[u8], password: Option<&str>, page: &wordcraft
         }
         other => match crate::io_ext::open(other, bytes, page) {
             Some(r) => r?,
+            // A known format this build leaves out is unavailable, not plain text.
+            None if wordcraft_formats::UNAVAILABLE_EXTENSIONS.contains(&other) => {
+                return Err(format!("{name}: `.{other}` import is not included in this build"));
+            }
             None => return open_by_content(name, other, bytes, password, page),
         },
     };
@@ -262,14 +284,32 @@ fn read_bytes(name: &str, bytes: &[u8], password: Option<&str>, page: &wordcraft
 
 /// Read a Word package (decrypted with `password` if it is encrypted), bringing in its
 /// alternative format chunks (`w:altChunk`) as Word does when it opens one: see [`import_chunk`].
-pub(crate) fn read_docx(bytes: &[u8], password: Option<&str>) -> Result<Document, wordcraft_docx::DocxError> {
-    wordcraft_docx::read_with(bytes, &wordcraft_docx::ReadOptions { password, chunks: Some(&import_chunk) })
+///
+/// The reader leaves out a chunk its importer declines. A chunk this build can't bring in fails
+/// the open instead (the first refusal is the error), so its content is never dropped silently.
+pub(crate) fn read_docx(bytes: &[u8], password: Option<&str>) -> Result<Document, String> {
+    let refused = std::cell::RefCell::new(None::<String>);
+    let import = |c: &wordcraft_docx::AltChunk| match import_chunk(c) {
+        Ok(doc) => Some(doc),
+        Err(e) => {
+            if let Ok(mut first) = refused.try_borrow_mut() {
+                first.get_or_insert(e);
+            }
+            None
+        }
+    };
+    let doc = wordcraft_docx::read_with(bytes, &wordcraft_docx::ReadOptions { password, chunks: Some(&import) }).map_err(|e| e.to_string())?;
+    match refused.into_inner() {
+        Some(e) => Err(e),
+        None => Ok(doc),
+    }
 }
 
 /// An alternative format chunk in a format the docx reader leaves to the format importers, as a
 /// document: an MHT web archive, HTML, RTF or plain text, told by its content type, its part's
 /// extension or what it holds. Its pictures fit the text width, as when the file is opened.
-fn import_chunk(c: &wordcraft_docx::AltChunk) -> Option<Document> {
+#[cfg(feature = "extra-formats")]
+fn import_chunk(c: &wordcraft_docx::AltChunk) -> Result<Document, String> {
     use wordcraft_formats::{html, mht, rtf, txt};
     let full = c.content_type.to_ascii_lowercase();
     let ct = full.split(';').next().unwrap_or("").trim();
@@ -283,17 +323,31 @@ fn import_chunk(c: &wordcraft_docx::AltChunk) -> Option<Document> {
     {
         mht::import(b)
     } else if ct.contains("rtf") || ext == "rtf" || b.starts_with(b"{\\rtf") {
-        rtf::import(b).ok()?
+        rtf::import(b)?
     } else if ct.contains("html") || matches!(ext.as_str(), "html" | "htm" | "xhtml") {
         html::import_page(&html::decode_as(b, charset), &|_| None)
     } else if ct == "text/plain" || ext == "txt" {
         txt::import(b)
     } else {
-        return None;
+        return Err(format!("unsupported alternative format chunk {} ({})", c.part, ct));
     };
     // shortcut: pictures fit the chunk's default page, not the section it lands in; fit them there if wide pictures in chunks overflow narrow sections.
     fit_pictures(&mut doc);
-    Some(doc)
+    Ok(doc)
+}
+
+#[cfg(not(feature = "extra-formats"))]
+fn import_chunk(c: &wordcraft_docx::AltChunk) -> Result<Document, String> {
+    let full = c.content_type.to_ascii_lowercase();
+    let ct = full.split(';').next().unwrap_or("").trim();
+    let ext = ext_of(c.part);
+    let mut doc = if ct == "text/plain" || ext == "txt" {
+        wordcraft_formats::txt::import(c.bytes)
+    } else {
+        return Err(format!("alternative format chunk {} ({}) is not included in this build", c.part, ct));
+    };
+    fit_pictures(&mut doc);
+    Ok(doc)
 }
 
 /// The narrowest text width of the document's sections, points: what a picture must fit.
@@ -355,12 +409,24 @@ fn signature_contradicts(ext: &str, bytes: &[u8]) -> bool {
         "xml"
     } else if looks_like_web_page(bytes) {
         "html"
-    } else if wordcraft_formats::mht::is_mht(bytes) {
+    } else if is_mht_doc(bytes) {
         "mht"
     } else {
         return false;
     };
     held != expected
+}
+
+fn is_mht_doc(bytes: &[u8]) -> bool {
+    #[cfg(feature = "extra-formats")]
+    {
+        wordcraft_formats::mht::is_mht(bytes)
+    }
+    #[cfg(not(feature = "extra-formats"))]
+    {
+        let _ = bytes;
+        false
+    }
 }
 
 /// The bytes after a UTF-8 byte-order mark and leading white space.
@@ -421,13 +487,20 @@ fn open_by_content(
         open_binary_doc(bytes, password)
             .map_err(|e| if needs_password(&e) || wrong_password(&e) { e } else { format!("{name}: not a document WordCraft can open ({e})") })?
     } else if bytes.starts_with(b"{\\rtf") {
-        (wordcraft_formats::rtf::import(bytes)?, false)
+        #[cfg(feature = "extra-formats")]
+        {
+            (wordcraft_formats::rtf::import(bytes)?, false)
+        }
+        #[cfg(not(feature = "extra-formats"))]
+        {
+            return Err(format!("{name}: RTF import is not included in this build"));
+        }
     } else if is_word_xml(bytes) {
         (wordcraft_docx::read_xml(bytes).map_err(|e| format!("{name}: {e}"))?, false)
     } else if matches!(ext, "doc" | "dot" | "docx" | "docm" | "dotx" | "dotm" | "rtf") && looks_like_web_page(bytes) {
         let opened = crate::io_ext::open("html", bytes, page).unwrap_or_else(|| Err(format!("{name}: can't open web pages")));
         (opened?, false)
-    } else if matches!(ext, "doc" | "dot" | "docx" | "docm" | "dotx" | "dotm" | "rtf") && wordcraft_formats::mht::is_mht(bytes) {
+    } else if matches!(ext, "doc" | "dot" | "docx" | "docm" | "dotx" | "dotm" | "rtf") && is_mht_doc(bytes) {
         let opened = crate::io_ext::open("mht", bytes, page).unwrap_or_else(|| Err(format!("{name}: can't open web archives")));
         (opened?, false)
     } else if wordcraft_formats::txt::is_text(bytes) {
@@ -468,7 +541,10 @@ pub fn save_bytes_opts(name: &str, doc: &Document, opts: &ExportOptions) -> Resu
 pub fn save_bytes_with(name: &str, doc: &Document, password: Option<&str>, opts: &ExportOptions) -> Result<Vec<u8>, String> {
     let bytes = save_bytes_opts(name, doc, opts)?;
     match password {
+        #[cfg(feature = "extra-formats")]
         Some(pw) if matches!(ext_of(name).as_str(), "odt" | "ott") => wordcraft_formats::odt::encrypt(&bytes, pw).map_err(|e| e.to_string()),
+        #[cfg(not(feature = "extra-formats"))]
+        Some(_) if matches!(ext_of(name).as_str(), "odt" | "ott") => Err("ODT export is not included in this build".into()),
         Some(pw) if can_encrypt(name) => wordcraft_docx::encrypt(&bytes, pw).map_err(|e| e.to_string()),
         _ => Ok(bytes),
     }
@@ -489,6 +565,7 @@ pub fn open_path_with(path: &std::path::Path, password: Option<&str>) -> Result<
 pub fn open_path_in(path: &std::path::Path, password: Option<&str>, region: &wordcraft_geom::Region) -> Result<(Document, bool), String> {
     let bytes = read_document(path)?;
     let name = path.to_string_lossy();
+    #[cfg(feature = "extra-formats")]
     if matches!(ext_of(&name).as_str(), "html" | "htm" | "xhtml") {
         // Pictures referenced by a relative path load from beside the HTML file.
         let images = LocalImages::new(path.parent().unwrap_or(std::path::Path::new("")));
@@ -535,6 +612,7 @@ pub fn read_document(path: &std::path::Path) -> Result<Vec<u8>, String> {
 /// at most `max_file` bytes of it; every reference, cached or not, counts against a budget for
 /// the whole document, so one large picture can't be multiplied by referencing it many times.
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(feature = "extra-formats"), allow(dead_code))]
 pub(crate) struct LocalImages {
     /// The folder, canonical; `None` when it can't be resolved (nothing loads then).
     dir: Option<std::path::PathBuf>,
@@ -545,6 +623,7 @@ pub(crate) struct LocalImages {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(feature = "extra-formats"), allow(dead_code))]
 impl LocalImages {
     /// Largest picture file read.
     const MAX_FILE: u64 = 256 << 20;

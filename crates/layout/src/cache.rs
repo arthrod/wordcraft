@@ -102,6 +102,7 @@ pub(crate) fn env_hash(doc: &Document, opts: &LayoutOptions) -> u64 {
     opts.numeral.hash(&mut h);
     opts.field_codes.hash(&mut h);
     opts.proof.hash(&mut h);
+    #[cfg(feature = "inline-proof")]
     wordcraft_proof::dictionary_generation().hash(&mut h);
     hyphenation_key(doc).hash(&mut h);
     outline.hash(&mut h);

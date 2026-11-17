@@ -1040,6 +1040,7 @@ fn comment_list_skips_comment_text() {
     assert_eq!(list.first().and_then(|(_, p)| p.as_ref()).map(|p| p.story), Some(wordcraft_doc::StoryRef::Body));
 }
 
+#[cfg(feature = "extra-formats")]
 #[test]
 fn rtf_tracked_changes_accept_and_reject_after_opening_and_round_trip() {
     // Gap 19: an RTF file's tracked insertions and deletions open as tracked changes, also

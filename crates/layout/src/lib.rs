@@ -29,6 +29,7 @@ pub mod kinsoku;
 pub mod math;
 pub mod outline;
 pub mod para;
+pub mod proof_overlay;
 pub mod styleref;
 mod table;
 mod textbox;
@@ -87,7 +88,7 @@ use headers::MAX_HEADER_ITEMS;
 use headers::placed_cost;
 use headers::placed_cost_by;
 pub use metafile::{MAX_METAFILE_DASHES, crop_sides, crop_window, metafile_average_color, metafile_dashes, metafile_miter_limit};
-pub use missing::{MAX_MISSING_GLYPHS, MissingGlyphs, metafile_text_run, missing_watermark_glyphs, watermark_run};
+pub use missing::{MAX_MISSING_GLYPHS, MissingGlyphs, metafile_text_faces, metafile_text_run, missing_watermark_glyphs, watermark_run};
 pub use notes::DECOR_STORY;
 pub(crate) use notes::NOTE_SEP_W;
 use notes::{MAX_NOTE_PASSES, footnote_pages};
@@ -245,17 +246,32 @@ pub struct TypingWord {
     pub end: usize,
 }
 
+/// Placeholder spelling options when `inline-proof` is compiled out.
+#[cfg(not(feature = "inline-proof"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub struct NoProofOptions;
+
 /// File › Options › Proofing choices that change the squiggles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ProofOptions {
     /// Mark grammar errors as you type.
     pub grammar: bool,
+    #[cfg(feature = "inline-proof")]
     pub spelling: wordcraft_proof::Options,
+    #[cfg(not(feature = "inline-proof"))]
+    pub spelling: NoProofOptions,
 }
 
 impl Default for ProofOptions {
     fn default() -> Self {
-        ProofOptions { grammar: true, spelling: wordcraft_proof::Options::default() }
+        #[cfg(feature = "inline-proof")]
+        {
+            ProofOptions { grammar: true, spelling: wordcraft_proof::Options::default() }
+        }
+        #[cfg(not(feature = "inline-proof"))]
+        {
+            ProofOptions { grammar: false, spelling: NoProofOptions }
+        }
     }
 }
 

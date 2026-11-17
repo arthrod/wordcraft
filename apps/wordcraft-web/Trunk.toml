@@ -8,3 +8,24 @@ filehash = true
 [serve]
 addresses = ["127.0.0.1"]
 port = 8771
+
+[tools]
+wasm_bindgen = "0.2.129"
+wasm_opt = "version_133"
+
+[[hooks]]
+stage = "pre_build"
+command = "cargo"
+command_arguments = ["xtask", "web-assets"]
+
+# Plan 10.3: the page's first module must not preload another target's snippet files (Trunk
+# shares one wasm-bindgen output directory between targets; see xtask/src/web_page.rs).
+[[hooks]]
+stage = "post_build"
+command = "cargo"
+command_arguments = ["xtask", "web-page"]
+
+[[hooks]]
+stage = "post_build"
+command = "sh"
+command_arguments = ["-c", "for f in \"$TRUNK_STAGING_DIR\"/*_bg.wasm; do gzip -9 -k -f \"$f\"; done"]

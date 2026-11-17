@@ -130,6 +130,10 @@ pub const ADD_FONT: &str = "\u{1}font.add";
 /// caller runs `font.loadSystem`.
 pub const LOAD_SYSTEM_FONTS: &str = "\u{1}font.loadSystem";
 
+/// What [`font_combo`] returns when "Install Font Packs" is chosen on web: the caller runs
+/// `font.installPack`, which downloads the unbundled faces from the app's `fonts/` directory.
+pub const INSTALL_FONT_PACKS: &str = "\u{1}font.installPack";
+
 /// The font box: a [`combo`] where typing lists the matching families under the field (#359).
 /// Its list ends with Add Font… ([`ADD_FONT`]).
 /// Up/Down move the highlight, Enter or a click applies the highlighted family ("arial" applies
@@ -624,6 +628,10 @@ fn combo_impl(ui: &mut Ui, options: ComboOptions<'_>) -> Option<String> {
                             #[cfg(target_arch = "wasm32")]
                             if ui.button(tl!("Load System Installed Fonts…")).clicked() {
                                 picked = Some(LOAD_SYSTEM_FONTS.to_string());
+                            }
+                            #[cfg(target_arch = "wasm32")]
+                            if ui.button(tl!("Install Font Packs")).clicked() {
+                                picked = Some(INSTALL_FONT_PACKS.to_string());
                             }
                         }
                         (picked, offset, view_h)

@@ -182,6 +182,7 @@ fn imported_word_programmatic_and_explicit_saves_never_open_dialogs() {
 
 #[test]
 fn imported_word_save_controls_ask_for_docx() {
+    let _lock = crate::i18n::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     use egui_kittest::kittest::Queryable;
     let dir = scratch("imported-entry-points");
     let original = dir.join("contract.doc");

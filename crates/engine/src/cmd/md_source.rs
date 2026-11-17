@@ -55,12 +55,28 @@ pub struct MdSource {
     step: Option<u64>,
     /// The line each top-level block starts on, from the last parse.
     block_lines: Vec<usize>,
+    /// True when this source buffer was restored by `edit.undo` after `doc.setMarkdown`
+    /// replaced it, permitting `edit.redo` to swap back without applying pending edits first.
+    pub(crate) restored_by_undo: bool,
 }
 
 impl MdSource {
     /// The text holds edits the document doesn't have yet.
     pub fn is_pending(&self) -> bool {
         self.text != *self.applied
+    }
+
+    /// Undo restored this buffer (a command that closed the view kept it in its undo step, and
+    /// Undo brought it back): the text is a Redo offer, so a front end must not apply it on a
+    /// timer — `edit.redo` swaps the document back only while it stays pending. It applies once
+    /// the user changes the text ([`Self::edited`]) or the view is left.
+    pub fn restored_by_undo(&self) -> bool {
+        self.restored_by_undo
+    }
+
+    /// The user changed the text: it is theirs now, so it applies like any other edit.
+    pub fn edited(&mut self) {
+        self.restored_by_undo = false;
     }
 }
 
@@ -71,8 +87,9 @@ impl MdSource {
 #[derive(Clone, Default)]
 pub struct FileText {
     saved: Option<String>,
-    latest: Option<String>,
-    cached_exact: RefCell<Option<(u64, Option<String>)>>,
+    /// Shared: undo steps keep the same text, not a copy of it.
+    pub(crate) latest: Option<Arc<str>>,
+    pub(crate) cached_exact: RefCell<Option<(u64, Option<String>)>>,
 }
 
 impl FileText {
@@ -126,11 +143,22 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new(TEXT, "Markdown Source Text", "View › Views", text)
             .params(r#"{"text"?: string (up to 2 MB), "caret"?: integer >= 0}"#)
             .when(|s| s.md_source.is_none().then_some("only in Markdown Source")),
+        CommandSpec::new(GET_MARKDOWN, "Get Markdown", "File › Export", get_markdown).pure(),
+        CommandSpec::new(SET_MARKDOWN, "Set Markdown", "File › Import", set_markdown).params(r#"{"markdown": string (up to 2 MB)}"#).when(|s| {
+            s.doc
+                .settings
+                .protection
+                .is_some()
+                .then_some("not in a protected document")
+                .or_else(|| (s.doc.settings.track_changes || !s.doc.revisions.is_empty()).then_some("not with tracked changes"))
+        }),
     ]
 }
 
 const TOGGLE: &str = "view.markdownSource";
 const TEXT: &str = "view.markdownSourceText";
+const GET_MARKDOWN: &str = "doc.getMarkdown";
+const SET_MARKDOWN: &str = "doc.setMarkdown";
 /// The views that replace this one: they show the document, so the text goes into it first.
 const LEAVES: [&str; 5] = ["view.printLayout", "view.webLayout", "view.draft", "view.outline", "view.readMode"];
 
@@ -197,6 +225,7 @@ fn text(s: &mut Session, v: &Value) -> CmdResult {
     }
     if edited {
         src.place_caret = true;
+        src.restored_by_undo = false;
         s.dirty = true;
     }
     let mut result = json!({"caret": src.caret, "losesContent": src.loses_content});
@@ -209,6 +238,44 @@ fn text(s: &mut Session, v: &Value) -> CmdResult {
 /// Error message returned when Markdown Source text exceeds [`MAX_SOURCE_BYTES`].
 fn too_long() -> String {
     format!("Markdown Source takes up to {} MB of text", MAX_SOURCE_BYTES / (1024 * 1024))
+}
+
+/// Returns the current document as Markdown (or the active Markdown Source buffer if open).
+fn get_markdown(s: &mut Session, _: &Value) -> CmdResult {
+    let md = if let Some(src) = s.md_source.as_ref() {
+        src.text.clone()
+    } else if let Some(exact) = exact_text(s) {
+        exact
+    } else {
+        wordcraft_formats::markdown::export(&s.doc)
+    };
+    Ok(json!({"markdown": md, "text": md}))
+}
+
+/// Replaces the current document's content from Markdown directly without entering source view.
+fn set_markdown(s: &mut Session, v: &Value) -> CmdResult {
+    if s.doc.settings.protection.is_some() {
+        return Err(CmdError::Disabled("not in a protected document".into()));
+    }
+    if s.doc.settings.track_changes || !s.doc.revisions.is_empty() {
+        return Err(CmdError::Disabled("not with tracked changes".into()));
+    }
+    let md = p::str(v, "markdown").or_else(|| p::str(v, "text")).ok_or_else(|| CmdError::Params("missing `markdown` string".into()))?;
+    if md.len() > MAX_SOURCE_BYTES {
+        return Err(CmdError::Params(too_long()));
+    }
+    s.preserve_md_source_for_undo();
+    s.md_source = None;
+    let doc = parse(&s.doc, md);
+    s.doc = doc;
+    s.note_body_replaced();
+    s.math = None;
+    s.touch();
+    s.clamp_selection();
+    s.md_file.latest = Some(Arc::from(md));
+    *s.md_file.cached_exact.borrow_mut() = Some((s.rev(), Some(md.to_string())));
+    s.dirty = true;
+    Ok(json!({"ok": true, "words": s.doc.word_count(), "paragraphs": s.doc.paragraph_count()}))
 }
 
 /// Enters Markdown Source view, preparing source text and mapping caret position.
@@ -248,6 +315,7 @@ fn enter(s: &mut Session) -> Result<(), CmdError> {
         has_step: false,
         step: None,
         block_lines,
+        restored_by_undo: false,
     });
     Ok(())
 }
@@ -301,13 +369,14 @@ pub fn apply(s: &mut Session) {
     s.math = None;
     s.touch();
     s.clamp_selection();
-    s.md_file.latest = Some(text.clone());
+    s.md_file.latest = Some(Arc::from(text.as_str()));
     *s.md_file.cached_exact.borrow_mut() = Some((s.rev(), Some(text.clone())));
     if let Some(src) = s.md_source.as_mut() {
         src.applied = Arc::from(text.as_str());
         src.block_lines = lines;
         src.has_step = true;
         src.step = step;
+        src.restored_by_undo = false;
     }
 }
 
@@ -367,9 +436,13 @@ fn block_of_caret(text: &str, caret: usize, doc: &Document, block_lines: &[usize
 
 /// Why the open text refuses command `id`, if it does.
 pub(crate) fn refusal(s: &Session, id: &str, mutates: bool) -> Option<&'static str> {
+    let allow_redo = id == "edit.redo" && s.md_source.as_ref().is_some_and(|src| src.restored_by_undo) && s.can_redo();
     (s.md_source.is_some()
+        && !allow_redo
         && id != TOGGLE
         && id != TEXT
+        && id != GET_MARKDOWN
+        && id != SET_MARKDOWN
         && !LEAVES.contains(&id)
         && (mutates || matches!(id, "edit.undo" | "edit.undoTo" | "edit.redo" | "edit.repeat")))
     .then_some("leave Markdown Source first")
@@ -377,14 +450,21 @@ pub(crate) fn refusal(s: &Session, id: &str, mutates: bool) -> Option<&'static s
 
 /// What a command does while the text is open, before it runs (see the module's header).
 pub(crate) fn before_command(s: &mut Session, id: &str, mutates: bool) -> Result<(), CmdError> {
-    if s.md_source.is_none() || id == TOGGLE || id == TEXT {
+    if s.md_source.is_none() || matches!(id, TOGGLE | TEXT | GET_MARKDOWN | SET_MARKDOWN) {
         return Ok(());
     }
     if LEAVES.contains(&id) {
         s.run(TOGGLE, &json!({"value": false}))?;
     } else if let Some(why) = refusal(s, id, mutates) {
         return Err(CmdError::Disabled(format!("{id}: {why}")));
-    } else if !id.starts_with("caret.") && !id.starts_with("select.") && !id.starts_with("view.") {
+    } else if !id.starts_with("caret.")
+        && !id.starts_with("select.")
+        && !id.starts_with("view.")
+        && id != "edit.redo"
+        && !s.md_source.as_ref().is_some_and(|src| src.restored_by_undo())
+    {
+        // A buffer Undo restored is a Redo offer, not pending edits: reads must not apply it
+        // (applying would checkpoint and clear the redo stack it belongs to).
         apply(s);
     }
     Ok(())
@@ -447,6 +527,32 @@ mod tests {
         s.run("edit.undo", &json!({})).unwrap();
         assert!(s.doc.same_content(&before), "one undo restores the document");
         assert!(s.can_redo());
+    }
+
+    /// A read command between Undo and Redo must not apply the buffer Undo restored: applying it
+    /// would checkpoint (clearing the redo stack) and spend the Redo offer.
+    #[test]
+    fn a_read_command_between_undo_and_redo_leaves_the_restored_buffer_alone() {
+        let mut s = session(SAMPLE);
+        s.run(TOGGLE, &json!({})).unwrap();
+        set_text(&mut s, "# Pending\n");
+        // `doc.setMarkdown` keeps the pending buffer in its undo step, then replaces the document.
+        s.run(SET_MARKDOWN, &json!({"markdown": "# Replaced\n"})).unwrap();
+        assert!(s.md_source.is_none());
+        let replaced = s.doc.clone();
+        s.run("edit.undo", &json!({})).unwrap();
+        let src = s.md_source.as_ref().unwrap();
+        assert!(src.restored_by_undo() && src.is_pending());
+        let doc = s.doc.clone();
+        let redo_label = s.redo_label().map(str::to_string);
+        s.run("file.info", &json!({})).unwrap();
+        assert!(s.doc.same_content(&doc), "a read command applies nothing");
+        let src = s.md_source.as_ref().unwrap();
+        assert!(src.restored_by_undo() && src.is_pending() && src.text == "# Pending\n");
+        assert!(s.can_redo() && s.redo_label() == redo_label.as_deref(), "the redo offer survives");
+        s.run("edit.redo", &json!({})).unwrap();
+        assert!(s.doc.same_content(&replaced));
+        assert!(s.md_source.is_none());
     }
 
     static TEST_DIR_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -893,5 +999,141 @@ mod tests {
         let s = session(SAMPLE);
         let spec = s.registry.get(TEXT).unwrap();
         assert!(spec.mutates, "view.markdownSourceText mutates session and dirty state");
+    }
+
+    #[test]
+    fn set_markdown_refuses_tracked_documents_without_replacing_them() {
+        let mut s = session(SAMPLE);
+        s.doc.settings.track_changes = true;
+        let tracked = s.doc.clone();
+        assert_eq!(s.why_disabled(SET_MARKDOWN), Some("not with tracked changes"));
+        assert!(matches!(s.run(SET_MARKDOWN, &json!({"markdown": "Replacement"})), Err(CmdError::Disabled(_))));
+        assert!(s.doc.same_content(&tracked));
+
+        s.doc.settings.track_changes = false;
+        s.doc.revisions.push(wordcraft_doc::Revision::new(wordcraft_doc::RevisionKind::Insert, "Author", ""));
+        let with_revisions = s.doc.clone();
+        assert!(matches!(s.run(SET_MARKDOWN, &json!({"markdown": "Replacement"})), Err(CmdError::Disabled(_))));
+        assert!(s.doc.same_content(&with_revisions));
+    }
+
+    #[test]
+    fn set_markdown_undo_restores_the_pending_source_buffer() {
+        let mut s = session(SAMPLE);
+        let before = s.doc.clone();
+        s.run(TOGGLE, &json!({})).unwrap();
+        set_text(&mut s, "# Pending source edit\n");
+        let depth = s.undo_depth();
+
+        s.run(SET_MARKDOWN, &json!({"markdown": "# Direct replacement\n"})).unwrap();
+        assert!(s.md_source.is_none());
+        assert!(body_text(&s).contains("Direct replacement"));
+        assert_eq!(s.undo_depth(), depth + 1, "the replacement has one undo step");
+
+        s.run("edit.undo", &json!({})).unwrap();
+        assert!(s.doc.same_content(&before));
+        let src = s.md_source.as_ref().expect("Undo restores the source view");
+        assert_eq!(src.text, "# Pending source edit\n");
+        assert!(src.is_pending());
+        assert_eq!(s.run(GET_MARKDOWN, &json!({})).unwrap()["markdown"], "# Pending source edit\n");
+
+        // Redo is permitted without leaving source view or applying pending source text.
+        assert_eq!(s.why_disabled("edit.redo"), None);
+        s.run("edit.redo", &json!({})).unwrap();
+        assert!(s.md_source.is_none());
+        assert!(body_text(&s).contains("Direct replacement"));
+        assert!(!body_text(&s).contains("Pending source edit"));
+    }
+
+    #[test]
+    fn doc_markdown_commands_roundtrip_without_md_path() {
+        let mut s = Session::new(Document::from_text("Initial body"));
+        assert!(s.path.is_none());
+        let before = s.run("doc.getMarkdown", &json!({})).unwrap();
+        assert!(before["markdown"].as_str().unwrap_or("").contains("Initial body"));
+
+        let r = s.run("doc.setMarkdown", &json!({"markdown": "# Heading One\n\nReplaced paragraph.\n"})).unwrap();
+        assert_eq!(r["ok"], true);
+        assert!(body_text(&s).contains("Replaced paragraph."));
+        assert_eq!(s.run("doc.getMarkdown", &json!({})).unwrap()["markdown"], "# Heading One\n\nReplaced paragraph.\n");
+
+        // Works even if Markdown Source view was open and is refused on missing params or protected docs.
+        s.path = Some(PathBuf::from("/tmp/doc-md-test.md"));
+        s.run(TOGGLE, &json!({"value": true})).unwrap();
+        set_text(&mut s, "# Unsaved edit\n");
+        assert!(s.run("doc.getMarkdown", &json!({})).unwrap()["markdown"].as_str().unwrap().contains("Unsaved edit"));
+        s.run("doc.setMarkdown", &json!({"markdown": "Direct replace"})).unwrap();
+        assert!(s.md_source.is_none());
+        assert!(body_text(&s).contains("Direct replace"));
+
+        assert!(matches!(s.run("doc.setMarkdown", &json!({})), Err(CmdError::Params(_))));
+        s.doc.settings.protection = Some("readOnly".into());
+        assert!(matches!(s.run("doc.setMarkdown", &json!({"markdown": "x"})), Err(CmdError::Disabled(_))));
+    }
+
+    #[test]
+    fn set_markdown_undo_and_redo_preserve_exact_markdown_syntax_without_file() {
+        let mut s = Session::new(Document::new());
+        assert!(s.path.is_none());
+        assert!(s.md_file.is_empty());
+
+        let md_a = "<!-- comment A -->\n# Heading\n\nAlpha.\n";
+        let md_b = "<!-- comment B -->\n# Heading\n\nBeta.\n";
+
+        s.run(SET_MARKDOWN, &json!({"markdown": md_a})).unwrap();
+        assert_eq!(s.run(GET_MARKDOWN, &json!({})).unwrap()["markdown"], md_a);
+
+        s.run(SET_MARKDOWN, &json!({"markdown": md_b})).unwrap();
+        assert_eq!(s.run(GET_MARKDOWN, &json!({})).unwrap()["markdown"], md_b);
+
+        s.run("edit.undo", &json!({})).unwrap();
+        assert_eq!(s.run(GET_MARKDOWN, &json!({})).unwrap()["markdown"], md_a);
+        assert!(body_text(&s).contains("Alpha."));
+
+        s.run("edit.redo", &json!({})).unwrap();
+        assert_eq!(s.run(GET_MARKDOWN, &json!({})).unwrap()["markdown"], md_b);
+        assert!(body_text(&s).contains("Beta."));
+    }
+
+    #[test]
+    fn a_docx_save_keeps_the_markdown_history_for_undo() {
+        let dir = unique_temp_dir("docx-md-history");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut s = Session::new(Document::new());
+        s.path = Some(dir.join("a.docx"));
+        let md_a = "<!-- comment A -->\n# Heading\n\nAlpha.\n";
+        let md_b = "<!-- comment B -->\n# Heading\n\nBeta.\n";
+        s.run(SET_MARKDOWN, &json!({"markdown": md_a})).unwrap();
+        s.run(SET_MARKDOWN, &json!({"markdown": md_b})).unwrap();
+        s.run("file.save", &json!({})).unwrap();
+        s.run("edit.undo", &json!({})).unwrap();
+        assert_eq!(s.run(GET_MARKDOWN, &json!({})).unwrap()["markdown"], md_a, "a .docx save takes no Markdown history away");
+        assert!(body_text(&s).contains("Alpha."));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn set_markdown_discards_pending_source_with_undo_even_when_replacement_matches_doc() {
+        let mut s = Session::new(Document::new());
+        s.run(SET_MARKDOWN, &json!({"markdown": SAMPLE})).unwrap();
+        s.path = Some(PathBuf::from("/tmp/doc-md-same-test.md"));
+        s.run(TOGGLE, &json!({})).unwrap();
+        set_text(&mut s, "# Pending replacement\n");
+        let depth = s.undo_depth();
+
+        // Replacing with the exact current document & md_file.latest still discards pending source text,
+        // so the checkpoint must be retained for Undo/Redo.
+        s.run(SET_MARKDOWN, &json!({"markdown": SAMPLE})).unwrap();
+        assert!(s.md_source.is_none());
+        assert_eq!(s.undo_depth(), depth + 1, "checkpoint kept when pending source edits are discarded");
+
+        s.run("edit.undo", &json!({})).unwrap();
+        let src = s.md_source.as_ref().expect("Undo restores the discarded pending source buffer");
+        assert_eq!(src.text, "# Pending replacement\n");
+        assert!(src.is_pending());
+
+        s.run("edit.redo", &json!({})).unwrap();
+        assert!(s.md_source.is_none());
+        assert_eq!(s.run(GET_MARKDOWN, &json!({})).unwrap()["markdown"], SAMPLE);
     }
 }

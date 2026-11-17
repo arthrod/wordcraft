@@ -1,0 +1,15 @@
+{
+  "name": "smoke-webpack",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "wordcraft-web": "file:../../tarball/wordcraft-web.tgz"
+  },
+  "devDependencies": {
+    "webpack": "latest",
+    "webpack-cli": "latest"
+  },
+  "scripts": {
+    "build": "webpack --mode production && /bin/cp -f index.html dist/index.html"
+  }
+}

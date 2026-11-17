@@ -7,268 +7,310 @@
 //! [`poll`], and the answer goes back to the thread. Zotero's questions (`Document_displayAlert`)
 //! become a dialog; the thread waits until the user answers.
 
-use std::sync::mpsc::{Receiver, Sender};
+#[cfg(feature = "desktop-integrations")]
+mod imp {
+    use std::sync::mpsc::{Receiver, Sender};
 
-use serde_json::{Value, json};
-use wordcraft_zotero::{Bridge, Call, Command, Host};
+    use serde_json::{Value, json};
+    use wordcraft_zotero::{Bridge, Call, Command, Host};
 
-use crate::WordApp;
+    use crate::WordApp;
 
-/// A call from Zotero waiting for its answer.
-struct Pending {
-    call: Call,
-    reply: Sender<Result<Value, String>>,
-}
-
-/// An alert Zotero is waiting on.
-struct Alert {
-    text: String,
-    buttons: i64,
-    reply: Sender<Result<Value, String>>,
-}
-
-/// The app's Zotero connection state.
-#[derive(Default)]
-pub struct ZoteroLink {
-    /// Where Zotero listens (default `127.0.0.1:23116`).
-    pub options: wordcraft_zotero::client::Options,
-    bridge: Bridge,
-    calls: Option<Receiver<Pending>>,
-    done: Option<Receiver<Result<wordcraft_zotero::Outcome, String>>>,
-    alert: Option<Alert>,
-    /// The command in flight.
-    pub busy: Option<Command>,
-    /// The document the command in flight started in; its calls are refused once another is open.
-    document: u64,
-    /// How the last command ended.
-    pub last: Option<Value>,
-    /// Zotero's calls in the command in flight (logged when it ends).
-    methods: Vec<String>,
-}
-
-impl ZoteroLink {
-    /// Whether an alert from Zotero is waiting for an answer.
-    pub(crate) fn alert_open(&self) -> bool {
-        self.alert.is_some()
+    /// A call from Zotero waiting for its answer.
+    struct Pending {
+        call: Call,
+        reply: Sender<Result<Value, String>>,
     }
-}
 
-/// Focus requests from the bridge.
-struct AppHost<'a> {
-    ctx: &'a egui::Context,
-}
+    /// An alert Zotero is waiting on.
+    struct Alert {
+        text: String,
+        buttons: i64,
+        reply: Sender<Result<Value, String>>,
+    }
 
-impl Host for AppHost<'_> {
-    fn alert(&mut self, text: &str, _icon: i64, _buttons: i64) -> i64 {
-        // Alerts are intercepted before the bridge (they wait for the user); this is unreachable
-        // in practice and answers like Cancel.
-        log::warn!("Zotero alert not shown: {text}");
-        0
+    /// The app's Zotero connection state.
+    #[derive(Default)]
+    pub struct ZoteroLink {
+        /// Where Zotero listens (default `127.0.0.1:23116`).
+        pub options: wordcraft_zotero::client::Options,
+        bridge: Bridge,
+        calls: Option<Receiver<Pending>>,
+        done: Option<Receiver<Result<wordcraft_zotero::Outcome, String>>>,
+        alert: Option<Alert>,
+        /// The command in flight.
+        pub busy: Option<Command>,
+        /// The document the command in flight started in; its calls are refused once another is open.
+        document: u64,
+        /// How the last command ended.
+        pub last: Option<Value>,
+        /// Zotero's calls in the command in flight (logged when it ends).
+        methods: Vec<String>,
     }
-    fn activate(&mut self) {
-        self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-    }
-}
 
-/// Handle `ui.zotero.*`. `None` when `id` isn't one.
-pub fn command(app: &mut WordApp, id: &str, params: &Value, ctx: Option<&egui::Context>) -> Option<Result<Value, String>> {
-    let name = id.strip_prefix("ui.zotero.")?;
-    if name == "status" {
-        return Some(Ok(status(app)));
+    impl ZoteroLink {
+        /// Whether an alert from Zotero is waiting for an answer.
+        pub(crate) fn alert_open(&self) -> bool {
+            self.alert.is_some()
+        }
     }
-    if name == "answer" {
-        let Some(button) = params.get("button").and_then(Value::as_i64) else {
-            return Some(Err("give `button`: Zotero's number for it (OK/Yes 1, No/Cancel 0; with Yes/No/Cancel: Yes 2, No 1, Cancel 0)".into()));
+
+    /// Focus requests from the bridge.
+    struct AppHost<'a> {
+        ctx: &'a egui::Context,
+    }
+
+    impl Host for AppHost<'_> {
+        fn alert(&mut self, text: &str, _icon: i64, _buttons: i64) -> i64 {
+            // Alerts are intercepted before the bridge (they wait for the user); this is unreachable
+            // in practice and answers like Cancel.
+            log::warn!("Zotero alert not shown: {text}");
+            0
+        }
+        fn activate(&mut self) {
+            self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+    }
+
+    /// Handle `ui.zotero.*`. `None` when `id` isn't one.
+    pub fn command(app: &mut WordApp, id: &str, params: &Value, ctx: Option<&egui::Context>) -> Option<Result<Value, String>> {
+        let name = id.strip_prefix("ui.zotero.")?;
+        if name == "status" {
+            return Some(Ok(status(app)));
+        }
+        if name == "answer" {
+            let Some(button) = params.get("button").and_then(Value::as_i64) else {
+                return Some(Err("give `button`: Zotero's number for it (OK/Yes 1, No/Cancel 0; with Yes/No/Cancel: Yes 2, No 1, Cancel 0)".into()));
+            };
+            return Some(answer(app, button));
+        }
+        let Some(cmd) = Command::from_name(name) else {
+            let names: Vec<&str> = Command::ALL.iter().map(|c| c.wire_name()).collect();
+            return Some(Err(format!("unknown Zotero command `{name}`; use one of {}", names.join(", "))));
         };
-        return Some(answer(app, button));
+        Some(start(app, cmd, ctx.cloned()))
     }
-    let Some(cmd) = Command::from_name(name) else {
-        let names: Vec<&str> = Command::ALL.iter().map(|c| c.wire_name()).collect();
-        return Some(Err(format!("unknown Zotero command `{name}`; use one of {}", names.join(", "))));
-    };
-    Some(start(app, cmd, ctx.cloned()))
-}
 
-fn status(app: &WordApp) -> Value {
-    let z = &app.zotero;
-    json!({"busy": z.busy.map(Command::wire_name), "waitingForAnswer": z.alert.as_ref().map(|a| a.text.clone()), "last": z.last})
-}
-
-#[cfg(target_arch = "wasm32")]
-fn start(_app: &mut WordApp, _cmd: Command, _ctx: Option<egui::Context>) -> Result<Value, String> {
-    Err("Zotero works with the WordCraft desktop app".into())
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn start(app: &mut WordApp, cmd: Command, ctx: Option<egui::Context>) -> Result<Value, String> {
-    use std::sync::mpsc::channel;
-    if let Some(b) = app.zotero.busy {
-        return Err(format!("Zotero is still working on {}; finish in Zotero's window first", b.wire_name()));
+    fn status(app: &WordApp) -> Value {
+        let z = &app.zotero;
+        json!({"busy": z.busy.map(Command::wire_name), "waitingForAnswer": z.alert.as_ref().map(|a| a.text.clone()), "last": z.last})
     }
-    let document = app.session.document_id();
-    let (call_tx, call_rx) = channel::<Pending>();
-    let (done_tx, done_rx) = channel();
-    let wake = ctx.clone();
-    let opts = app.zotero.options.clone();
-    let spawned = std::thread::Builder::new().name("zotero".into()).spawn(move || {
-        let r = wordcraft_zotero::client::run_command(&opts, cmd, &mut |call| {
-            let (tx, rx) = channel();
-            if call_tx.send(Pending { call: call.clone(), reply: tx }).is_err() {
-                return Err("WordCraft closed the document".into());
-            }
+
+    #[cfg(target_arch = "wasm32")]
+    fn start(_app: &mut WordApp, _cmd: Command, _ctx: Option<egui::Context>) -> Result<Value, String> {
+        Err("Zotero works with the WordCraft desktop app".into())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn start(app: &mut WordApp, cmd: Command, ctx: Option<egui::Context>) -> Result<Value, String> {
+        use std::sync::mpsc::channel;
+        if let Some(b) = app.zotero.busy {
+            return Err(format!("Zotero is still working on {}; finish in Zotero's window first", b.wire_name()));
+        }
+        let document = app.session.document_id();
+        let (call_tx, call_rx) = channel::<Pending>();
+        let (done_tx, done_rx) = channel();
+        let wake = ctx.clone();
+        let opts = app.zotero.options.clone();
+        let spawned = std::thread::Builder::new().name("zotero".into()).spawn(move || {
+            let r = wordcraft_zotero::client::run_command(&opts, cmd, &mut |call| {
+                let (tx, rx) = channel();
+                if call_tx.send(Pending { call: call.clone(), reply: tx }).is_err() {
+                    return Err("WordCraft closed the document".into());
+                }
+                if let Some(c) = &wake {
+                    c.request_repaint();
+                }
+                rx.recv().unwrap_or_else(|_| Err("WordCraft closed the document".into()))
+            });
+            let _ = done_tx.send(r.map_err(|e| e.to_string()));
             if let Some(c) = &wake {
                 c.request_repaint();
             }
-            rx.recv().unwrap_or_else(|_| Err("WordCraft closed the document".into()))
         });
-        let _ = done_tx.send(r.map_err(|e| e.to_string()));
-        if let Some(c) = &wake {
+        if let Err(e) = spawned {
+            return Err(format!("could not start the Zotero connection: {e}"));
+        }
+        let z = &mut app.zotero;
+        z.calls = Some(call_rx);
+        z.done = Some(done_rx);
+        z.busy = Some(cmd);
+        z.document = document;
+        log::info!("Zotero: {} started", cmd.wire_name());
+        app.status(tl!("Waiting for Zotero…"));
+        Ok(json!({"started": cmd.wire_name()}))
+    }
+
+    /// Answer the question Zotero is waiting on with `button` (Zotero's numbering).
+    pub fn answer(app: &mut WordApp, button: i64) -> Result<Value, String> {
+        let Some(a) = app.zotero.alert.take() else { return Err("Zotero isn't asking anything".into()) };
+        let max = match a.buttons {
+            3 => 2,
+            _ => 1,
+        };
+        if !(0..=max).contains(&button) {
+            let text = a.text.clone();
+            app.zotero.alert = Some(a);
+            return Err(format!("button must be 0–{max} for this question: {text}"));
+        }
+        let _ = a.reply.send(Ok(json!(button)));
+        if let Some(c) = &app.ctx {
             c.request_repaint();
         }
-    });
-    if let Err(e) = spawned {
-        return Err(format!("could not start the Zotero connection: {e}"));
+        Ok(json!({"answered": button}))
     }
-    let z = &mut app.zotero;
-    z.calls = Some(call_rx);
-    z.done = Some(done_rx);
-    z.busy = Some(cmd);
-    z.document = document;
-    log::info!("Zotero: {} started", cmd.wire_name());
-    app.status(tl!("Waiting for Zotero…"));
-    Ok(json!({"started": cmd.wire_name()}))
-}
 
-/// Answer the question Zotero is waiting on with `button` (Zotero's numbering).
-pub fn answer(app: &mut WordApp, button: i64) -> Result<Value, String> {
-    let Some(a) = app.zotero.alert.take() else { return Err("Zotero isn't asking anything".into()) };
-    let max = match a.buttons {
-        3 => 2,
-        _ => 1,
-    };
-    if !(0..=max).contains(&button) {
-        let text = a.text.clone();
-        app.zotero.alert = Some(a);
-        return Err(format!("button must be 0–{max} for this question: {text}"));
-    }
-    let _ = a.reply.send(Ok(json!(button)));
-    if let Some(c) = &app.ctx {
-        c.request_repaint();
-    }
-    Ok(json!({"answered": button}))
-}
-
-/// Answer Zotero's calls (each frame).
-pub fn poll(app: &mut WordApp, ctx: &egui::Context) {
-    if app.zotero.busy.is_none() {
-        return;
-    }
-    // Each window polls as it draws: the window showing the document the command started in
-    // answers it.
-    if app.windows.native() && app.session.document_id() != app.zotero.document && app.session.is_open(app.zotero.document) {
-        return;
-    }
-    let mut changed = false;
-    // One alert at a time: Zotero sends nothing else while it waits for the answer.
-    while app.zotero.alert.is_none() {
-        let Some(p) = app.zotero.calls.as_ref().and_then(|rx| rx.try_recv().ok()) else { break };
-        if p.call.method == "Document_displayAlert" && app.session.document_id() == app.zotero.document {
-            let text = p.call.args.get(1).and_then(Value::as_str).unwrap_or("").to_string();
-            let buttons = p.call.args.get(3).and_then(Value::as_i64).unwrap_or(0);
+    /// Answer Zotero's calls (each frame).
+    pub fn poll(app: &mut WordApp, ctx: &egui::Context) {
+        if app.zotero.busy.is_none() {
+            return;
+        }
+        // Each window polls as it draws: the window showing the document the command started in
+        // answers it.
+        if app.windows.native() && app.session.document_id() != app.zotero.document && app.session.is_open(app.zotero.document) {
+            return;
+        }
+        let mut changed = false;
+        // One alert at a time: Zotero sends nothing else while it waits for the answer.
+        while app.zotero.alert.is_none() {
+            let Some(p) = app.zotero.calls.as_ref().and_then(|rx| rx.try_recv().ok()) else { break };
+            if p.call.method == "Document_displayAlert" && app.session.document_id() == app.zotero.document {
+                let text = p.call.args.get(1).and_then(Value::as_str).unwrap_or("").to_string();
+                let buttons = p.call.args.get(3).and_then(Value::as_i64).unwrap_or(0);
+                app.zotero.methods.push(p.call.method.clone());
+                app.zotero.alert = Some(Alert { text, buttons, reply: p.reply });
+                continue;
+            }
             app.zotero.methods.push(p.call.method.clone());
-            app.zotero.alert = Some(Alert { text, buttons, reply: p.reply });
-            continue;
-        }
-        app.zotero.methods.push(p.call.method.clone());
-        if app.session.document_id() != app.zotero.document {
-            // New or Open replaced the document this command started in: its edits must not land in the new one.
-            let _ = p.reply.send(Err("WordCraft replaced the document this command started in".into()));
-            continue;
-        }
-        let rev = app.session.rev();
-        let mut host = AppHost { ctx };
-        let r = app.zotero.bridge.handle(&mut app.session, &mut host, &p.call);
-        changed |= app.session.rev() != rev || p.call.method == "Field_select";
-        let _ = p.reply.send(r);
-    }
-    if changed {
-        app.canvas.scroll_to_caret = true;
-        app.canvas.caret_visible_since = crate::now_ms();
-    }
-    let done = app.zotero.done.as_ref().and_then(|rx| rx.try_recv().ok());
-    if let Some(r) = done {
-        let cmd = app.zotero.busy.take();
-        app.zotero.calls = None;
-        app.zotero.done = None;
-        app.zotero.alert = None;
-        let name = cmd.map(Command::wire_name).unwrap_or("");
-        let methods = std::mem::take(&mut app.zotero.methods).join(", ");
-        match &r {
-            Ok(o) => log::info!(
-                "Zotero: {name} {} after {} calls ({methods}){}",
-                if o.completed { "completed" } else { "ended without completing" },
-                o.calls,
-                if o.errors.is_empty() { String::new() } else { format!("; errors: {}", o.errors.join(" | ")) }
-            ),
-            Err(e) => log::warn!("Zotero: {name} failed: {e}"),
-        }
-        match r {
-            Ok(o) => {
-                app.zotero.last = Some(json!({"command": name, "completed": o.completed, "calls": o.calls, "errors": o.errors}));
-                app.status(if o.completed { tl!("Zotero: done") } else { tl!("Zotero: cancelled") });
+            if app.session.document_id() != app.zotero.document {
+                // New or Open replaced the document this command started in: its edits must not land in the new one.
+                let _ = p.reply.send(Err("WordCraft replaced the document this command started in".into()));
+                continue;
             }
-            Err(e) => {
-                app.zotero.last = Some(json!({"command": name, "error": e}));
-                app.status(e);
-            }
+            let rev = app.session.rev();
+            let mut host = AppHost { ctx };
+            let r = app.zotero.bridge.handle(&mut app.session, &mut host, &p.call);
+            changed |= app.session.rev() != rev || p.call.method == "Field_select";
+            let _ = p.reply.send(r);
         }
-        app.canvas.want_focus = true;
+        if changed {
+            app.canvas.scroll_to_caret = true;
+            app.canvas.caret_visible_since = crate::now_ms();
+        }
+        let done = app.zotero.done.as_ref().and_then(|rx| rx.try_recv().ok());
+        if let Some(r) = done {
+            let cmd = app.zotero.busy.take();
+            app.zotero.calls = None;
+            app.zotero.done = None;
+            app.zotero.alert = None;
+            let name = cmd.map(Command::wire_name).unwrap_or("");
+            let methods = std::mem::take(&mut app.zotero.methods).join(", ");
+            match &r {
+                Ok(o) => log::info!(
+                    "Zotero: {name} {} after {} calls ({methods}){}",
+                    if o.completed { "completed" } else { "ended without completing" },
+                    o.calls,
+                    if o.errors.is_empty() { String::new() } else { format!("; errors: {}", o.errors.join(" | ")) }
+                ),
+                Err(e) => log::warn!("Zotero: {name} failed: {e}"),
+            }
+            match r {
+                Ok(o) => {
+                    app.zotero.last = Some(json!({"command": name, "completed": o.completed, "calls": o.calls, "errors": o.errors}));
+                    app.status(if o.completed { tl!("Zotero: done") } else { tl!("Zotero: cancelled") });
+                }
+                Err(e) => {
+                    app.zotero.last = Some(json!({"command": name, "error": e}));
+                    app.status(e);
+                }
+            }
+            app.canvas.want_focus = true;
+        }
+    }
+
+    /// Zotero's question, as a dialog.
+    pub fn show_alert(app: &mut WordApp, ctx: &egui::Context) {
+        let Some(a) = app.zotero.alert.as_ref() else { return };
+        // In the window showing the document Zotero is working on.
+        if app.windows.native() && app.session.document_id() != app.zotero.document && app.session.is_open(app.zotero.document) {
+            return;
+        }
+        // Buttons and the value Zotero expects for each.
+        // macOS puts the default button last (rightmost), with Cancel just before it.
+        let buttons: &[(&str, i64)] = match (a.buttons, cfg!(target_os = "macos")) {
+            (1, false) => &[("OK", 1), ("Cancel", 0)],
+            (1, true) => &[("Cancel", 0), ("OK", 1)],
+            (2, false) => &[("Yes", 1), ("No", 0)],
+            (2, true) => &[("No", 0), ("Yes", 1)],
+            (3, false) => &[("Yes", 2), ("No", 1), ("Cancel", 0)],
+            (3, true) => &[("No", 1), ("Cancel", 0), ("Yes", 2)],
+            _ => &[("OK", 1)],
+        };
+        let mut picked = None;
+        egui::Window::new("Zotero")
+            .id(egui::Id::unique("zotero-alert"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, -40.0))
+            .show(ctx, |ui| {
+                ui.set_max_width(460.0);
+                ui.label(a.text.trim_end());
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    for (label, v) in buttons {
+                        if ui.button(tl!(label)).clicked() {
+                            picked = Some(*v);
+                        }
+                    }
+                });
+            });
+        if let Some(v) = picked {
+            let _ = answer(app, v);
+            ctx.request_repaint();
+        }
     }
 }
 
-/// Zotero's question, as a dialog.
-pub fn show_alert(app: &mut WordApp, ctx: &egui::Context) {
-    let Some(a) = app.zotero.alert.as_ref() else { return };
-    // In the window showing the document Zotero is working on.
-    if app.windows.native() && app.session.document_id() != app.zotero.document && app.session.is_open(app.zotero.document) {
-        return;
+#[cfg(not(feature = "desktop-integrations"))]
+mod imp {
+    use serde_json::{Value, json};
+
+    use crate::WordApp;
+
+    /// Stub Zotero connection state when `desktop-integrations` is disabled.
+    #[derive(Default)]
+    pub struct ZoteroLink {
+        pub busy: Option<&'static str>,
+        pub last: Option<Value>,
     }
-    // Buttons and the value Zotero expects for each.
-    // macOS puts the default button last (rightmost), with Cancel just before it.
-    let buttons: &[(&str, i64)] = match (a.buttons, cfg!(target_os = "macos")) {
-        (1, false) => &[("OK", 1), ("Cancel", 0)],
-        (1, true) => &[("Cancel", 0), ("OK", 1)],
-        (2, false) => &[("Yes", 1), ("No", 0)],
-        (2, true) => &[("No", 0), ("Yes", 1)],
-        (3, false) => &[("Yes", 2), ("No", 1), ("Cancel", 0)],
-        (3, true) => &[("No", 1), ("Cancel", 0), ("Yes", 2)],
-        _ => &[("OK", 1)],
-    };
-    let mut picked = None;
-    egui::Window::new("Zotero")
-        .id(egui::Id::unique("zotero-alert"))
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, -40.0))
-        .show(ctx, |ui| {
-            ui.set_max_width(460.0);
-            ui.label(a.text.trim_end());
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                for (label, v) in buttons {
-                    if ui.button(tl!(label)).clicked() {
-                        picked = Some(*v);
-                    }
-                }
-            });
-        });
-    if let Some(v) = picked {
-        let _ = answer(app, v);
-        ctx.request_repaint();
+
+    impl ZoteroLink {
+        pub(crate) fn alert_open(&self) -> bool {
+            false
+        }
     }
+
+    pub fn command(_app: &mut WordApp, id: &str, _params: &Value, _ctx: Option<&egui::Context>) -> Option<Result<Value, String>> {
+        let name = id.strip_prefix("ui.zotero.")?;
+        if name == "status" {
+            return Some(Ok(json!({"busy": Value::Null, "waitingForAnswer": Value::Null, "last": Value::Null})));
+        }
+        Some(Err("Zotero works with the WordCraft desktop app".into()))
+    }
+
+    pub fn answer(_app: &mut WordApp, _button: i64) -> Result<Value, String> {
+        Err("Zotero works with the WordCraft desktop app".into())
+    }
+
+    pub fn poll(_app: &mut WordApp, _ctx: &egui::Context) {}
+
+    pub fn show_alert(_app: &mut WordApp, _ctx: &egui::Context) {}
 }
+
+pub use imp::{ZoteroLink, answer, command, poll, show_alert};
 
 #[cfg(test)]
+#[cfg(feature = "desktop-integrations")]
 mod tests {
     use std::net::TcpListener;
 
@@ -325,7 +367,7 @@ mod tests {
         app.ctx = Some(ctx.clone());
         assert_eq!(app.run("ui.zotero.addEditCitation", json!({})).unwrap(), json!({"started": "addEditCitation"}));
         assert!(app.run("ui.zotero.refresh", json!({})).is_err(), "one session at a time");
-        pump(&mut app, &ctx, |a| a.zotero.alert.is_some());
+        pump(&mut app, &ctx, |a| a.zotero.alert_open());
         let st = app.run("ui.zotero.status", json!({})).unwrap();
         assert_eq!(st["waitingForAnswer"], "Keep going?");
         assert!(app.run("ui.zotero.answer", json!({"button": 7})).is_err());

@@ -1,0 +1,14 @@
+{
+  "name": "smoke-vite",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "wordcraft-web": "file:../../tarball/wordcraft-web.tgz"
+  },
+  "devDependencies": {
+    "vite": "latest"
+  },
+  "scripts": {
+    "build": "vite build"
+  }
+}

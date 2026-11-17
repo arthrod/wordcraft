@@ -595,6 +595,13 @@ impl Session {
         self.used_because().is_none()
     }
 
+    /// Whether the document changed since it was made or opened: `dirty` without the part a
+    /// save resets, so an edit a save already cleared still answers true, and a freshly opened
+    /// or replaced document answers false.
+    pub fn changed_since_made(&self) -> bool {
+        self.rev != self.made_rev
+    }
+
     /// Why the active document doesn't count as an untouched blank one, if it doesn't.
     pub(crate) fn used_because(&self) -> Option<&'static str> {
         if self.path.is_some() {

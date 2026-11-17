@@ -1,18 +1,33 @@
 use super::{CharProps, Document, Paragraph, ResolvedChar};
 
+#[cfg(any(feature = "inline-proof", feature = "hyphenation"))]
+pub use wordcraft_proof::ProofLang;
+
+/// Placeholder proofing language when `inline-proof` and `hyphenation` are compiled out.
+#[cfg(not(any(feature = "inline-proof", feature = "hyphenation")))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct ProofLang;
+
+#[cfg(not(any(feature = "inline-proof", feature = "hyphenation")))]
+impl ProofLang {
+    pub fn from_tag(_tag: Option<&str>) -> Self {
+        Self
+    }
+}
+
 /// One run's proofing: its bytes in the paragraph, its language (`w:lang`, resolved through the
 /// styles: the document default, paragraph and character styles, direct formatting) and whether
 /// it is left unchecked ("Do not check spelling or grammar", hidden text, hyperlinks).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProofRun {
     pub range: std::ops::Range<usize>,
-    pub lang: wordcraft_proof::ProofLang,
+    pub lang: ProofLang,
     pub skip: bool,
 }
 
 impl ProofRun {
     pub(super) fn of(range: std::ops::Range<usize>, rc: &ResolvedChar) -> ProofRun {
-        ProofRun { range, lang: wordcraft_proof::ProofLang::from_tag(rc.lang.as_deref()), skip: rc.no_proof || rc.hidden || rc.link.is_some() }
+        ProofRun { range, lang: ProofLang::from_tag(rc.lang.as_deref()), skip: rc.no_proof || rc.hidden || rc.link.is_some() }
     }
 }
 
@@ -24,7 +39,8 @@ pub fn proof_runs(doc: &Document, p: &Paragraph, table: Option<&CharProps>) -> V
 }
 
 /// The language of the run holding byte `off` (English past the last run).
-pub(super) fn lang_at(runs: &[ProofRun], off: usize) -> wordcraft_proof::ProofLang {
+#[cfg_attr(not(any(feature = "inline-proof", feature = "hyphenation")), allow(dead_code))]
+pub(super) fn lang_at(runs: &[ProofRun], off: usize) -> ProofLang {
     let k = runs.partition_point(|r| r.range.end <= off);
     runs.get(k).filter(|r| r.range.start <= off).map(|r| r.lang).unwrap_or_default()
 }
@@ -34,6 +50,7 @@ pub(super) fn lang_at(runs: &[ProofRun], off: usize) -> wordcraft_proof::ProofLa
 /// and none touching a run left unchecked.
 ///
 /// `list_item` (see [`is_list_item`]) turns off the capital-first-word grammar rule.
+#[cfg(feature = "inline-proof")]
 pub fn paragraph_issues(
     p: &Paragraph,
     runs: &[ProofRun],
@@ -45,7 +62,7 @@ pub fn paragraph_issues(
         return Vec::new();
     }
     let text = proof_text(p);
-    let spans: Vec<(std::ops::Range<usize>, wordcraft_proof::ProofLang)> = runs.iter().map(|r| (r.range.clone(), r.lang)).collect();
+    let spans: Vec<(std::ops::Range<usize>, ProofLang)> = runs.iter().map(|r| (r.range.clone(), r.lang)).collect();
     let skipped = skipped_ranges(runs);
     let issues = wordcraft_proof::check_text_with(&text, &spans, spelling, grammar, list_item);
     if skipped.is_empty() {
@@ -57,6 +74,7 @@ pub fn paragraph_issues(
 /// The byte ranges of the runs left unchecked, in order, those that overlap merged: their
 /// starts and ends both rise, so [`overlaps`] finds an issue's by binary search instead of
 /// looking at every run for every issue.
+#[cfg(any(test, feature = "inline-proof"))]
 fn skipped_ranges(runs: &[ProofRun]) -> Vec<(usize, usize)> {
     let mut ranges: Vec<(usize, usize)> = runs.iter().filter(|r| r.skip).map(|r| (r.range.start, r.range.end)).collect();
     ranges.sort_unstable();
@@ -73,6 +91,7 @@ fn skipped_ranges(runs: &[ProofRun]) -> Vec<(usize, usize)> {
 
 /// Whether bytes `a..b` overlap one of `skipped` ([`skipped_ranges`]): the first range ending
 /// after `a` is the only one that can, as every later one starts no earlier.
+#[cfg(any(test, feature = "inline-proof"))]
 fn overlaps(skipped: &[(usize, usize)], a: usize, b: usize) -> bool {
     crate::work::steps(1);
     let k = skipped.partition_point(|&(_, e)| e <= a);
@@ -85,6 +104,7 @@ pub fn is_list_item(doc: &Document, p: &Paragraph) -> bool {
 }
 
 /// Spelling and grammar issues as squiggles (start, end, is grammar), less spelling issues overlapping `typing`.
+#[cfg(feature = "inline-proof")]
 pub(super) fn proof_issues(
     p: &Paragraph,
     runs: &[ProofRun],
@@ -97,6 +117,55 @@ pub(super) fn proof_issues(
         .map(|i| (i.start, i.end, i.kind == wordcraft_proof::IssueKind::Grammar))
         .filter(|&(a, b, grammar)| grammar || !typing.is_some_and(|(s, e)| a < e && s < b))
         .collect()
+}
+
+/// Empty squiggles when `inline-proof` is disabled (background workers or core builds without proofing).
+#[cfg(not(feature = "inline-proof"))]
+pub(super) fn proof_issues(
+    _p: &Paragraph,
+    _runs: &[ProofRun],
+    _opts: &crate::ProofOptions,
+    _typing: Option<(usize, usize)>,
+    _list_item: bool,
+) -> Vec<(usize, usize, bool)> {
+    Vec::new()
+}
+
+/// The parts a *worker* proof check of `p` needs (deferred-items plan §3.2): the proof text,
+/// the language of each byte range as a BCP 47 tag, the byte ranges left unchecked, and the
+/// list-item flag — exactly what [`paragraph_issues`] checks inline, in the same byte space, so
+/// a reply's spans are `ParaLayout::issues`-shaped and the display can draw them as-is.
+///
+/// The whole paragraph in one string, bounded like the inline check: `None` for a paragraph
+/// that is empty or past 100,000 bytes (nothing to check; a worker request would refuse it).
+#[cfg(any(feature = "inline-proof", feature = "hyphenation"))]
+pub fn check_parts(doc: &Document, p: &Paragraph) -> Option<(String, Vec<(u32, u32, String)>, Vec<(u32, u32)>, bool)> {
+    if p.text.trim().is_empty() || p.text.len() > 100_000 {
+        return None;
+    }
+    let runs = proof_runs(doc, p, None);
+    let text = proof_text(p);
+    let mut spans: Vec<(u32, u32, String)> = Vec::with_capacity(runs.len());
+    let mut skip: Vec<(u32, u32)> = Vec::new();
+    for r in &runs {
+        let (Some(start), Some(end)) = (u32::try_from(r.range.start).ok(), u32::try_from(r.range.end).ok()) else { continue };
+        if r.skip {
+            skip.push((start, end));
+        } else {
+            spans.push((start, end, r.lang.tag().to_string()));
+        }
+    }
+    // The worker applies its own `skip` filter; `overlaps` there (like the inline check's) is
+    // easiest on merged, ordered ranges.
+    skip.sort_unstable();
+    let mut merged: Vec<(u32, u32)> = Vec::with_capacity(skip.len());
+    for (s, e) in skip {
+        match merged.last_mut() {
+            Some(last) if s < last.1 => last.1 = last.1.max(e),
+            _ => merged.push((s, e)),
+        }
+    }
+    Some((text, spans, merged, is_list_item(doc, p)))
 }
 
 /// Text for proofing with the same byte offsets: inline objects and tracked deletions become

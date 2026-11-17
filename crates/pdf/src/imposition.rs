@@ -40,6 +40,25 @@ pub struct Sheet {
     pub slots: Vec<Slot>,
 }
 
+/// Unimposed logical page geometry onto paper (`(paper_w, paper_h, page_w, k, dy)`).
+pub(crate) fn fit_page_dimensions(page: &wordcraft_layout::Page) -> (f32, f32, f32, f32, f32) {
+    let paper_w = page.w - page.markup;
+    let ok = |v: f32| v.is_finite() && v.abs() < 1e6;
+    if page.markup > 0.0 && ok(page.markup) && ok(page.w) && paper_w > 1.0 {
+        let k = paper_w / page.w;
+        (paper_w, page.h, paper_w, k, page.h * (1.0 - k) / 2.0)
+    } else {
+        (page.w, page.h, page.w, 1.0, 0.0)
+    }
+}
+
+fn single_paper_size(page: &wordcraft_layout::Page, paper: Option<(f32, f32)>) -> (f32, f32) {
+    let (own_w, own_h, ..) = fit_page_dimensions(page);
+    let Some((w, h)) = paper else { return (own_w, own_h) };
+    let f = wordcraft_geom::fit_to_paper(own_w, own_h, w, h);
+    (f.paper_w, f.paper_h)
+}
+
 impl Imposition {
     /// Plan one copy, keeping selected page order and padding only after its last page.
     /// Paper defaults to the first selected page. Two-up and booklets use landscape sheets.
@@ -60,7 +79,7 @@ impl Imposition {
                 .iter()
                 .map(|&page| {
                     let pg = lay.pages.get(page).ok_or(PdfError::BadPage(page.saturating_add(1)))?;
-                    let (width, height) = super::export::Fit::of(pg, paper).paper_size();
+                    let (width, height) = single_paper_size(pg, paper);
                     Ok(Sheet { width, height, slots: vec![Slot { page, x: 0.0, y: 0.0, width, height }] })
                 })
                 .collect();

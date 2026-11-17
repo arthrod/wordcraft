@@ -1,0 +1,40 @@
+[package]
+name = "wordcraft-worker-pdf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WordCraft PDF export dedicated worker (krilla off the main thread; deferred-items plan §3.4)"
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "wordcraft-worker-pdf"
+path = "src/main.rs"
+
+[dependencies]
+wordcraft-doc = { workspace = true }
+wordcraft-docx = { workspace = true }
+wordcraft-fonts = { workspace = true }
+wordcraft-layout = { workspace = true, default-features = false }
+wordcraft-pdf = { workspace = true }
+wordcraft-worker-proto = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# The worker only runs in the browser: the minimal bundle there, the full one on host builds
+# (an unconditional feature would unify it onto every workspace build and test).
+wordcraft-fonts = { workspace = true, features = ["minimal-wasm-fonts"] }
+# std HashMap/HashSet random seeds need a JS entropy source in the browser.
+getrandom = { workspace = true, features = ["wasm_js"] }
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["DedicatedWorkerGlobalScope", "ErrorEvent", "MessageEvent", "console"] }
+
+[dev-dependencies]
+# Host tests only: the worker's PDF must match the engine's own export for the same options
+# (Print Markup, comments, digits). Never a normal dependency: the worker stays free of the
+# engine (`cargo xtask wasm-budget` reads the wasm32 normal-dependency tree).
+wordcraft-engine = { workspace = true }

@@ -258,6 +258,7 @@ fn math_placeholders_are_exact_math_input_only() {
 /// starts a speech thread, and process-wide names other tests change are gathered every frame.
 #[test]
 fn untranslated_interface_text() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     pseudo::set(true);
     let ctx = egui::Context::default();
     let mut app = fresh_app(&ctx);
@@ -643,6 +644,7 @@ fn frame_at(ctx: &egui::Context, app: &mut WordApp, width: f32) -> Vec<(String, 
 /// so a grid that is not wrapped in `rtl::grid` fails here.
 #[test]
 fn the_arabic_interface_is_mirrored_and_never_panics() {
+    let _lock = super::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     // Arabic comes from the craft-i18n catalogs: a build without them (English only) has nothing to mirror.
     let Some(ar) = super::Lang::from_code("ar") else {
         eprintln!("skipped: built without the craft-i18n Arabic catalog (set CRAFT_I18N_DIR to a checkout)");

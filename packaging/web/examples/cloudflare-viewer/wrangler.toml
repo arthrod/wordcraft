@@ -1,0 +1,21 @@
+name = "wordcraft-server-viewer"
+main = "build/worker/shim.mjs"
+compatibility_date = "2026-11-13"
+
+[build]
+command = "cargo install -q worker-build --locked && worker-build --release"
+
+[assets]
+directory = "../../../../dist/web"
+binding = "ASSETS"
+# The Worker runs first only for its own routes (Cloudflare glob patterns, see Workers Static
+# Assets: run_worker_first): `/view` (viewer page, upload form and upload) and `/view/*` (the page
+# image). `/view*` would also catch names like `/viewer.html`, so the two are listed apart.
+# Every other request is the static site, served without invoking the Worker.
+run_worker_first = ["/view", "/view/*"]
+
+# A protected upload's key derivation and a long document's layout are the expensive parts of a
+# request. A cap on CPU time per request (Paid plan) makes a hostile file cost at most this much:
+# the runtime ends the request instead of letting it run to the plan's default (30 s).
+[limits]
+cpu_ms = 5000

@@ -1,0 +1,26 @@
+[package]
+name = "wordcraft-viewer-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WordCraft viewer-first page module: paints a .docx from the view-only worker on 2D canvases and loads the editor only on an edit action (plan 10.3)"
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "wordcraft-viewer-web"
+path = "src/main.rs"
+
+[dependencies]
+# The wire contract with the view-only worker. Nothing of the document stack, the engine or
+# the editor is linked here (`cargo xtask wasm-budget`): this is the page's first module and
+# its size is what a reader waits for.
+wordcraft-worker-proto = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlElement", "HtmlHeadElement", "HtmlCanvasElement", "HtmlScriptElement", "HtmlButtonElement", "HtmlInputElement", "CanvasRenderingContext2d", "ImageData", "CssStyleDeclaration", "Event", "EventTarget", "ErrorEvent", "PromiseRejectionEvent", "KeyboardEvent", "MouseEvent", "MessageEvent", "Location", "UrlSearchParams", "Url", "Request", "RequestInit", "RequestMode", "ReadableStream", "ReadableStreamDefaultReader", "Response", "Headers", "Worker", "WorkerOptions", "WorkerType", "Node", "DomTokenList", "console"] }

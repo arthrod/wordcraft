@@ -10,17 +10,20 @@
 pub mod color;
 mod fontdb;
 pub mod math;
+pub mod packs;
 mod script;
 mod ui_fallback;
 pub mod word;
 
+pub use fontdb::DocumentFaces;
 pub use fontdb::{
     FALLBACK_FAMILY, FONT_FILE_EXTS, FaceRef, FontDb, FontFace, FontFormat, Installed, LocalName, MAX_FONT_FILE_BYTES, UserFont, UserFontError,
-    base_style, bundled, decode_font_file, is_font_file_name, name_language_matches, sniff, system_font_dirs,
+    base_style, bundled, bundled_by_stem, decode_font_file, is_font_file_name, name_language_matches, sniff, system_font_dirs,
 };
 pub use harfrust::Feature;
 use harfrust::{Direction, ShapeOptions, ShapePlan, ShapePlanKey, Shaper, Tag, UnicodeBuffer};
 pub use kurbo::BezPath;
+pub use packs::{PACK_FACES, PackFace, PackFontError, WantedPackFace, decode_pack_bytes, pick_pack_face};
 pub use script::{fallback_rank, is_emoji, joins_cursively, needs_layout_tables, script_fallbacks};
 use skrifa::MetadataProvider;
 use skrifa::instance::Size;
@@ -402,7 +405,9 @@ mod tests {
         assert!(fams.iter().any(|f| f == DEFAULT_FAMILY), "{fams:?}");
         assert!(fams.iter().any(|f| f == "Source Sans 3"));
         let styles = db.styles(DEFAULT_FAMILY);
-        for s in ["Regular", "Italic", "Bold", "Semibold"] {
+        // The minimal web font set bundles only the Regular face of each family.
+        let expected: &[&str] = if cfg!(feature = "minimal-wasm-fonts") { &["Regular"] } else { &["Regular", "Italic", "Bold", "Semibold"] };
+        for s in expected {
             assert!(styles.iter().any(|x| x == s), "{s} in {styles:?}");
         }
     }
@@ -653,6 +658,23 @@ mod tests {
             assert!(japanese_fonts().next().is_none() && japanese_document_fonts().is_empty());
             let latin = db.face(DEFAULT_FAMILY, "Regular");
             assert!(db.fallback_for('語', latin.id()).is_none(), "no bundled Japanese font");
+        }
+    }
+
+    #[test]
+    fn bundled_by_stem_returns_valid_sfnt_fonts() {
+        for stem in ["Inter-Regular", "Inter-Medium", "SourceSans3-Regular", "SourceSerif4-Regular"] {
+            let bytes = bundled_by_stem(stem).unwrap_or_else(|| panic!("missing bundled font {stem}"));
+            assert!(skrifa::FontRef::from_index(bytes, 0).is_ok(), "{stem} is not a valid SFNT font");
+        }
+        assert!(bundled_by_stem("DoesNotExist").is_none());
+        if cfg!(feature = "minimal-wasm-fonts") {
+            assert_eq!(bundled().len(), 4);
+        } else {
+            assert_eq!(bundled().len(), 13);
+            for stem in ["Inter-SemiBold", "JetBrainsMono-Regular", "SourceSans3-Bold", "SourceSerif4-Bold"] {
+                assert!(bundled_by_stem(stem).is_some(), "missing {stem}");
+            }
         }
     }
 }
