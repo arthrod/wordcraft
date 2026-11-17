@@ -45,11 +45,14 @@ const PATHS_REFRESH: u32 = 30;
 /// forever; overlays are bounded independently by `wordcraft_layout::proof_overlay`.
 const MAX_TRACKED: usize = 2048;
 
-/// One remembered paragraph: the [`check_key`] hash it was last checked at, and whether a
-/// reply is due.
+/// One remembered paragraph: the [`check_key`] hash it was last checked at, whether a reply
+/// is due, and the id of the request that reply answers (0 when none is due). A path is a
+/// position, so it can pass from one paragraph to another while a reply is on the way; only
+/// the reply to `request` may settle this entry.
 struct Tracked {
     key: u64,
     pending: bool,
+    request: u32,
 }
 
 /// A reply waiting for the next tick to apply: the request's paragraph, the check-input hash
@@ -238,6 +241,9 @@ pub(crate) fn tick(session: &wordcraft_engine::Session, asset_base: &str, ctx: &
     // Send outside the borrow: the reply closures push into the same scheduler.
     for (id, req, story, path, checked_key) in sends {
         let key = (story, path.clone());
+        // The reply is applied by the next frame's pump, and nothing else schedules a frame
+        // when the page is idle without focus (no caret blink), so the reply asks for one.
+        let wake = ctx.clone();
         let sent = crate::web::proof_worker::with(|w| {
             w.check(&req, move |reply| {
                 if smoke && let Ok(r) = &reply {
@@ -246,6 +252,7 @@ pub(crate) fn tick(session: &wordcraft_engine::Session, asset_base: &str, ctx: &
                 SCHED.with(|s| {
                     s.borrow_mut().replies.push(Apply { id, story, path, checked_key, reply });
                 });
+                wake.request_repaint();
             })
         });
         if !matches!(sent, Some(Ok(_))) {
@@ -254,8 +261,9 @@ pub(crate) fn tick(session: &wordcraft_engine::Session, asset_base: &str, ctx: &
             SCHED.with(|s| {
                 let mut s = s.borrow_mut();
                 s.ids.remove(&id);
-                if let Some(t) = s.tracked.get_mut(&key) {
+                if let Some(t) = s.tracked.get_mut(&key).filter(|t| t.request == id) {
                     t.pending = false;
+                    t.request = 0;
                 }
             });
         }
@@ -281,7 +289,13 @@ fn pump(session: &wordcraft_engine::Session) -> (bool, Vec<(u32, proto::CheckReq
             s.ids.remove(&apply.id);
             let key = (apply.story, apply.path.clone());
             let Some(t) = s.tracked.get_mut(&key) else { continue };
+            // A reply to a request this entry no longer waits on (its paragraph left and the
+            // path now holds another one, already sent under a newer id) settles nothing.
+            if t.request != apply.id {
+                continue;
+            }
             t.pending = false;
+            t.request = 0;
             let spans = match &apply.reply {
                 Ok(reply) => {
                     reply.issues.iter().filter(|i| i.start < i.end).map(|i| (i.start, i.end, i.kind == proto::IssueKind::Grammar)).collect::<Vec<_>>()
@@ -350,7 +364,7 @@ fn pump(session: &wordcraft_engine::Session) -> (bool, Vec<(u32, proto::CheckReq
             let Some((text, spans, skip, list_item)) = wordcraft_layout::para::check_parts(&session.doc, p) else {
                 // Nothing to check (empty or past the protocol's bound): remember it so the
                 // scan doesn't rebuild the parts every frame.
-                s.tracked.insert((StoryRef::Body, path), Tracked { key: input, pending: false });
+                s.tracked.insert((StoryRef::Body, path), Tracked { key: input, pending: false, request: 0 });
                 continue;
             };
             static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
@@ -367,7 +381,7 @@ fn pump(session: &wordcraft_engine::Session) -> (bool, Vec<(u32, proto::CheckReq
                 list_item,
             };
             s.ids.insert(id, (StoryRef::Body, path.clone()));
-            s.tracked.insert((StoryRef::Body, path.clone()), Tracked { key: input, pending: true });
+            s.tracked.insert((StoryRef::Body, path.clone()), Tracked { key: input, pending: true, request: id });
             sends.push((id, req, StoryRef::Body, path, input));
         }
     });
@@ -590,6 +604,52 @@ mod tests {
         SCHED.with(|s| s.borrow_mut().ticks = PATHS_REFRESH - 1);
         let (_, sends) = pump(&session);
         assert!(sends.iter().any(|(_, req, _, _, _)| req.text == "aaa"), "the restored text was not re-checked");
+    }
+
+    /// A reply for a request whose paragraph left the document and whose path was then taken
+    /// by another paragraph belongs to neither: the newer request stays due, and its entry
+    /// stays, so the paragraph is not checked a third time.
+    #[test]
+    fn a_reply_for_a_superseded_request_leaves_the_newer_one_due() {
+        let mut session = wordcraft_engine::Session::new(Document::from_text("aaa\nbbb"));
+        let mut sent = Vec::new();
+        for _ in 0..(PATHS_REFRESH + 8) {
+            sent.extend(pump(&session).1);
+        }
+        let (old_id, _, _, path, old_key) = sent.into_iter().find(|(_, req, ..)| req.text == "bbb").expect("the second paragraph is checked");
+        // The paragraph goes; a refresh forgets it while its reply is still on the way.
+        session.doc = Document::from_text("aaa");
+        SCHED.with(|s| s.borrow_mut().ticks = PATHS_REFRESH - 1);
+        pump(&session);
+        SCHED.with(|s| assert!(!s.borrow().tracked.contains_key(&(StoryRef::Body, path.clone()))));
+        // Another paragraph takes the path and is sent under a new id.
+        session.doc = Document::from_text("aaa\nzzz");
+        SCHED.with(|s| s.borrow_mut().ticks = PATHS_REFRESH - 1);
+        let mut resent = Vec::new();
+        for _ in 0..8 {
+            resent.extend(pump(&session).1);
+        }
+        let new_id = resent.iter().find(|(_, req, ..)| req.text == "zzz").expect("the new paragraph is checked").0;
+        assert_ne!(new_id, old_id);
+        // The first request's reply arrives now. Empty `paths` keeps this pump from scanning.
+        SCHED.with(|s| {
+            let mut s = s.borrow_mut();
+            s.paths.clear();
+            s.replies.push(Apply {
+                id: old_id,
+                story: StoryRef::Body,
+                path: path.clone(),
+                checked_key: old_key,
+                reply: Ok(proto::CheckReply { para_id: old_id as u64, issues: Vec::new() }),
+            });
+        });
+        pump(&session);
+        SCHED.with(|s| {
+            let s = s.borrow();
+            let entry = s.tracked.get(&(StoryRef::Body, path.clone())).expect("the newer request's entry is kept");
+            assert!(entry.pending, "the newer request's reply is still due");
+            assert!(s.ids.contains_key(&new_id));
+        });
     }
 
     /// Pumps until the single-paragraph document's check is sent, queues a clean reply for it
