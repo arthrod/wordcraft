@@ -147,3 +147,15 @@ test("the request log records the requested path and the file served", async () 
   );
   rmSync(root, { recursive: true, force: true });
 });
+
+test("a longer URL that starts with the attempted wasm URL is not the expected miss", () => {
+  const other = "http://127.0.0.1:65269/other.js";
+  assert.equal(isExpectedWasmMiss(smokeMiss, { url: other, text: `error fetching ${AUTO_URL}.map` }), false);
+  assert.equal(isExpectedWasmMiss(smokeMiss, { url: other, text: `error fetching ${AUTO_URL}/x` }), false);
+  assert.equal(isExpectedWasmMiss(smokeMiss, { url: other, text: `error fetching ${AUTO_URL}?v=2` }), false);
+  // The URL as a whole token still counts: quoted, at the end, or closing a sentence.
+  assert.equal(isExpectedWasmMiss(smokeMiss, { url: other, text: `failed fetching '${AUTO_URL}'` }), true);
+  assert.equal(isExpectedWasmMiss(smokeMiss, { url: other, text: `error fetching ${AUTO_URL}` }), true);
+  assert.equal(isExpectedWasmMiss(smokeMiss, { url: other, text: `error fetching ${AUTO_URL}.` }), true);
+  assert.equal(isExpectedWasmMiss(smokeMiss, { url: other, text: `first ${AUTO_URL}.map then ${AUTO_URL}` }), true);
+});

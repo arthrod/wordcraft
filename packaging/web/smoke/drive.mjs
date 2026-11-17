@@ -166,7 +166,18 @@ export function autoWasmUrl(smoke) {
 // expected miss into a false error.
 export function isExpectedWasmMiss(smoke, e) {
   const url = autoWasmUrl(smoke);
-  return smoke?.wasmAuto === false && url !== null && (e.url === url || (e.text ?? "").includes(url));
+  return smoke?.wasmAuto === false && url !== null && (e.url === url || namesUrl(e.text ?? "", url));
+}
+
+// Whether `text` names `url` as a whole: some occurrence is not followed by a
+// character that would make it a longer URL (`….wasm.map`, `….wasm/x`,
+// `….wasm?v=2`). A dot counts as continuing only when a URL character follows
+// it, so a sentence that ends "….wasm." still names the URL.
+function namesUrl(text, url) {
+  for (let at = text.indexOf(url); at !== -1; at = text.indexOf(url, at + 1)) {
+    if (!/^(?:[\w~%/?#&=+@:-]|\.[\w~%-])/.test(text.slice(at + url.length))) return true;
+  }
+  return false;
 }
 
 async function waitForConsole(logs, match, timeoutMs) {
