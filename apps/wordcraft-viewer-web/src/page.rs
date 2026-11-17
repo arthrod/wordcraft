@@ -55,7 +55,8 @@ const TOO_LARGE: &str = "The document is too large for this viewer.";
 /// What the reader is told about a password longer than the viewer takes.
 const PASSWORD_TOO_LONG: &str = "That password is too long.";
 const EMPTY: &str = "The document is empty.";
-/// Pixels kept in painted pages outside the window, in bytes of RGBA.
+/// Pixels kept in painted pages outside the window (the pages in view and the overscan around
+/// them, which are kept whatever this says), in bytes of RGBA.
 const CACHE_BUDGET_BYTES: u64 = 192 << 20;
 /// Where the document comes from. Kept until a document is held (`State::hold`): if the viewer
 /// fails before, the editor fetches it again.
@@ -1146,7 +1147,9 @@ fn on_page(page: &Rc<Page>, generation: u32, key: PageKey, env: &proto::Envelope
                         // Not painted after all: the book must not count it (a blank canvas kept
                         // as if painted), nor ask for it again at once (a loop); another scale is.
                         if !painted {
-                            state.cache.failed(key);
+                            // A canvas that still holds a bitmap holds the one it showed before.
+                            let kept_old = state.canvases.get(&key.page).is_some_and(|canvas| canvas.bitmap.is_some());
+                            state.cache.not_painted(key, kept_old);
                         }
                         if let Some(canvas) = state.canvases.get(&key.page) {
                             place(canvas, state.sheet.pages.get(key.page as usize), state.sheet.zoom);

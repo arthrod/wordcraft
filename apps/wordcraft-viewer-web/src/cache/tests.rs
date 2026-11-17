@@ -175,3 +175,34 @@ fn a_page_that_arrived_but_could_not_be_painted_is_not_painted_and_not_asked_aga
     assert_eq!(cache.painted(0), Some(key(0, 2.0)));
     assert_eq!(cache.used_bytes(), 4 * MB);
 }
+
+/// A page painted at one scale whose repaint at another scale fails with the old bitmap still
+/// on its canvas is still counted at the old scale: the book holds what the canvas holds.
+#[test]
+fn a_failed_repaint_that_kept_the_old_bitmap_keeps_its_bytes_counted() {
+    let mut cache = PageCache::new(64 * MB);
+    cache.plan(&[key(0, 1.0)]);
+    assert!(matches!(cache.arrived(key(0, 1.0), 4 * MB, &[0]), Arrival::Paint { .. }));
+    cache.plan(&[key(0, 2.0)]);
+    assert!(matches!(cache.arrived(key(0, 2.0), 16 * MB, &[0]), Arrival::Paint { .. }));
+    assert_eq!(cache.used_bytes(), 16 * MB);
+    cache.not_painted(key(0, 2.0), true);
+    assert_eq!(cache.painted(0), Some(key(0, 1.0)), "the canvas still shows the old scale");
+    assert_eq!(cache.used_bytes(), 4 * MB);
+    assert_eq!(cache.plan(&[key(0, 2.0)]), vec![], "the scale that failed is not asked for again");
+
+    // The canvas was cleared before the failure: nothing is held, nothing is counted.
+    cache.plan(&[key(0, 3.0)]);
+    assert!(matches!(cache.arrived(key(0, 3.0), 36 * MB, &[0]), Arrival::Paint { .. }));
+    cache.not_painted(key(0, 3.0), false);
+    assert_eq!((cache.painted(0), cache.used_bytes()), (None, 0));
+
+    // An old entry is not brought back for another page, or after the page was forgotten.
+    cache.plan(&[key(1, 1.0)]);
+    assert!(matches!(cache.arrived(key(1, 1.0), 4 * MB, &[1]), Arrival::Paint { .. }));
+    cache.plan(&[key(1, 2.0)]);
+    assert!(matches!(cache.arrived(key(1, 2.0), 16 * MB, &[1]), Arrival::Paint { .. }));
+    cache.forget(1);
+    cache.not_painted(key(1, 2.0), true);
+    assert_eq!((cache.painted(1), cache.used_bytes()), (None, 0));
+}
