@@ -183,7 +183,7 @@ impl Handover {
     }
 
     /// The machine for an editor-first page that a host drives through the editor's own bridge
-    /// (`?host=`): the page is the editor's, as it was before the viewer existed. The editor is
+    /// (`?host=parent`): the page is the editor's, as it was before the viewer existed. The editor is
     /// fetched without a WebGL probe, because the editor itself tells the host when it cannot
     /// start (`wordcraft:failed`), and a failure leaves the notice but never starts the viewer:
     /// the viewer would open the sample, and a hosted page opens only what the host sends.

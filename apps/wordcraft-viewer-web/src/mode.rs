@@ -41,8 +41,9 @@ impl Mode {
     /// 1. `explicit`: the `mode` option of `start(options)`, or the mount element's
     ///    `data-mode` attribute.
     /// 2. `query_mode`: the `?mode=` URL parameter.
-    /// 3. `hosted`: the URL carries `?host=`, the editor's own embedding switch. A page that
-    ///    embedded the editor before the viewer existed keeps getting the editor.
+    /// 3. `hosted`: the URL carries `host=parent` ([`hosted_by_parent`]), the editor's own
+    ///    embedding switch. A page that embedded the editor before the viewer existed keeps
+    ///    getting the editor.
     /// 4. Viewer-first.
     ///
     /// A name that does not parse is skipped, not an error: the next rule decides.
@@ -55,9 +56,29 @@ impl Mode {
     }
 }
 
+/// Whether the page's query string (`location.search`) asks for the editor's parent-window
+/// bridge. It is the bridge's own rule, to the letter: one `&`-separated pair that is exactly
+/// `host=parent`. Any other `host` value starts no bridge, so it must not make this page give up
+/// its own viewer, which is what shows the document when the editor cannot start.
+pub fn hosted_by_parent(search: &str) -> bool {
+    search.strip_prefix('?').unwrap_or(search).split('&').any(|pair| pair == "host=parent")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_bridges_own_switch_counts_as_hosted() {
+        for hosted in ["?host=parent", "host=parent", "?a=1&host=parent", "?host=parent&doc=a.docx"] {
+            assert!(hosted_by_parent(hosted), "{hosted:?}");
+        }
+        for not in ["", "?", "?host", "?host=", "?host=page", "?host=1", "?host=parents", "?xhost=parent", "?host=%70arent", "?HOST=parent"] {
+            assert!(!hosted_by_parent(not), "{not:?}");
+            assert_eq!(Mode::resolve(None, None, hosted_by_parent(not)), Mode::ViewerFirst, "{not:?}");
+        }
+        assert_eq!(Mode::resolve(None, None, hosted_by_parent("?host=parent")), Mode::EditorFirst);
+    }
 
     #[test]
     fn names_parse_and_read_back() {

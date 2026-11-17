@@ -274,7 +274,7 @@ fn launch(options: &JsValue, auto: bool) -> Result<JsValue, JsValue> {
     let query = web_sys::UrlSearchParams::new_with_str(&search).ok();
     let query_get = |key: &str| query.as_ref().and_then(|q| q.get(key));
     let explicit = str_prop(options, "mode")?.or_else(|| root.get_attribute("data-mode"));
-    let mode = Mode::resolve(explicit.as_deref(), query_get("mode").as_deref(), query.as_ref().is_some_and(|q| q.has("host")));
+    let mode = Mode::resolve(explicit.as_deref(), query_get("mode").as_deref(), crate::mode::hosted_by_parent(&search));
 
     let asset_base = str_prop(options, "assetBase")?.map(|b| normalize_asset_base(&b)).unwrap_or_else(|| default_asset_base(&document));
     let given = prop(options, "document");
@@ -293,10 +293,10 @@ fn launch(options: &JsValue, auto: bool) -> Result<JsValue, JsValue> {
         prop(options, "editorWaitMs").as_f64().or_else(|| root.get_attribute("data-editor-wait-ms").map(|v| js_sys::Number::parse_float(&v))),
     );
 
-    // An editor-first page with the editor's host bridge (`?host=`) is the editor's page: see
+    // An editor-first page with the editor's host bridge (`?host=parent`) is the editor's page: see
     // `Handover::hosted`. Otherwise a browser without WebGL, which the editor draws with, is
     // told so before anything of the editor is fetched.
-    let hosted = mode == Mode::EditorFirst && query.as_ref().is_some_and(|q| q.has("host"));
+    let hosted = mode == Mode::EditorFirst && crate::mode::hosted_by_parent(&search);
     let (handover, first) = if hosted { Handover::hosted() } else { Handover::start(mode, mode != Mode::ViewOnly && has_webgl(&document)) };
 
     let Built { status, edit, notice, password: password_ask, scroller, sheet } =
