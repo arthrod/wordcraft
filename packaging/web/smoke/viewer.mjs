@@ -40,8 +40,8 @@ import puppeteer from "puppeteer-core";
 import { findChrome, startServer } from "./drive.mjs";
 
 const USAGE = "usage: node viewer.mjs --dist <dir> [--core <dir>] [--font <file.ttf>] [--out <file.json>]";
-// Strict: a misspelt option or one without its value is an error (exit 2), not a run against
-// the defaults that looks like a pass.
+// Strict: a misspelt option or one without its value (an empty one too) is an error
+// (exit 2), not a run against the defaults that looks like a pass.
 function parseArgs(argv) {
   const parsed = {};
   for (let i = 0; i < argv.length; i += 2) {
@@ -49,7 +49,7 @@ function parseArgs(argv) {
     const value = argv[i + 1];
     let why = null;
     if (!["dist", "core", "font", "out"].includes(name)) why = `unknown argument ${JSON.stringify(argv[i])}`;
-    else if (value === undefined || value.startsWith("--")) why = `--${name} needs a value`;
+    else if (value === undefined || value === "" || value.startsWith("--")) why = `--${name} needs a value`;
     else if (name in parsed) why = `--${name} given twice`;
     if (why) {
       console.error(`viewer.mjs: ${why}\n${USAGE}`);
