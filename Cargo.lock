@@ -7546,6 +7546,7 @@ dependencies = [
 name = "wordcraft-viewer"
 version = "0.18.1"
 dependencies = [
+ "craft-zip",
  "image",
  "serde_json",
  "wasm-bindgen",

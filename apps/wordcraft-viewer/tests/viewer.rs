@@ -143,6 +143,24 @@ fn a_render_over_the_pixel_cap_is_refused_before_anything_is_drawn() {
 }
 
 #[test]
+fn the_raster_size_is_what_render_draws_or_refuses() {
+    let (_, docx) = samples().remove(1);
+    let session = open(&docx, None).unwrap();
+    for scale in [0.5, 1.0, 1.25, 8.0] {
+        let img = session.render(0, scale).unwrap();
+        assert_eq!(session.raster_size(0, scale), Ok((img.width, img.height)), "scale {scale}");
+    }
+    for scale in [MAX_SCALE, 0.0, -1.0, f32::NAN, f32::INFINITY, MAX_SCALE * 2.0] {
+        // By code: NaN in `BadScale` never equals itself.
+        assert_eq!(code(session.raster_size(0, scale)), code(session.render(0, scale)), "scale {scale}");
+        assert_ne!(code(session.raster_size(0, scale)), "ok");
+    }
+    let pages = session.page_count();
+    let past = u32::try_from(pages).unwrap();
+    assert_eq!(session.raster_size(past, 1.0), Err(ViewerError::NoSuchPage { page: past, pages }));
+}
+
+#[test]
 fn junk_documents_are_errors_never_panics() {
     let (_, docx) = samples().remove(1);
     assert_eq!(open(&[], None).err(), Some(ViewerError::EmptyDocument));
@@ -261,4 +279,57 @@ fn missing_fonts_are_listed_once_in_name_order() {
     let missing = session.missing_fonts();
     assert_eq!(missing.len(), 2, "{missing:?}");
     assert!(missing[0].eq_ignore_ascii_case("viewer absent aa") && missing[1].eq_ignore_ascii_case("viewer absent bb"), "{missing:?}");
+}
+
+/// A package whose text is set in `family`, with `font` embedded for it through the font table
+/// as a plain `.ttf` (the all-zero key): its faces then answer to the table's name.
+fn document_embedding(family: &str, font: &[u8]) -> Vec<u8> {
+    const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    const PR: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
+    let rels = |t: &str, g: &str| {
+        format!(r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="{PR}"><Relationship Id="rId{t}" Type="{R}/{t}" Target="{g}"/></Relationships>"#)
+            .into_bytes()
+    };
+    let files: [(&str, Vec<u8>); 7] = [
+        (
+            "[Content_Types].xml",
+            br#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="ttf" ContentType="application/x-font-ttf"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/fontTable.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"/></Types>"#.to_vec(),
+        ),
+        ("_rels/.rels", rels("officeDocument", "word/document.xml")),
+        ("word/_rels/document.xml.rels", rels("fontTable", "fontTable.xml")),
+        (
+            "word/document.xml",
+            format!(r#"<w:document xmlns:w="{W}"><w:body><w:p><w:r><w:rPr><w:rFonts w:ascii="{family}" w:hAnsi="{family}"/></w:rPr><w:t>Embedded.</w:t></w:r></w:p></w:body></w:document>"#).into_bytes(),
+        ),
+        (
+            "word/fontTable.xml",
+            format!(r#"<w:fonts xmlns:w="{W}" xmlns:r="{R}"><w:font w:name="{family}"><w:embedRegular r:id="rIdfont" w:fontKey="{{00000000-0000-0000-0000-000000000000}}"/></w:font></w:fonts>"#).into_bytes(),
+        ),
+        ("word/_rels/fontTable.xml.rels", rels("font", "fonts/font1.ttf")),
+        ("word/fonts/font1.ttf", font.to_vec()),
+    ];
+    let mut zip = craft_zip::Writer::new();
+    for (name, data) in files {
+        zip.add(name, &data, craft_zip::Compression::Deflated).unwrap();
+    }
+    zip.finish().unwrap()
+}
+
+#[test]
+fn a_document_can_be_opened_without_installing_its_embedded_fonts() {
+    let face = *wordcraft_fonts::bundled().first().unwrap();
+    // Left out: laid out as if nothing were embedded, and the process never gets the font.
+    const LEFT_OUT: &str = "Viewer Embedded Left Out Zq";
+    let session = wordcraft_viewer::open_without_embedded_fonts(&document_embedding(LEFT_OUT, face), None).unwrap();
+    assert_eq!(session.missing_fonts(), vec![LEFT_OUT.to_string()]);
+    assert!(!wordcraft_fonts::FontDb::global().has_family(LEFT_OUT));
+    assert_eq!(open_in(LEFT_OUT).missing_fonts(), vec![LEFT_OUT.to_string()]);
+    // `open` still loads them, for as long as the session lives.
+    const LOADED: &str = "Viewer Embedded Loaded Zq";
+    let loaded = open(&document_embedding(LOADED, face), None).unwrap();
+    assert_eq!(loaded.missing_fonts(), Vec::<String>::new());
+    assert!(wordcraft_fonts::FontDb::global().has_family(LOADED));
+    drop(loaded);
+    assert!(!wordcraft_fonts::FontDb::global().has_family(LOADED), "a closed session's fonts are released");
 }

@@ -112,6 +112,7 @@ Two ready-to-deploy examples live in this directory (with `.assetsignore` exclud
 
 - **Static deployment (Cloudflare Pages):** <https://wordcraft-web-pages.pages.dev/?sample&demo=1> ([`examples/cloudflare-pages/`](examples/cloudflare-pages/README.md)) — zero backend, serves `dist/web/` directly (`6.39 MB` Brotli / `6.69 MB` Gzip wasm transfer, measured live 2026-11-15).
 - **Hybrid Edge deployment (Cloudflare Workers + `workers-rs`):** <https://wordcraft-web-worker.cicero-im.workers.dev/?sample&demo=1> ([`examples/cloudflare-workers/`](examples/cloudflare-workers/README.md)) — serves the same browser-first static assets via `ASSETS` (`4.87 MB` Brotli sidecar / `6.35 MB` Zstd / `6.69 MB` Gzip wasm transfer, measured live 2026-11-15) plus `GET /api/health` and an unlogged `POST /api/convert` endpoint bounded to `4 MiB` (`Cache-Control: no-store`).
+- **Server-rendered viewer (Cloudflare Workers + `workers-rs`, not deployed):** [`examples/cloudflare-viewer/`](examples/cloudflare-viewer/README.md) — the Worker opens a `.docx` with the view-only core and sends the reader a small HTML page and PNG pages, no wasm and no script (`/view?doc=samples/welcome.docx`, or upload at `/view`; page 1 of the sample is about 50 KB in all).
 
 ### Headless conversion benchmark (`wordcraft-cli`, Step 5.2a)
 
