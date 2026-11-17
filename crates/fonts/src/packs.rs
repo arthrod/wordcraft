@@ -193,11 +193,18 @@ pub fn pick_pack_face(faces: &[impl PackFaceLike], wanted: &WantedPackFace) -> O
     faces
         .iter()
         .enumerate()
+        // A family with no face at all takes any pack face of it (the slant and the weight are
+        // then synthesized over the real family); one that is there takes only a face that stops
+        // the synthesis it is wanted for.
         .filter(|(_, f)| {
-            f.family().eq_ignore_ascii_case(&wanted.family) && f.italic() == wanted.italic && (!wanted.bold || !wanted.available || f.weight() >= 600)
+            f.family().eq_ignore_ascii_case(&wanted.family)
+                && (!wanted.available || (f.italic() == wanted.italic && (!wanted.bold || f.weight() >= 600)))
         })
         .min_by(|(_, a), (_, b)| {
-            (i32::from(a.weight()) - target).abs().cmp(&(i32::from(b.weight()) - target).abs()).then(b.weight().cmp(&a.weight()))
+            (a.italic() != wanted.italic)
+                .cmp(&(b.italic() != wanted.italic))
+                .then((i32::from(a.weight()) - target).abs().cmp(&(i32::from(b.weight()) - target).abs()))
+                .then(b.weight().cmp(&a.weight()))
         })
         .map(|(i, _)| i)
 }
@@ -291,7 +298,16 @@ mod tests {
         let missing = WantedPackFace { family: "JetBrains Mono".to_string(), bold: true, italic: false, available: false };
         assert_eq!(pick_pack_face(PACK_FACES, &missing).map(|i| PACK_FACES[i].stem), Some("JetBrainsMono-Regular"));
         let missing_it = WantedPackFace { family: "JetBrains Mono".to_string(), bold: false, italic: true, available: false };
-        assert_eq!(pick_pack_face(PACK_FACES, &missing_it), None, "no italic face exists to fetch");
+        assert_eq!(
+            pick_pack_face(PACK_FACES, &missing_it).map(|i| PACK_FACES[i].stem),
+            Some("JetBrainsMono-Regular"),
+            "the family's upright face under a synthesized slant beats a substitute"
+        );
+        let missing_bold_it = WantedPackFace { bold: true, ..missing_it.clone() };
+        assert_eq!(pick_pack_face(PACK_FACES, &missing_bold_it).map(|i| PACK_FACES[i].stem), Some("JetBrainsMono-Regular"));
+        // A missing family that does have an italic pack face gets that one, not the upright.
+        let missing_serif_it = WantedPackFace { family: "Source Serif 4".to_string(), bold: false, italic: true, available: false };
+        assert_eq!(pick_pack_face(PACK_FACES, &missing_serif_it).map(|i| PACK_FACES[i].stem), Some("SourceSerif4-It"));
     }
 
     #[test]
