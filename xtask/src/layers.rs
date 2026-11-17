@@ -39,7 +39,6 @@ pub const TABLE: &[(&str, Class)] = &[
     // The mapping between `doc` and the shared craft-wordmodel, for the L2 format adapters.
     ("model-bridge", Class::Layer(1)),
     ("fonts", Class::Layer(1)),
-    ("metafile", Class::Layer(1)),
     ("layout", Class::Layer(2)),
     ("docx", Class::Layer(2)),
     ("docbin", Class::Layer(2)),
