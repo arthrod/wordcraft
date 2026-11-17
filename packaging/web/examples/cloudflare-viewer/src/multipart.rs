@@ -1,7 +1,8 @@
 //! A bounded `multipart/form-data` reader (RFC 7578) for the upload form: a `file` part and an
 //! optional `password` part. The body is already capped ([`crate::limits::MAX_BODY_BYTES`]); here
 //! the number of parts, each header block and the password are bounded too, and the delimiter
-//! search is linear in the body whatever its bytes are. Nothing is copied but the password.
+//! search is linear in the body whatever its bytes are. The file is never copied: the password
+//! is, and so are the short header values a part is named by (each within the header cap).
 
 use crate::limits::{MAX_FORM_PARTS, MAX_PART_HEADER_BYTES};
 
@@ -161,7 +162,9 @@ pub fn parse<'a>(body: &'a [u8], boundary: &str) -> Result<Upload<'a>, FormError
         if rest.starts_with(b"--") {
             break; // The close delimiter.
         }
-        // Transport padding (spaces and tabs) may follow a delimiter before its CRLF.
+        // Transport padding (spaces and tabs) may follow a delimiter before its CRLF. Anything
+        // else after it is refused, not read on as data: RFC 2046 §5.1.1 forbids the boundary as
+        // the prefix of any line inside a part, so a sender that puts one there is malformed.
         let pad = rest.iter().take_while(|b| matches!(b, b' ' | b'\t')).count();
         if !rest.get(pad..).is_some_and(|r| r.starts_with(b"\r\n")) {
             return Err(FormError::Malformed);
@@ -262,6 +265,17 @@ mod tests {
         }
         out.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
         out
+    }
+
+    /// RFC 2046 §5.1.1: the boundary must not begin any line inside a part. A body that has one
+    /// (the boundary followed by more) is refused; it is not guessed to be data.
+    #[test]
+    fn a_line_that_begins_with_the_boundary_inside_a_part_is_malformed() {
+        let body = form("abc", &[("file", Some("a.docx"), b"PK\r\n--abcd still data")]);
+        assert_eq!(parse(&body, "abc").err(), Some(FormError::Malformed));
+        // The same bytes not at the start of a line are data.
+        let body = form("abc", &[("file", Some("a.docx"), b"PK --abcd still data")]);
+        assert_eq!(parse(&body, "abc").map(|u| u.file.to_vec()).ok(), Some(b"PK --abcd still data".to_vec()));
     }
 
     #[test]

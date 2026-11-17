@@ -63,17 +63,20 @@ impl std::fmt::Display for OpenError {
     }
 }
 
-/// Open an uploaded `.docx` as [`open_document`] does, without its embedded fonts: the font
-/// database is the isolate's, shared by every request and never pruned, so a font an upload
-/// brought would stay, drawing later visitors' documents with it, and repeated uploads would grow
-/// the isolate without end. An upload is laid out with the bundled faces and the site's packs.
+/// Open an uploaded `.docx` as [`open_document`] does, without its embedded fonts. The font
+/// database is the isolate's, shared by every request: a font an upload brought would be there
+/// for a document laid out while that upload is held, and the bytes of the files the database
+/// keeps count against one budget for the isolate (`wordcraft_viewer::MAX_EMBEDDED_FONT_BYTES`),
+/// which strangers' uploads would spend. An upload is laid out with the bundled faces and the
+/// site's packs.
 pub fn open_upload(bytes: &[u8], password: Option<&str>) -> Result<Session, OpenError> {
     open_package(bytes, password, wordcraft_viewer::open_without_embedded_fonts)
 }
 
 /// Open `bytes` as a `.docx`, decrypting it with `password` when it is protected. A deployed
-/// document's embedded fonts are installed for the life of the isolate, as the app does when it
-/// opens a file: they are the deployment's, like the documents.
+/// document's embedded fonts are installed while its session is held and leave when it is
+/// dropped, as in the viewer: they are the deployment's, like the documents, so a request laid
+/// out meanwhile may be drawn in them.
 pub fn open_document(bytes: &[u8], password: Option<&str>) -> Result<Session, OpenError> {
     open_package(bytes, password, wordcraft_viewer::open)
 }

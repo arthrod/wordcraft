@@ -248,7 +248,11 @@ async fn fetch_asset(env: &Env, base: &Url, path: &str, cap: usize) -> worker::R
     if let Some(answer) = Fetched::from_status(resp.status_code()) {
         return Ok(answer);
     }
-    match read_capped(resp.stream()?, cap).await {
+    // A body that cannot be opened is the store failing, like one that breaks off.
+    let Ok(stream) = resp.stream() else {
+        return Ok(Fetched::Failed);
+    };
+    match read_capped(stream, cap).await {
         Ok(bytes) => Ok(Fetched::Bytes(bytes)),
         Err(Capped::TooLarge) => Ok(Fetched::TooLarge),
         Err(Capped::Broken) => Ok(Fetched::Failed),
@@ -291,7 +295,11 @@ async fn upload(req: &mut Request, env: &Env, url: &Url) -> worker::Result<Respo
         Ok(b) => b,
         Err(e) => return form_error(if e == multipart::FormError::NotMultipart { 415 } else { 400 }, &e.to_string(), false),
     };
-    let body = match read_capped(req.stream()?, MAX_BODY_BYTES).await {
+    // A body that cannot be opened is an interrupted upload, like one that breaks off.
+    let Ok(stream) = req.stream() else {
+        return form_error(400, "The upload was interrupted.", false);
+    };
+    let body = match read_capped(stream, MAX_BODY_BYTES).await {
         Ok(b) => b,
         Err(Capped::TooLarge) => return form_error(413, &too_large, false),
         Err(Capped::Broken) => return form_error(400, "The upload was interrupted.", false),
