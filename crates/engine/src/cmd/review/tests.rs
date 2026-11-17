@@ -1060,7 +1060,19 @@ fn rtf_tracked_changes_accept_and_reject_after_opening_and_round_trip() {
     }
 }
 
-#[cfg(test)]
+/// Without the built-in checker the proofing commands say so; they do not report a clean document.
+#[cfg(all(test, not(feature = "inline-proof")))]
+#[test]
+fn proofing_commands_say_when_the_checker_is_not_in_the_build() {
+    let mut s = crate::Session::new(wordcraft_doc::Document::from_text("The quick brwn fox."));
+    for cmd in ["review.spelling", "review.issues", "review.suggestions"] {
+        let err = s.run(cmd, &json!({})).unwrap_err().to_string();
+        assert!(err.contains("not included in this build"), "{cmd}: {err}");
+    }
+}
+
+// These need the built-in checker (`inline-proof`): without it the commands above refuse.
+#[cfg(all(test, feature = "inline-proof"))]
 mod spelling_navigation_tests {
     use super::*;
     use wordcraft_doc::{Document, Pos, StoryRef};
