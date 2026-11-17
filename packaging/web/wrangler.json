@@ -34,6 +34,21 @@
       },
       "limits": { "cpu_ms": 300000 }
     },
+    "server-lazy": {
+      "name": "wordcraft-server-viewer-lazy",
+      "main": "examples/cloudflare-viewer/build/worker/shim.mjs",
+      "workers_dev": true,
+      "build": {
+        "command": "cargo install -q worker-build --locked && worker-build --release",
+        "cwd": "examples/cloudflare-viewer"
+      },
+      "assets": {
+        "directory": "../../dist/web",
+        "binding": "ASSETS",
+        "run_worker_first": ["/view", "/view/*"]
+      },
+      "limits": { "cpu_ms": 300000 }
+    },
     "editor": {
       "name": "wordcraft-web-worker",
       "main": "examples/cloudflare-workers/build/worker/shim.mjs",

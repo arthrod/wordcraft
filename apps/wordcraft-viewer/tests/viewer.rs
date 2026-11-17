@@ -333,3 +333,28 @@ fn a_document_can_be_opened_without_installing_its_embedded_fonts() {
     drop(loaded);
     assert!(!wordcraft_fonts::FontDb::global().has_family(LOADED), "a closed session's fonts are released");
 }
+
+/// A session that keeps a window of pages (a server drawing one page per request) reports the
+/// same pages and sizes as a whole one and draws every page the same, the ones outside its
+/// window included.
+#[test]
+fn a_session_keeping_a_window_of_pages_draws_them_as_a_whole_session_does() {
+    for (name, docx) in samples() {
+        let whole = open(&docx, None).unwrap();
+        let pages = u32::try_from(whole.page_count()).unwrap();
+        for window in [0..1, pages - 1..pages, 0..pages.min(3)] {
+            let kept = wordcraft_viewer::open_pages(&docx, None, window.clone()).unwrap();
+            assert_eq!(kept.page_count(), whole.page_count(), "{name} {window:?}");
+            // Each page in the window, and one outside it where there is one.
+            let outside = (0..pages).find(|p| !window.contains(p));
+            for page in window.clone().chain(outside) {
+                assert_eq!(kept.page_size(page).unwrap(), whole.page_size(page).unwrap(), "{name} {window:?} page {page}");
+                let (a, b) = (kept.render(page, 1.0).unwrap(), whole.render(page, 1.0).unwrap());
+                assert_eq!(first_difference(&a, &b), None, "{name} {window:?} page {page}");
+            }
+            assert!(matches!(kept.render(pages, 1.0), Err(ViewerError::NoSuchPage { .. })), "{name}");
+        }
+        let kept = wordcraft_viewer::open_pages_without_embedded_fonts(&docx, None, 0..1).unwrap();
+        assert_eq!(kept.page_count(), whole.page_count(), "{name}");
+    }
+}

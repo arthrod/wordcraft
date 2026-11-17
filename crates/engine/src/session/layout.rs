@@ -77,6 +77,8 @@ impl Session {
             typing_word: typing,
             filename: filename.clone(),
             filepath: filepath.clone(),
+            // The editor shows and edits every page.
+            keep_pages: None,
         };
         let l = Arc::new(wordcraft_layout::layout(&self.doc, &mut self.cache, &opts));
         let [newest, _] = std::mem::take(&mut self.layout);

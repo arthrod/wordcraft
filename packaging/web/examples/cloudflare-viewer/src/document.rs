@@ -69,19 +69,41 @@ impl std::fmt::Display for OpenError {
 /// keeps count against one budget for the isolate (`wordcraft_viewer::MAX_EMBEDDED_FONT_BYTES`),
 /// which strangers' uploads would spend. An upload is laid out with the bundled faces and the
 /// site's packs.
+// The Worker opens with a page window (`open_upload_pages`); the tests compare with this.
+#[cfg(test)]
 pub fn open_upload(bytes: &[u8], password: Option<&str>) -> Result<Session, OpenError> {
     open_package(bytes, password, wordcraft_viewer::open_without_embedded_fonts)
+}
+
+/// [`open_upload`], keeping the content of `pages` only ([`open_document_pages`]).
+pub fn open_upload_pages(bytes: &[u8], password: Option<&str>, pages: std::ops::Range<u32>) -> Result<Session, OpenError> {
+    open_package(bytes, password, |package, pw| wordcraft_viewer::open_pages_without_embedded_fonts(package, pw, pages))
 }
 
 /// Open `bytes` as a `.docx`, decrypting it with `password` when it is protected. A deployed
 /// document's embedded fonts are installed while its session is held and leave when it is
 /// dropped, as in the viewer: they are the deployment's, like the documents, so a request laid
 /// out meanwhile may be drawn in them.
+// The Worker opens with a page window (`open_document_pages`); the tests compare with this.
+#[cfg(test)]
 pub fn open_document(bytes: &[u8], password: Option<&str>) -> Result<Session, OpenError> {
     open_package(bytes, password, wordcraft_viewer::open)
 }
 
-fn open_package(bytes: &[u8], password: Option<&str>, open: fn(&[u8], Option<&str>) -> Result<Session, ViewerError>) -> Result<Session, OpenError> {
+/// [`open_document`], for an answer that draws `pages` (0-based, the end not included). The session reports
+/// every page and its size but holds the laid-out text of those alone
+/// (`wordcraft_viewer::open_pages`): a whole layout of a document of some hundreds of pages
+/// does not fit an isolate's 128 MB (measured 2026-11-17: 229 MB for 500 pages of text, 59 MB
+/// keeping one page).
+pub fn open_document_pages(bytes: &[u8], password: Option<&str>, pages: std::ops::Range<u32>) -> Result<Session, OpenError> {
+    open_package(bytes, password, |package, pw| wordcraft_viewer::open_pages(package, pw, pages))
+}
+
+fn open_package(
+    bytes: &[u8],
+    password: Option<&str>,
+    open: impl FnOnce(&[u8], Option<&str>) -> Result<Session, ViewerError>,
+) -> Result<Session, OpenError> {
     if bytes.len() > MAX_BODY_BYTES {
         return Err(OpenError::TooLarge { bytes: bytes.len() });
     }
@@ -242,6 +264,24 @@ pub(crate) mod tests {
     /// An upload's embedded fonts are not installed in the process-wide font database: on a
     /// server they would stay for every later request, drawing other visitors' documents with
     /// them, and repeated uploads would grow the isolate without end.
+    /// A session that keeps one page reports the pages and sizes a whole one does and draws
+    /// its page the same; a page it does not keep is still drawn.
+    #[test]
+    fn a_session_keeping_one_page_answers_as_a_whole_one() {
+        let whole = open_document(&long_docx(), None).unwrap();
+        let pages = u32::try_from(whole.page_count()).unwrap();
+        assert!(pages > 2);
+        let last = pages - 1;
+        for open in [open_document_pages, open_upload_pages] {
+            let kept = open(&long_docx(), None, last..pages).unwrap();
+            assert_eq!(kept.page_count(), whole.page_count());
+            for page in [last, 0] {
+                assert_eq!(page_raster(&kept, page, 1.0).ok(), page_raster(&whole, page, 1.0).ok());
+                assert_eq!(page_png(&kept, page, 1.0).ok(), page_png(&whole, page, 1.0).ok(), "page {page}");
+            }
+        }
+    }
+
     #[test]
     fn an_uploads_embedded_fonts_do_not_outlive_it() {
         fonts();

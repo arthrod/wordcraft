@@ -60,6 +60,7 @@ mod ctx;
 mod floats;
 mod flow;
 mod headers;
+mod keep;
 mod metafile;
 mod missing;
 mod notes;
@@ -235,6 +236,13 @@ pub struct LayoutOptions {
     pub filename: Option<Arc<str>>,
     /// Document full path for FILENAME \p fields ([`FieldCtx::filepath`]).
     pub filepath: Option<Arc<str>>,
+    /// Keep the content of these pages only (0-based, the end not included): every page is
+    /// still made, with its size and number, but the others hold no content, and what was
+    /// measured for them is dropped as the layout passes them. For a host that shows one page
+    /// of a long document and has little memory (a server that draws a page per request): a
+    /// whole layout holds every page's shaped text at once. `None` keeps everything. Ignored
+    /// while footnotes are numbered per page, which reads every page's notes back.
+    pub keep_pages: Option<std::ops::Range<usize>>,
 }
 
 /// The word being typed ([`LayoutOptions::typing_word`]): the paragraph by its revision
@@ -355,6 +363,14 @@ pub fn layout(doc: &Document, cache: &mut LayoutCache, opts: &LayoutOptions) -> 
     // numbered again on each page likewise settle over a few more passes.
     let per_page = opts.view == ViewMode::Print
         && doc.sections().iter().any(|(_, s)| doc.note_options(s, false).num_restart == wordcraft_doc::section::NoteRestart::EachPage);
+    // Numbering footnotes per page reads the notes of every page back: nothing is discarded.
+    let whole;
+    let opts = if per_page && opts.keep_pages.is_some() {
+        whole = LayoutOptions { keep_pages: None, ..opts.clone() };
+        &whole
+    } else {
+        opts
+    };
     let mut note_pages = HashMap::new();
     let mut note_passes = 1;
     let mut totals = Totals::first_guess(doc.sections().len());

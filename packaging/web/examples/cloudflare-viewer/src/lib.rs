@@ -117,7 +117,7 @@ async fn view_page(env: &Env, url: &Url) -> worker::Result<Response> {
     let Some(doc) = &query.doc else {
         return html_response(200, Caching::Asset, html::upload_form(None, false));
     };
-    let (session, caching) = match asset_session(env, url, doc).await? {
+    let (session, caching) = match asset_session(env, url, doc, query.page.saturating_sub(1)).await? {
         Ok(s) => s,
         Err(resp) => return Ok(resp),
     };
@@ -143,7 +143,7 @@ async fn page_image(env: &Env, url: &Url, head: bool) -> worker::Result<Response
     let Some(doc) = &query.doc else {
         return error_response(400, "Bad request", "The doc parameter is required.");
     };
-    let (session, caching) = match asset_session(env, url, doc).await? {
+    let (session, caching) = match asset_session(env, url, doc, query.page.saturating_sub(1)).await? {
         Ok(s) => s,
         Err(resp) => return Ok(resp),
     };
@@ -177,7 +177,8 @@ fn page_of(session: &wordcraft_viewer::Session, query: &ViewQuery) -> Result<(u3
 /// kept: publicly only when its layout is final ([`fonts::settle`]), so a page drawn with a
 /// substitute because a pack couldn't be read yet is never cached. The inner `Err` is the
 /// response to send instead (404 for a missing document, 4xx for one that can't be opened).
-async fn asset_session(env: &Env, url: &Url, doc: &DocPath) -> worker::Result<Result<(wordcraft_viewer::Session, Caching), Response>> {
+/// `page` is the 0-based page the answer is about: the session keeps that page's content only.
+async fn asset_session(env: &Env, url: &Url, doc: &DocPath, page: u32) -> worker::Result<Result<(wordcraft_viewer::Session, Caching), Response>> {
     let bytes = match fetch_asset(env, url, doc.as_str(), MAX_BODY_BYTES).await? {
         Fetched::Bytes(b) => b,
         other => {
@@ -185,7 +186,7 @@ async fn asset_session(env: &Env, url: &Url, doc: &DocPath) -> worker::Result<Re
             return Ok(Err(error_response(status, title, &detail)?));
         }
     };
-    match document::open_document(&bytes, None) {
+    match document::open_document_pages(&bytes, None, page..page.saturating_add(1)) {
         Ok(mut session) => {
             // Read before any await: the generation the document was just laid out at.
             let laid_out_at = wordcraft_fonts::FontDb::global().generation();
@@ -308,7 +309,9 @@ async fn upload(req: &mut Request, env: &Env, url: &Url) -> worker::Result<Respo
         Ok(f) => f,
         Err(e) => return form_error(400, &e.to_string(), false),
     };
-    let mut session = match document::open_upload(form.file, form.password.as_deref()) {
+    // The answer shows the first pages inline: those are the pages the session keeps.
+    let inline = u32::try_from(MAX_INLINE_PAGES).unwrap_or(u32::MAX);
+    let mut session = match document::open_upload_pages(form.file, form.password.as_deref(), 0..inline) {
         Ok(s) => s,
         Err(e @ (OpenError::PasswordRequired | OpenError::WrongPassword)) => {
             return form_error(e.status(), &format!("{e} Choose the file again and enter its password."), true);

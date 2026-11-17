@@ -176,6 +176,8 @@ pub struct Session {
     /// The faces this document's embedded fonts added: withdrawn when another document takes
     /// its place ([`open_after`]), and released when the session is dropped.
     fonts: wordcraft_fonts::DocumentFaces,
+    /// The pages whose content the layout keeps ([`open_pages`]); `None` keeps every page.
+    kept: Option<std::ops::Range<usize>>,
 }
 
 /// A dropped session's embedded fonts leave the font list, unless another open session holds
@@ -191,7 +193,28 @@ impl Drop for Session {
 /// Open the `.docx` package in `bytes` (decrypted with `password` when it is encrypted) and lay
 /// it out. The document's embedded fonts are loaded first, as when the app opens it.
 pub fn open(bytes: &[u8], password: Option<&str>) -> Result<Session, ViewerError> {
-    open_with(bytes, password, true)
+    open_with(bytes, password, true, None)
+}
+
+/// [`open`], keeping the laid-out content of `pages` only (0-based, the end not included). The
+/// session reports every page and its size, and draws any of them, but holds the shaped text
+/// of those pages alone: a long document is laid out in a fraction of the memory a whole
+/// layout takes. For a host that draws a page or a few per request (a server). A page outside
+/// `pages` is laid out again when it is drawn, so ask for the pages that will be.
+/// [`Session::missing_fonts`] then names the fonts those pages ask for.
+pub fn open_pages(bytes: &[u8], password: Option<&str>, pages: std::ops::Range<u32>) -> Result<Session, ViewerError> {
+    open_with(bytes, password, true, Some(window(pages)))
+}
+
+/// [`open_pages`], without loading the document's embedded fonts
+/// ([`open_without_embedded_fonts`]).
+pub fn open_pages_without_embedded_fonts(bytes: &[u8], password: Option<&str>, pages: std::ops::Range<u32>) -> Result<Session, ViewerError> {
+    open_with(bytes, password, false, Some(window(pages)))
+}
+
+/// A range of page indexes as the layout takes it.
+fn window(pages: std::ops::Range<u32>) -> std::ops::Range<usize> {
+    usize::try_from(pages.start).unwrap_or(usize::MAX)..usize::try_from(pages.end).unwrap_or(usize::MAX)
 }
 
 /// [`open`], without loading the document's embedded fonts: its text is laid out with the fonts
@@ -199,10 +222,10 @@ pub fn open(bytes: &[u8], password: Option<&str>) -> Result<Session, ViewerError
 /// strangers in a long-lived process (a server): the font database is process-wide and nothing
 /// removes a font from it, so the fonts [`open`] loads would stay for every later document.
 pub fn open_without_embedded_fonts(bytes: &[u8], password: Option<&str>) -> Result<Session, ViewerError> {
-    open_with(bytes, password, false)
+    open_with(bytes, password, false, None)
 }
 
-fn open_with(bytes: &[u8], password: Option<&str>, embedded_fonts: bool) -> Result<Session, ViewerError> {
+fn open_with(bytes: &[u8], password: Option<&str>, embedded_fonts: bool, kept: Option<std::ops::Range<usize>>) -> Result<Session, ViewerError> {
     if bytes.is_empty() {
         return Err(ViewerError::EmptyDocument);
     }
@@ -213,8 +236,8 @@ fn open_with(bytes: &[u8], password: Option<&str>, embedded_fonts: bool) -> Resu
     doc.ensure_nonempty();
     // Without them the session holds no faces of its own, so it withdraws and releases none.
     let fonts = if embedded_fonts { load_embedded_fonts(&doc) } else { wordcraft_fonts::DocumentFaces::default() };
-    let layout = lay_out(&doc);
-    Ok(Session { doc, layout, fonts })
+    let layout = lay_out(&doc, kept.clone());
+    Ok(Session { doc, layout, fonts, kept })
 }
 
 /// [`open`], to take the place of `current`: `current`'s embedded fonts are withdrawn first, so
@@ -357,6 +380,16 @@ impl Session {
     pub fn render(&self, page: u32, scale: f32) -> Result<PageImage, ViewerError> {
         let p = self.page(page)?;
         let (width, height) = raster_size(p, scale)?;
+        // A page outside the window this session keeps holds no content: it is laid out for
+        // this one drawing, keeping that page alone.
+        let again;
+        let p = match (&self.kept, usize::try_from(page)) {
+            (Some(kept), Ok(index)) if !kept.contains(&index) => {
+                again = lay_out(&self.doc, Some(index..index.saturating_add(1)));
+                again.pages.get(index).ok_or(ViewerError::NoSuchPage { page, pages: again.pages.len() })?
+            }
+            _ => p,
+        };
         let drawn = wordcraft_render::render_page(&self.doc, p, scale, &page_image_options());
         let mut pixels = drawn.pixels;
         // The rasteriser draws the size worked out above; anything else would hand the host a
@@ -394,7 +427,7 @@ impl Session {
 
     /// Lay the document out again with the fonts now available.
     pub fn relayout(&mut self) {
-        self.layout = lay_out(&self.doc);
+        self.layout = lay_out(&self.doc, self.kept.clone());
     }
 
     fn page(&self, page: u32) -> Result<&wordcraft_layout::Page, ViewerError> {
@@ -445,8 +478,9 @@ fn raster_size(page: &wordcraft_layout::Page, scale: f32) -> Result<(u32, u32), 
 }
 
 /// The page layout `wordcraft-cli render` draws from: print view, no markup area.
-fn lay_out(doc: &Document) -> DocLayout {
-    wordcraft_layout::layout(doc, &mut LayoutCache::new(), &LayoutOptions::default())
+/// With `keep`, the content of those pages only ([`LayoutOptions::keep_pages`]).
+fn lay_out(doc: &Document, keep: Option<std::ops::Range<usize>>) -> DocLayout {
+    wordcraft_layout::layout(doc, &mut LayoutCache::new(), &LayoutOptions { keep_pages: keep, ..LayoutOptions::default() })
 }
 
 /// The fonts [`install_font`] has added in this process.
