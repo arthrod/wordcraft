@@ -23,6 +23,9 @@
 //!     is now that file; the next Save sends its name with `false`.
 //!   - Save As or Export to a format that doesn't (PDF, Markdown, plain text), Export as PDF and
 //!     Export Page as PNG: `false`. They are copies; the document's file stays the same.
+//!   - A format the browser build writes in an on-demand worker (`.rtf`, `.odt`, `.html`, PDF…;
+//!     `web/lazy_io.rs`): `false`, sent when the worker has written it, after the command
+//!     returned. Such a save is a copy, whatever the format keeps.
 //! - `wordcraft:dirty` whenever unsaved changes appear or go away, `wordcraft:failed` when the
 //!   app couldn't start.
 //!
@@ -60,6 +63,29 @@ impl Bridge {
         Some(Self { host: Rc::new(Host::connect(APP, canvas)?) })
     }
 
+    /// Connect using an explicit `StartOptions.host` override (`"none"`, `"parent"`, or
+    /// `"page"`) or fall back to [`Self::detect`] when omitted.
+    pub fn detect_with_override(canvas: &web_sys::HtmlCanvasElement, mode: Option<&str>) -> Result<Option<Self>, String> {
+        match mode {
+            None => Ok(Self::detect(canvas)),
+            Some("none") => Ok(None),
+            Some("page") => {
+                if canvas.get_attribute("data-host").as_deref() != Some("page") {
+                    let _ = canvas.set_attribute("data-host", "page");
+                }
+                // `?host=parent` outranks `data-host="page"` in the crate's detection, so an
+                // explicit page mode withdraws that signal from the URL first.
+                withdraw_parent_query();
+                Ok(Self::detect(canvas))
+            }
+            Some("parent") => {
+                supply_parent_query();
+                Ok(Self::detect(canvas))
+            }
+            Some(other) => Err(format!("invalid host mode `{other}` (expected \"none\", \"parent\", or \"page\")")),
+        }
+    }
+
     /// Hand saved and exported files to the host instead of downloading them, report unsaved
     /// changes to it, and hear the files it sends.
     pub fn connect(&self, services: &mut Services, inbox: Inbox, ctx: egui::Context) {
@@ -93,6 +119,12 @@ impl Bridge {
         let _ = self.host.post_failed(error, None);
     }
 
+    /// A file the host stores that does not become the document's file (`saveAs: false`): an
+    /// on-demand worker's export, delivered after the save command returned.
+    pub(crate) fn post_copy(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
+        self.post_save(path, bytes, false)
+    }
+
     fn post_save(&self, path: &str, bytes: &[u8], save_as: bool) -> Result<(), String> {
         let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string());
         self.host.post_save(&name, bytes, None, save_as)
@@ -105,6 +137,69 @@ impl Bridge {
                 deliver_open(&inbox, &ctx, &name, &data);
             }
         });
+    }
+}
+
+/// The `craft_web_host` transport reads the parent mode only from `?host=parent` on the page
+/// URL (its `data-host` attribute carries `page` mode), so an explicit `host: "parent"` start
+/// option supplies the same signal: add it to the query without reloading. `Host::connect`
+/// still refuses an unframed or cross-origin parent itself.
+fn supply_parent_query() {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let location = window.location();
+    let Ok(search) = location.search() else {
+        return;
+    };
+    if search.trim_start_matches('?').split('&').any(|p| p == "host=parent") {
+        return;
+    }
+    let (Ok(pathname), Ok(hash)) = (location.pathname(), location.hash()) else {
+        return;
+    };
+    let query = if search.is_empty() { "?host=parent".to_string() } else { format!("{search}&host=parent") };
+    let url = format!("{pathname}{query}{hash}");
+    let Ok(history) = window.history() else {
+        return;
+    };
+    // The current entry's state passes through unchanged: the embedding page's router may keep
+    // route or restoration data there, and a null state would wipe it.
+    let state = history.state().unwrap_or(wasm_bindgen::JsValue::NULL);
+    if let Err(e) = history.replace_state_with_url(&state, "", Some(&url)) {
+        log::warn!("host=parent: could not update the page URL ({e:?}); not hosted");
+    }
+}
+
+/// The counterpart of [`supply_parent_query`] for an explicit `host: "page"` start: the crate's
+/// `Mode::detect` lets a `?host=parent` query outrank `data-host="page"`, so the query signal
+/// is removed (without reloading) before detection runs. Query-based detection is untouched —
+/// this only runs when the caller asked for page mode.
+fn withdraw_parent_query() {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let location = window.location();
+    let Ok(search) = location.search() else {
+        return;
+    };
+    let pairs: Vec<&str> = search.trim_start_matches('?').split('&').filter(|p| !p.is_empty()).collect();
+    if !pairs.contains(&"host=parent") {
+        return;
+    }
+    let kept: Vec<&str> = pairs.into_iter().filter(|p| *p != "host=parent").collect();
+    let query = if kept.is_empty() { String::new() } else { format!("?{}", kept.join("&")) };
+    let (Ok(pathname), Ok(hash)) = (location.pathname(), location.hash()) else {
+        return;
+    };
+    let url = format!("{pathname}{query}{hash}");
+    let Ok(history) = window.history() else {
+        return;
+    };
+    // The state passes through unchanged, as in `supply_parent_query`.
+    let state = history.state().unwrap_or(wasm_bindgen::JsValue::NULL);
+    if let Err(e) = history.replace_state_with_url(&state, "", Some(&url)) {
+        log::warn!("host=page: could not update the page URL ({e:?}); the parent query still wins");
     }
 }
 

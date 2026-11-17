@@ -125,6 +125,7 @@ pub fn append(ext: &str, doc: &Document, bytes: Vec<u8>) -> Vec<u8> {
         return bytes;
     }
     match ext {
+        #[cfg(feature = "all-formats")]
         "html" | "htm" | "xhtml" => {
             let mut s = match String::from_utf8(bytes) {
                 Ok(s) => s,
@@ -148,6 +149,7 @@ pub fn append(ext: &str, doc: &Document, bytes: Vec<u8>) -> Vec<u8> {
     }
 }
 
+#[cfg(feature = "all-formats")]
 fn html(notes: &[Note]) -> String {
     use crate::html::esc;
     let mut s = String::from("<section class=\"comments\">\n<h2>Comments</h2>\n<ol>\n");

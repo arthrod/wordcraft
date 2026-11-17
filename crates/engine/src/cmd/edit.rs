@@ -215,7 +215,8 @@ fn copy_with(s: &mut Session, whole: Option<&Path>) -> CmdResult {
 /// #816) and as RTF for the host to put on the system clipboard too, so other programs keep the
 /// formatting; and for a copy of one equation alone, its MathML (#1297).
 pub(crate) fn copy_result(s: &mut Session) -> Value {
-    (s.clipboard_html, s.clipboard_rtf) = match &s.clipboard {
+    #[cfg(feature = "extra-formats")]
+    let (html, rtf) = match &s.clipboard {
         Some(f) => {
             let mut d = f.to_document();
             if d.media.is_empty() {
@@ -225,6 +226,9 @@ pub(crate) fn copy_result(s: &mut Session) -> Value {
         }
         None => (String::new(), String::new()),
     };
+    #[cfg(not(feature = "extra-formats"))]
+    let (html, rtf) = (String::new(), String::new());
+    (s.clipboard_html, s.clipboard_rtf) = (html, rtf);
     let mut r = json!({"text": s.clipboard_text});
     for (k, v) in [("html", &s.clipboard_html), ("rtf", &s.clipboard_rtf)] {
         if !v.is_empty() {
@@ -235,6 +239,7 @@ pub(crate) fn copy_result(s: &mut Session) -> Value {
     // ("MathML" on Windows, `public.mathml.presentation` on macOS; #1297). Word looks for them
     // before anything else when it pastes; a copy with text around the equation doesn't offer
     // them, so pasting it keeps the text.
+    #[cfg(feature = "extra-formats")]
     if let Some((linear, display)) = s.clipboard.as_ref().and_then(|f| f.sole_equation()) {
         r["mathml"] = json!(wordcraft_formats::mathml::linear_to_mathml(linear, display));
     }

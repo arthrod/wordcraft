@@ -1,0 +1,19 @@
+[package]
+name = "wordcraft-model-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WordCraft's document model to and from craft-wordmodel, the model the shared format crates read into and write from: a typed, compile-checked field-by-field mapping"
+
+[lints]
+workspace = true
+
+[dependencies]
+craft-convert = { workspace = true }
+craft-wordmodel = { workspace = true }
+wordcraft-doc = { workspace = true }
+
+[dev-dependencies]
+craft-docx = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

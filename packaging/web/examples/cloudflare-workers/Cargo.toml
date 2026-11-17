@@ -1,0 +1,44 @@
+[package]
+name = "wordcraft-web-worker"
+version = "0.18.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Optional Cloudflare Workers Hybrid Edge example for WordCraftWeb"
+
+# Standalone package so root workspace builds, `cargo xtask layers`, and WASM size budgets
+# do not pull in Workers runtime crates.
+[workspace]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+base64 = "0.22"
+futures-util = "0.3"
+js-sys = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+wasm-bindgen = "0.2"
+worker = "0.9"
+wordcraft-doc = { path = "../../../../crates/doc" }
+wordcraft-docx = { path = "../../../../crates/docx" }
+# `read_limited` (a caller's decompression budgets) is the shared reader's own; the wrapper above
+# converts its document. Same source and commit as the root workspace's craft crates, or the
+# document types are two different ones and this does not compile.
+craft-docx = { git = "https://github.com/arthrod/craft-libs", rev = "6ee18f41c60b1f0a4691c3d2857bb6895fc41f64", version = "=0.1.0" }
+# The same four core faces the browser build carries: the edge preview is approximate
+# (documents asking for other fonts render through the substitutes).
+wordcraft-fonts = { path = "../../../../crates/fonts", features = ["minimal-wasm-fonts"] }
+wordcraft-formats = { path = "../../../../crates/formats", default-features = false, features = ["all-formats"] }
+wordcraft-layout = { path = "../../../../crates/layout", default-features = false }
+wordcraft-render = { path = "../../../../crates/render" }
+
+[dev-dependencies]
+# Fixed fonts (bundled faces only, no system scan) so native tests see the same faces the
+# wasm Worker does.
+wordcraft-fonts = { path = "../../../../crates/fonts", features = ["test-support"] }
+

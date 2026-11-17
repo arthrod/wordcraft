@@ -29,6 +29,7 @@ pub mod kinsoku;
 pub mod math;
 pub mod outline;
 pub mod para;
+pub mod proof_overlay;
 pub mod styleref;
 mod table;
 mod textbox;
@@ -59,6 +60,7 @@ mod ctx;
 mod floats;
 mod flow;
 mod headers;
+mod keep;
 mod metafile;
 mod missing;
 mod notes;
@@ -87,7 +89,7 @@ use headers::MAX_HEADER_ITEMS;
 use headers::placed_cost;
 use headers::placed_cost_by;
 pub use metafile::{MAX_METAFILE_DASHES, crop_sides, crop_window, metafile_average_color, metafile_dashes, metafile_miter_limit};
-pub use missing::{MAX_MISSING_GLYPHS, MissingGlyphs, metafile_text_run, missing_watermark_glyphs, watermark_run};
+pub use missing::{MAX_MISSING_GLYPHS, MissingGlyphs, metafile_text_faces, metafile_text_run, missing_watermark_glyphs, watermark_run};
 pub use notes::DECOR_STORY;
 pub(crate) use notes::NOTE_SEP_W;
 use notes::{MAX_NOTE_PASSES, footnote_pages};
@@ -234,6 +236,13 @@ pub struct LayoutOptions {
     pub filename: Option<Arc<str>>,
     /// Document full path for FILENAME \p fields ([`FieldCtx::filepath`]).
     pub filepath: Option<Arc<str>>,
+    /// Keep the content of these pages only (0-based, the end not included): every page is
+    /// still made, with its size and number, but the others hold no content, and what was
+    /// measured for them is dropped as the layout passes them. For a host that shows one page
+    /// of a long document and has little memory (a server that draws a page per request): a
+    /// whole layout holds every page's shaped text at once. `None` keeps everything. Ignored
+    /// while footnotes are numbered per page, which reads every page's notes back.
+    pub keep_pages: Option<std::ops::Range<usize>>,
 }
 
 /// The word being typed ([`LayoutOptions::typing_word`]): the paragraph by its revision
@@ -245,17 +254,32 @@ pub struct TypingWord {
     pub end: usize,
 }
 
+/// Placeholder spelling options when `inline-proof` is compiled out.
+#[cfg(not(feature = "inline-proof"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub struct NoProofOptions;
+
 /// File › Options › Proofing choices that change the squiggles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ProofOptions {
     /// Mark grammar errors as you type.
     pub grammar: bool,
+    #[cfg(feature = "inline-proof")]
     pub spelling: wordcraft_proof::Options,
+    #[cfg(not(feature = "inline-proof"))]
+    pub spelling: NoProofOptions,
 }
 
 impl Default for ProofOptions {
     fn default() -> Self {
-        ProofOptions { grammar: true, spelling: wordcraft_proof::Options::default() }
+        #[cfg(feature = "inline-proof")]
+        {
+            ProofOptions { grammar: true, spelling: wordcraft_proof::Options::default() }
+        }
+        #[cfg(not(feature = "inline-proof"))]
+        {
+            ProofOptions { grammar: false, spelling: NoProofOptions }
+        }
     }
 }
 
@@ -339,6 +363,14 @@ pub fn layout(doc: &Document, cache: &mut LayoutCache, opts: &LayoutOptions) -> 
     // numbered again on each page likewise settle over a few more passes.
     let per_page = opts.view == ViewMode::Print
         && doc.sections().iter().any(|(_, s)| doc.note_options(s, false).num_restart == wordcraft_doc::section::NoteRestart::EachPage);
+    // Numbering footnotes per page reads the notes of every page back: nothing is discarded.
+    let whole;
+    let opts = if per_page && opts.keep_pages.is_some() {
+        whole = LayoutOptions { keep_pages: None, ..opts.clone() };
+        &whole
+    } else {
+        opts
+    };
     let mut note_pages = HashMap::new();
     let mut note_passes = 1;
     let mut totals = Totals::first_guess(doc.sections().len());

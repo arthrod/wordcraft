@@ -8,22 +8,38 @@ description = "WordCraft import/export: plain text, Markdown, HTML, RTF, OpenDoc
 [lints]
 workspace = true
 
+[features]
+default = ["all-formats"]
+# The codecs beyond plain text and Markdown; each is an optional craft-libs crate.
+all-formats = [
+    "dep:craft-rtf",
+    "dep:craft-odf",
+    "dep:craft-html",
+    "dep:craft-latex",
+    "dep:craft-math",
+    "dep:craft-mime",
+    "dep:craft-sheet",
+    "dep:craft-ods",
+    "dep:craft-xls",
+    "dep:craft-xlsx",
+]
+
 [dependencies]
 wordcraft-doc = { workspace = true }
 wordcraft-docx = { workspace = true }
 craft-wordmodel = { workspace = true }
-craft-rtf = { workspace = true }
+craft-rtf = { workspace = true, optional = true }
 craft-flow = { workspace = true }
-craft-odf = { workspace = true }
+craft-odf = { workspace = true, optional = true }
 craft-markdown = { workspace = true }
-craft-html = { workspace = true }
-craft-latex = { workspace = true }
-craft-math = { workspace = true }
-craft-mime = { workspace = true }
-craft-sheet = { workspace = true }
-craft-ods = { workspace = true }
-craft-xls = { workspace = true }
-craft-xlsx = { workspace = true }
+craft-html = { workspace = true, optional = true }
+craft-latex = { workspace = true, optional = true }
+craft-math = { workspace = true, optional = true }
+craft-mime = { workspace = true, optional = true }
+craft-sheet = { workspace = true, optional = true }
+craft-ods = { workspace = true, optional = true }
+craft-xls = { workspace = true, optional = true }
+craft-xlsx = { workspace = true, optional = true }
 craft-zip = { workspace = true }
 wordcraft-geom = { workspace = true, features = ["image"] }
 craft-metafile = { workspace = true }

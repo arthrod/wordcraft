@@ -35,6 +35,7 @@ fn every_side_menu_item_has_a_drawn_icon() {
 /// line and showed a resize pointer on its right edge that did nothing.
 #[test]
 fn the_side_menu_edge_is_not_a_resize_handle() {
+    let _lock = crate::i18n::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Services::default());
     app.ui.language = "en".into();
     app.ui.backstage = true;
@@ -1246,6 +1247,7 @@ fn collect_shapes(shape: &egui::Shape, rects: &mut Vec<egui::Rect>, texts: &mut 
 /// and New page are right-aligned to their preview thumbnails rather than left-aligned.
 #[test]
 fn rtl_template_titles_are_right_aligned() {
+    let _lock = crate::i18n::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Services::default());
     a.ui.language = "ar".into();
     a.ui.backstage = true;

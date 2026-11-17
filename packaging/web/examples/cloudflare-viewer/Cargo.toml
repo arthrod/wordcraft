@@ -1,0 +1,59 @@
+[package]
+name = "wordcraft-server-viewer"
+version = "0.18.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Tiny server-rendered WordCraft viewer: a Cloudflare Worker that sends a reader HTML and PNG pages, no script"
+
+# Standalone package, like `../cloudflare-workers`: the root workspace's builds, `cargo xtask
+# layers` and the wasm size budgets never pull in the Workers runtime crates.
+[workspace]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+# `cdylib` alone: with an `rlib` beside it cargo builds the module without link-time
+# optimisation (see `apps/wordcraft-viewer/Cargo.toml`). The host tests are unit tests in the
+# crate, so they need no `rlib`.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Request plumbing only. `worker` brings `url` (query decoding) and the `ASSETS` binding.
+worker = "0.9"
+futures-util = { version = "0.3", default-features = false }
+url = "2"
+# The view-only core: opens a `.docx`, lays it out and paints one page at a time. It never
+# links the editor engine.
+wordcraft-viewer = { path = "../../../../apps/wordcraft-viewer" }
+# Font packs from `dist/web/fonts/` (`decode_pack_bytes`, `install_pack_font`), and the four
+# bundled faces on wasm (the viewer core turns `minimal-wasm-fonts` on for wasm32 itself).
+wordcraft-fonts = { path = "../../../../crates/fonts" }
+# The zip reader and the decryption the `.docx` reader already uses (same revision as the root
+# workspace's lock), called directly so an upload's inflated size is checked before reading.
+craft-zip = { git = "https://github.com/arthrod/craft-libs", rev = "6ee18f41c60b1f0a4691c3d2857bb6895fc41f64" }
+craft-offcrypto = { git = "https://github.com/arthrod/craft-libs", rev = "6ee18f41c60b1f0a4691c3d2857bb6895fc41f64" }
+# PNG encoder already linked by `wordcraft-render` (through `craft-image-codecs`): used directly
+# for grey and palette images, which are several times smaller than RGBA for a text page.
+png = "0.18"
+base64 = "0.22"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+# The bundled faces only, no system scan, as on the Worker.
+wordcraft-fonts = { path = "../../../../crates/fonts", features = ["test-support"] }
+
+# Size first: the Worker bundle has to fit the plan's compressed limit.
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = 0
+
+# The repository builds wasm32 with SIMD (`.cargo/config.toml`: layout measured 43% faster, the
+# module smaller); V8 runs it, so `wasm-opt` is told to accept it, and to optimise for size.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-Oz", "--enable-simd"]

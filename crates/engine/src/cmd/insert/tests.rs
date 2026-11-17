@@ -193,6 +193,18 @@ fn an_empty_new_header_is_never_saved() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `doc.exportDocx` leaves out a new empty header as `file.save` does (#960).
+#[test]
+fn an_empty_new_header_is_never_exported() {
+    let mut s = two_pages();
+    s.run("insert.editHeader", &json!({"page": 0})).unwrap();
+    let r = s.run("doc.exportDocx", &json!({})).unwrap();
+    let bytes = super::base64_decode(r["docxBase64"].as_str().unwrap()).unwrap();
+    let back = wordcraft_docx::read(&bytes).unwrap();
+    assert!(back.parts.values().all(|p| p.kind != PartKind::Header), "no empty header exported");
+    assert_eq!(headers(&s), 1, "still open for typing");
+}
+
 /// #960 review: with no header anywhere, one made on a later section's page goes in the first
 /// section, linked through to the later ones (Word's "Link to Previous" default); with Odd &
 /// Even on and only a default header, an even page edits the one it shows.

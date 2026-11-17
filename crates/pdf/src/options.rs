@@ -1,4 +1,6 @@
-use super::{NumeralMode, WriteError, imposition};
+#[cfg(feature = "writer")]
+use super::WriteError;
+use super::{NumeralMode, imposition};
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum PdfError {
@@ -10,6 +12,7 @@ pub enum PdfError {
     Write(String),
 }
 
+#[cfg(feature = "writer")]
 impl From<WriteError> for PdfError {
     fn from(error: WriteError) -> Self {
         Self::Write(error.to_string())

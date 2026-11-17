@@ -53,11 +53,13 @@ fn check(name: &str, tabs: &[&str], page: impl Fn(&WordApp) -> usize) {
 
 #[test]
 fn colors_tabs_switch_pages() {
+    let _lock = crate::i18n::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     check("colors", &["Standard", "Custom"], |app| app.colors.as_ref().map_or(9, |d| d.tab as usize));
 }
 
 #[test]
 fn symbol_tabs_switch_pages() {
+    let _lock = crate::i18n::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     check("symbol", &["Symbols", "Special Characters"], |app| match &app.dialog {
         Some(Dialog::Insert(d)) => match &**d {
             crate::dialogs_insert::InsertDialog::Symbol(f) => f.tab as usize,
@@ -69,6 +71,7 @@ fn symbol_tabs_switch_pages() {
 
 #[test]
 fn borders_tabs_switch_pages() {
+    let _lock = crate::i18n::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     check("borders", &["Borders", "Page Border", "Shading"], |app| match &app.dialog {
         Some(Dialog::Borders { form }) => form.tab as usize,
         _ => 9,
@@ -77,6 +80,7 @@ fn borders_tabs_switch_pages() {
 
 #[test]
 fn autocorrect_tabs_switch_pages() {
+    let _lock = crate::i18n::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     check("autoCorrect", &["AutoCorrect", "AutoFormat As You Type", "Math AutoCorrect"], |app| match &app.dialog {
         Some(Dialog::Review(d)) => match &**d {
             crate::dialogs_review::ReviewDialog::AutoCorrect(f) => f.tab as usize,
@@ -88,6 +92,7 @@ fn autocorrect_tabs_switch_pages() {
 
 #[test]
 fn customize_ribbon_tabs_switch_pages() {
+    let _lock = crate::i18n::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     check("customizeRibbon", &["Ribbon", "Quick Access Toolbar"], |app| match &app.dialog {
         Some(Dialog::CustomizeRibbon { form }) => (form.page == crate::dialogs_ribbon::Page::QuickAccess) as usize,
         _ => 9,

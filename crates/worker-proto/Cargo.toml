@@ -1,0 +1,13 @@
+[package]
+name = "wordcraft-worker-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WordCraft web worker wire protocol: the JSON envelope and typed request/reply payloads shared by the dedicated workers and their clients"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

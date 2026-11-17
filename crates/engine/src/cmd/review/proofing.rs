@@ -1,4 +1,8 @@
-use super::{CmdError, CmdResult, Pos, Selection, Session, StoryRef, Value, json, p, pos_json};
+#[cfg(feature = "inline-proof")]
+use super::Selection;
+#[cfg(feature = "inline-proof")]
+use super::pos_json;
+use super::{CmdError, CmdResult, Pos, Session, StoryRef, Value, json, p};
 
 pub(super) fn word_count(s: &mut Session, v: &Value) -> CmdResult {
     if let Some(b) = p::bool(v, "includeTextBoxes") {
@@ -40,6 +44,7 @@ pub(super) fn word_count(s: &mut Session, v: &Value) -> CmdResult {
 
 /// Issues (spelling + grammar) in one paragraph as positions, each in its run's language and
 /// skipping text left unchecked — the same issues the layout underlines.
+#[cfg(feature = "inline-proof")]
 fn para_issues(s: &Session, story: StoryRef, path: &wordcraft_doc::Path) -> Vec<(Pos, Pos, wordcraft_proof::Issue)> {
     let Some(p) = s.doc.para(story, path) else { return Vec::new() };
     let runs = wordcraft_layout::para::proof_runs(&s.doc, p, None);
@@ -47,6 +52,11 @@ fn para_issues(s: &Session, story: StoryRef, path: &wordcraft_doc::Path) -> Vec<
         .into_iter()
         .map(|i| (Pos { story, path: path.clone(), off: i.start }, Pos { story, path: path.clone(), off: i.end }, i))
         .collect()
+}
+
+#[cfg(not(feature = "inline-proof"))]
+fn para_issues(_s: &Session, _story: StoryRef, _path: &wordcraft_doc::Path) -> Vec<(Pos, Pos, wordcraft_proof::Issue)> {
+    Vec::new()
 }
 
 /// The issue under a position.
@@ -63,6 +73,7 @@ pub(super) fn issue_at(s: &Session, at: &Pos) -> Option<(Pos, Pos, wordcraft_pro
     issues.into_iter().find(|(a, b, _)| a.off <= at.off && at.off <= b.off)
 }
 
+#[cfg(feature = "inline-proof")]
 fn issue_json(s: &Session, a: &Pos, b: &Pos, i: &wordcraft_proof::Issue) -> Value {
     let word = s.doc.para_at(a).and_then(|p| p.text.get(a.off..b.off)).unwrap_or("").to_string();
     let sugg = if i.kind == wordcraft_proof::IssueKind::Spelling { wordcraft_proof::suggest_in(&word, 6, i.lang) } else { i.suggestions.clone() };
@@ -75,56 +86,80 @@ fn issue_json(s: &Session, a: &Pos, b: &Pos, i: &wordcraft_proof::Issue) -> Valu
 
 /// F7: select the next issue after the caret and return it with suggestions.
 pub(super) fn next_issue(s: &mut Session, v: &Value) -> CmdResult {
-    let caret = s.sel.ordered().1;
-    let story = caret.story;
-    let paths = s.doc.para_paths(story);
-    let start = paths.iter().position(|p| *p == caret.path).unwrap_or(0);
-    let wrap = p::bool(v, "wrap").unwrap_or(true);
-    // Scan forward first, including the rest of the caret's paragraph. A second pass
-    // optionally visits the earlier part; never select the first typo repeatedly in
-    // a single-paragraph story. Dialogs disable wrapping so Ignore Once can finish.
-    for (path, before) in paths
-        .iter()
-        .skip(start)
-        .map(|path| (path, false))
-        .chain(paths.iter().take(if wrap { start.saturating_add(1) } else { 0 }).map(|path| (path, true)))
+    #[cfg(not(feature = "inline-proof"))]
     {
-        for (a, b, i) in para_issues(s, story, path) {
-            if *path == caret.path && (a.off < caret.off) != before {
-                continue;
-            }
-            let r = issue_json(s, &a, &b, &i);
-            s.sel = Selection { anchor: a, focus: b };
-            return Ok(r);
-        }
+        let _ = (s, v);
+        Err(CmdError::Failed("the spelling and grammar check is not included in this build".into()))
     }
-    s.status = "The spelling and grammar check is complete.".into();
-    Ok(json!({"done": true}))
+    #[cfg(feature = "inline-proof")]
+    {
+        let caret = s.sel.ordered().1;
+        let story = caret.story;
+        let paths = s.doc.para_paths(story);
+        let start = paths.iter().position(|p| *p == caret.path).unwrap_or(0);
+        let wrap = p::bool(v, "wrap").unwrap_or(true);
+        // Scan forward first, including the rest of the caret's paragraph. A second pass
+        // optionally visits the earlier part; never select the first typo repeatedly in
+        // a single-paragraph story. Dialogs disable wrapping so Ignore Once can finish.
+        for (path, before) in paths
+            .iter()
+            .skip(start)
+            .map(|path| (path, false))
+            .chain(paths.iter().take(if wrap { start.saturating_add(1) } else { 0 }).map(|path| (path, true)))
+        {
+            for (a, b, i) in para_issues(s, story, path) {
+                if *path == caret.path && (a.off < caret.off) != before {
+                    continue;
+                }
+                let r = issue_json(s, &a, &b, &i);
+                s.sel = Selection { anchor: a, focus: b };
+                return Ok(r);
+            }
+        }
+        s.status = "The spelling and grammar check is complete.".into();
+        Ok(json!({"done": true}))
+    }
 }
 
 pub(super) fn all_issues(s: &mut Session, _: &Value) -> CmdResult {
-    let mut out = Vec::new();
-    for path in s.doc.para_paths(StoryRef::Body) {
-        for (a, b, i) in para_issues(s, StoryRef::Body, &path) {
-            out.push(issue_json(s, &a, &b, &i));
-            if out.len() >= 500 {
-                return Ok(Value::Array(out));
+    #[cfg(not(feature = "inline-proof"))]
+    {
+        let _ = s;
+        Err(CmdError::Failed("the spelling and grammar check is not included in this build".into()))
+    }
+    #[cfg(feature = "inline-proof")]
+    {
+        let mut out = Vec::new();
+        for path in s.doc.para_paths(StoryRef::Body) {
+            for (a, b, i) in para_issues(s, StoryRef::Body, &path) {
+                out.push(issue_json(s, &a, &b, &i));
+                if out.len() >= 500 {
+                    return Ok(Value::Array(out));
+                }
             }
         }
+        Ok(Value::Array(out))
     }
-    Ok(Value::Array(out))
 }
 
 pub(super) fn suggestions(s: &mut Session, v: &Value) -> CmdResult {
-    // Explicit positions are point lookups, even when they equal the selection focus.
-    // Only an implicit or unparseable position keeps the exact selected issue.
-    let issue = match v.get("pos").and_then(crate::cmd::parse_pos) {
-        Some(at) => para_issues(s, at.story, &at.path).into_iter().find(|(a, b, _)| a.off <= at.off && at.off <= b.off),
-        None => issue_at(s, &s.sel.focus),
-    };
-    match issue {
-        Some((a, b, i)) => Ok(issue_json(s, &a, &b, &i)),
-        None => Ok(Value::Null),
+    #[cfg(not(feature = "inline-proof"))]
+    {
+        let _ = (s, v);
+        Err(CmdError::Failed("the spelling and grammar check is not included in this build".into()))
+    }
+    #[cfg(feature = "inline-proof")]
+    {
+        // Explicit positions are point lookups, even when they equal the selection focus.
+        // Only an implicit or unparseable position keeps the exact selected issue.
+        let issue = match v.get("pos").and_then(crate::cmd::parse_pos) {
+            Some(at) => para_issues(s, at.story, &at.path).into_iter().find(|(a, b, _)| a.off <= at.off && at.off <= b.off),
+            None => issue_at(s, &s.sel.focus),
+        };
+        match issue {
+            Some((a, b, i)) => Ok(issue_json(s, &a, &b, &i)),
+            None => Ok(Value::Null),
+        }
     }
 }
 

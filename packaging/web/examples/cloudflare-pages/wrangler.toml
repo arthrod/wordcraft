@@ -1,0 +1,5 @@
+# Cloudflare Pages example for WordCraftWeb static hosting (`dist/web` + `_headers`)
+name = "wordcraft-web-pages"
+compatibility_date = "2026-11-13"
+pages_build_output_dir = "../../../../dist/web"
+

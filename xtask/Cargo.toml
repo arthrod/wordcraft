@@ -9,4 +9,21 @@ publish = false
 workspace = true
 
 [dependencies]
+base64 = { workspace = true }
+# Pack fonts ship Brotli-compressed (web-assets staging); `brotli` already compresses the
+# bundled minimal-WASM faces in crates/fonts/build.rs.
+brotli = "8"
+# `cargo xtask wasm-attr`: demangle function names for the code-section attribution
+# (MIT OR Apache-2.0, both on the house-rule allowlist).
+rustc-demangle = "0.1"
 serde_json = { workspace = true }
+sha2 = { workspace = true }
+# `web-assets` writes the viewer's built-in sample as a `.docx` (plan 10.3): the Markdown
+# reader and the package writer, without the other codecs.
+wordcraft-formats = { path = "../crates/formats", default-features = false }
+wordcraft-docx = { workspace = true }
+
+[dev-dependencies]
+brotli-decompressor = "5"
+# `pack_faces_match_wordcraft_fonts` compares the local PACK_FACES table against the crate's.
+wordcraft-fonts = { workspace = true }

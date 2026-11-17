@@ -1,0 +1,4 @@
+# `worker-build --release` output (wrangler.toml `[build]` writes build/worker/shim.mjs).
+/build/
+# wrangler local state
+.wrangler/

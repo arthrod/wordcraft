@@ -8,6 +8,8 @@ use super::{Block, Border, FloatAlign, Page, ParaLayout, Rect, SectionProps, Sto
 #[derive(Clone)]
 pub(crate) struct PageBuilder<'a> {
     pub(crate) pages: Vec<Page>,
+    /// How many of the first pages [`super::keep::discard_passed`] has been over.
+    pub(crate) discarded: usize,
     pub(crate) sect: &'a SectionProps,
     /// The current document section's numbering format, even when reflow uses first-section page geometry.
     pub(crate) page_format: wordcraft_doc::section::NumFormat,

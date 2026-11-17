@@ -54,6 +54,9 @@ pub enum UserFontError {
     /// Every face in the file is already available.
     AlreadyAvailable(Vec<String>),
     TooMany,
+    /// A font pack's faces wouldn't fit under the pack record's cap
+    /// ([`crate::packs::MAX_INSTALLED_PACK_FACES`]); refused before any face is added.
+    TooManyPacks,
     /// The family isn't one the user added (bundled and system fonts can't be removed).
     NotUserFont(String),
 }
@@ -76,6 +79,9 @@ impl std::fmt::Display for UserFontError {
             UserFontError::Unusable(e) => write!(f, "the font couldn't be read: {e}"),
             UserFontError::AlreadyAvailable(families) => write!(f, "already available: {}", families.join(", ")),
             UserFontError::TooMany => write!(f, "too many added fonts (at most {MAX_USER_FONTS}); remove some first"),
+            UserFontError::TooManyPacks => {
+                write!(f, "too many font pack faces (at most {})", crate::packs::MAX_INSTALLED_PACK_FACES)
+            }
             UserFontError::NotUserFont(family) => write!(f, "{family:?} isn't a font you added"),
         }
     }
@@ -427,6 +433,14 @@ impl FontDb {
         self.user.write().unwrap_or_else(|e| e.into_inner())
     }
 
+    pub(crate) fn read_packs(&self) -> std::sync::RwLockReadGuard<'_, crate::packs::PackFonts> {
+        self.packs.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(crate) fn write_packs(&self) -> std::sync::RwLockWriteGuard<'_, crate::packs::PackFonts> {
+        self.packs.write().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// The fonts the user added, in the order added.
     pub fn user_fonts(&self) -> Vec<UserFont> {
         self.read_user().fonts.clone()
@@ -486,49 +500,11 @@ impl FontDb {
         if self.read_user().fonts.len() >= MAX_USER_FONTS {
             return Err(UserFontError::TooMany);
         }
-        if FileRef::new(&sfnt).is_err() {
-            return Err(UserFontError::Unusable("not a valid OpenType file".into()));
-        }
-        let found = enumerate_faces(&sfnt, MAX_FACES_PER_FILE + 1);
-        if found.is_empty() {
-            return Err(UserFontError::Unusable("no face with a family name".into()));
-        }
-        if found.len() > MAX_FACES_PER_FILE {
-            return Err(UserFontError::Unusable(format!("more than {MAX_FACES_PER_FILE} faces")));
-        }
         let file = stored_name(name, &sfnt);
-        let data = Arc::new(sfnt);
-        let mut new = Vec::new();
-        for f in found {
-            let label = format!("{} {}", f.family, f.style);
-            let face = make_face(FontBytes::Owned(data.clone()), f.index, f.family, f.style, f.legacy, f.coords)
-                .ok_or_else(|| UserFontError::Unusable(format!("{label} doesn't parse")))?;
-            if face.skrifa().is_none_or(|s| s.charmap().mappings().next().is_none()) {
-                return Err(UserFontError::Unusable(format!("{label} maps no characters")));
-            }
-            new.push(Arc::new(face));
-        }
-        let families = |faces: &[Arc<super::FontFace>]| {
-            let mut v: Vec<String> = faces.iter().map(|f| f.family.clone()).collect();
-            v.dedup();
-            v
-        };
+        let added = self.check_and_add_faces(sfnt)?;
         let mut user = self.write_user();
         // Unique among the user fonts (the folder is checked when writing).
         let file = unique_name(&file, |n| user.fonts.iter().any(|f| f.file.eq_ignore_ascii_case(n)));
-        let added: Vec<Arc<super::FontFace>> = {
-            let mut faces = self.faces.write().unwrap_or_else(|e| e.into_inner());
-            let fresh: Vec<_> = new
-                .iter()
-                .filter(|f| !faces.iter().any(|g| g.family.eq_ignore_ascii_case(&f.family) && g.style.eq_ignore_ascii_case(&f.style)))
-                .cloned()
-                .collect();
-            faces.extend(fresh.iter().cloned());
-            fresh
-        };
-        if added.is_empty() {
-            return Err(UserFontError::AlreadyAvailable(families(&new)));
-        }
         let font = UserFont {
             file,
             faces: added.iter().map(|f| (f.family.clone(), f.style.clone())).collect(),
@@ -541,8 +517,98 @@ impl FontDb {
         Ok(font)
     }
 
+    /// Check `sfnt`'s faces and add the ones not already available, without a user-font record —
+    /// [`FontDb::install_pack_font`]'s work. `packs` is the caller's held pack record: the faces
+    /// that are still fresh are counted against its remaining capacity under the face write lock
+    /// that adds them, so a file that wouldn't fit is refused with the database and its
+    /// generation untouched. Returns the faces that were added, whose ids go in the pack record.
+    pub(crate) fn add_pack_faces(&self, packs: &mut crate::packs::PackFonts, sfnt: Vec<u8>) -> Result<Vec<Arc<super::FontFace>>, UserFontError> {
+        self.add_pack_faces_before_commit(packs, sfnt, || {})
+    }
+
+    /// [`FontDb::add_pack_faces`] with `before_commit` run after the file is checked and before
+    /// its fresh faces are counted and committed (tests interleave a removal there).
+    fn add_pack_faces_before_commit(
+        &self,
+        packs: &mut crate::packs::PackFonts,
+        sfnt: Vec<u8>,
+        before_commit: impl FnOnce(),
+    ) -> Result<Vec<Arc<super::FontFace>>, UserFontError> {
+        let new = self.checked_faces(sfnt)?;
+        before_commit();
+        let committed = self.commit_faces(&new, |fresh| {
+            if packs.installed.len() + fresh > crate::packs::MAX_INSTALLED_PACK_FACES { Err(UserFontError::TooManyPacks) } else { Ok(()) }
+        })?;
+        if committed.is_empty() {
+            return Err(UserFontError::AlreadyAvailable(families_of(&new)));
+        }
+        self.fonts_changed();
+        Ok(committed)
+    }
+
+    /// The checks every added file gets (a valid file, faces that parse and map a character),
+    /// then the dedup against every loaded face: bundled and pack faces are never replaced.
+    /// Returns the faces that were added; `AlreadyAvailable` when every face in the file is
+    /// already available.
+    fn check_and_add_faces(&self, sfnt: Vec<u8>) -> Result<Vec<Arc<super::FontFace>>, UserFontError> {
+        let new = self.checked_faces(sfnt)?;
+        let added = self.commit_faces(&new, |_| Ok(()))?;
+        if added.is_empty() {
+            return Err(UserFontError::AlreadyAvailable(families_of(&new)));
+        }
+        Ok(added)
+    }
+
+    /// `sfnt`'s faces, checked: the file parses, and every face builds and maps a character.
+    fn checked_faces(&self, sfnt: Vec<u8>) -> Result<Vec<Arc<super::FontFace>>, UserFontError> {
+        if FileRef::new(&sfnt).is_err() {
+            return Err(UserFontError::Unusable("not a valid OpenType file".into()));
+        }
+        let found = enumerate_faces(&sfnt, MAX_FACES_PER_FILE + 1);
+        if found.is_empty() {
+            return Err(UserFontError::Unusable("no face with a family name".into()));
+        }
+        if found.len() > MAX_FACES_PER_FILE {
+            return Err(UserFontError::Unusable(format!("more than {MAX_FACES_PER_FILE} faces")));
+        }
+        let data = Arc::new(sfnt);
+        let mut new = Vec::new();
+        for f in found {
+            let label = format!("{} {}", f.family, f.style);
+            let face = make_face(FontBytes::Owned(data.clone()), f.index, f.family, f.style, f.legacy, f.coords)
+                .ok_or_else(|| UserFontError::Unusable(format!("{label} doesn't parse")))?;
+            if face.skrifa().is_none_or(|s| s.charmap().mappings().next().is_none()) {
+                return Err(UserFontError::Unusable(format!("{label} maps no characters")));
+            }
+            new.push(Arc::new(face));
+        }
+        Ok(new)
+    }
+
+    /// Add `new`'s faces that aren't already loaded (re-checked under the write lock); `admit`
+    /// sees how many are fresh under that same lock before any is added. Returns the faces
+    /// actually added.
+    fn commit_faces(
+        &self,
+        new: &[Arc<super::FontFace>],
+        admit: impl FnOnce(usize) -> Result<(), UserFontError>,
+    ) -> Result<Vec<Arc<super::FontFace>>, UserFontError> {
+        let mut faces = self.faces.write().unwrap_or_else(|e| e.into_inner());
+        let fresh: Vec<_> = new
+            .iter()
+            .filter(|f| !faces.iter().any(|g| g.family.eq_ignore_ascii_case(&f.family) && g.style.eq_ignore_ascii_case(&f.style)))
+            .cloned()
+            .collect();
+        if fresh.is_empty() {
+            return Ok(Vec::new());
+        }
+        admit(fresh.len())?;
+        faces.extend(fresh.iter().cloned());
+        Ok(fresh)
+    }
+
     /// Forget cached fallback choices and tell watchers ([`FontDb::generation`]).
-    fn fonts_changed(&self) {
+    pub(super) fn fonts_changed(&self) {
         self.fallbacks.write().unwrap_or_else(|e| e.into_inner()).map.clear();
         self.generation.fetch_add(1, Ordering::AcqRel);
     }
@@ -623,6 +689,13 @@ impl FontDb {
     }
 }
 
+/// The families in `faces` (a file's faces group by family, so consecutive duplicates drop).
+fn families_of(faces: &[Arc<super::FontFace>]) -> Vec<String> {
+    let mut v: Vec<String> = faces.iter().map(|f| f.family.clone()).collect();
+    v.dedup();
+    v
+}
+
 /// `name`, or `name` with `-2`, `-3`… before its extension, the first that `taken` refuses.
 fn unique_name(name: &str, taken: impl Fn(&str) -> bool) -> String {
     if !taken(name) {
@@ -656,6 +729,7 @@ fn write_unique(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<PathBuf
         r => r?,
     };
     let written = std::io::Write::write_all(&mut file, bytes);
+    #[cfg_attr(target_arch = "wasm32", allow(clippy::drop_non_drop))]
     drop(file);
     if let Err(e) = written.and_then(|()| std::fs::rename(&tmp, &path)) {
         let _ = std::fs::remove_file(&tmp);

@@ -483,6 +483,7 @@ fn styles_group_rects() -> (Vec<(String, Rect)>, Vec<Rect>, Option<Rect>) {
 /// "more" sit at the gallery's left end. Left to right is unchanged.
 #[test]
 fn the_styles_gallery_reads_from_the_right_in_a_right_to_left_interface() {
+    let _lock = crate::i18n::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     crate::i18n::set_current(crate::i18n::Lang::EN);
     let (tiles, arrows, more) = styles_group_rects();
     assert!(tiles.len() >= 2, "the gallery shows its tiles: {tiles:?}");

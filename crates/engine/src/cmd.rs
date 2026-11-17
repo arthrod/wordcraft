@@ -549,10 +549,10 @@ pub fn now_unix() -> u64 {
     {
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
     }
-    // `SystemTime::now()` panics on wasm32-unknown-unknown, so ask the browser's clock.
+    // `SystemTime::now()` panics on wasm32-unknown-unknown, so ask the host-supplied clock.
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     {
-        let ms = js_sys::Date::now();
+        let ms = wordcraft_geom::wasm_epoch_ms();
         // Clamp a NaN or pre-epoch clock to 0 rather than fail.
         if ms.is_finite() && ms > 0.0 { (ms / 1000.0) as u64 } else { 0 }
     }
@@ -581,16 +581,10 @@ fn system_offset_secs(unix: u64) -> i64 {
     std::panic::catch_unwind(|| i64::from(utc.with_timezone(&chrono::Local).offset().fix().local_minus_utc())).unwrap_or(0)
 }
 
-/// On the web the browser's `Date` gives the offset directly (chrono isn't used there).
+/// On the web the L6 host injects `Date.getTimezoneOffset()` via `wordcraft_geom`.
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 fn system_offset_secs(unix: u64) -> i64 {
-    let ms = (unix as f64) * 1000.0;
-    if !ms.is_finite() {
-        return 0;
-    }
-    // `getTimezoneOffset` is minutes *west* of UTC (UTC+13 gives -780); NaN for an invalid date.
-    let west_min = js_sys::Date::new(&js_sys::wasm_bindgen::JsValue::from_f64(ms)).get_timezone_offset();
-    if west_min.is_finite() && west_min.abs() <= 26.0 * 60.0 { -(west_min as i64) * 60 } else { 0 }
+    wordcraft_geom::wasm_tz_offset_secs(unix)
 }
 
 /// Other wasm targets (WASI) have neither chrono's clock nor a browser: UTC.

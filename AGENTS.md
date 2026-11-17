@@ -96,7 +96,7 @@ People trust WordCraft with their writing; a crash loses their work. **This outr
 - **Everything is a command.** User-visible behaviour = a `CommandSpec` in `crates/engine/src/cmd/*.rs` (id, label, ribbon location, shortcut, params doc, `enabled`, `run`) + tests. UI-only commands (`ui.*`) live in `crates/ui-egui/src/lib.rs`. The ribbon, shortcuts, command search, CLI, control channel and MCP all dispatch by id. Programmatic calls never open dialogs.
 - **Parity is measured:** `crates/engine/src/catalog.rs` lists Word's ribbon/menu features with command ids. `cargo xtask parity` writes `docs/parity-checklist.md`; a test enforces a floor that only rises. Implement missing ids to raise it.
 - **Layering** is enforced by `cargo xtask layers`. Nothing below L6 depends on egui/eframe/winit/rfd. The UI is thin and reads `Session` state; colours come from `theme::Tokens`.
-- **Rust only** (no handwritten JS/TS). **Never break wasm** (`cargo xtask wasm`).
+- **Rust only** (no handwritten JS/TS; the documented exceptions under House Rule 4 — the thin ESM npm wrapper `packaging/web/npm/index.js` and its declarations `packaging/web/npm/index.d.ts`, and the consumer smoke harness `packaging/web/smoke/` — are listed in `packaging/web/README.md`). **Never break wasm** (`cargo xtask wasm`).
 
 ## Quality gates
 Before every commit: `cargo xtask ci` (fmt, clippy -D warnings, tests, assets, layers, wasm). Commit after every arc of work that builds, with a task id in the message (`M2.1: line spacing dialog`).

@@ -1,5 +1,6 @@
 *~
 plan/
+.scratch/
 /target
 /dist
 /corpus
@@ -8,3 +9,8 @@ plan/
 /.claude/
 /target-*/
 /craft-fonts/
+/open-docs/
+/apps/wordcraft-web/target-assets/
+
+# wrangler local state (deploy logs, caches)
+.wrangler/

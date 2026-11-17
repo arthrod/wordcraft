@@ -186,6 +186,7 @@ fn new_page_builder<'p>(
 ) -> PageBuilder<'p> {
     PageBuilder {
         pages: Vec::new(),
+        discarded: 0,
         sect,
         page_format,
         sect_idx: 0,
@@ -390,6 +391,7 @@ fn place_section_blocks<'p>(
         let before = balance.then(|| (pb.pages.len(), Snap::take(pb, ctx)));
         pb.mark_block();
         place_block(ctx, pb, outline, block, body_top);
+        super::keep::discard_passed(ctx, pb);
         if let Some((pages, snap)) = before
             && pb.pages.len() != pages
         {
@@ -608,6 +610,7 @@ pub(crate) fn layout_pass(
         return Pass::Again(found);
     }
     evict_unused(ctx.cache);
+    super::keep::discard_outside(&mut ctx, &mut pages);
     let mut lay = DocLayout { index: index_lines(&pages), pages, ms: 0.0, text_boxes: 0 };
     if opts.comment_balloons && !mode.web {
         balloons::add(&mut ctx, &mut lay);
@@ -778,10 +781,9 @@ pub fn now_ms() -> f64 {
         static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
         T0.get_or_init(std::time::Instant::now).elapsed().as_secs_f64() * 1000.0
     }
-    // `Instant::now()` panics on wasm32-unknown-unknown, so ask the browser's clock.
+    // `Instant::now()` panics on wasm32-unknown-unknown, so ask the host-supplied clock.
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     {
-        let ms = js_sys::Date::now();
-        if ms.is_finite() { ms } else { 0.0 }
+        wordcraft_geom::wasm_now_ms()
     }
 }

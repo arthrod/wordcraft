@@ -161,6 +161,7 @@ fn paragraph_tools_menu_entries_run_their_commands() {
 /// the left, and the next controls start after a gap to the left of the gallery.
 #[test]
 fn design_style_set_gallery_reads_from_the_right_in_rtl() {
+    let _lock = crate::i18n::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     crate::i18n::set_current(crate::i18n::fixture_lang("ar", "\tHome\tالرئيسية\n"));
     let mut app = WordApp::new(Session::new(wordcraft_doc::Document::new()), crate::Services::default());
     let mut seen = None;
@@ -615,6 +616,7 @@ fn chart_design_tab_appears_when_chart_selected_and_buttons_open_dialogs() {
 /// made for three, so "Hide White Space" was drawn under "Show". Every tab, every language.
 #[test]
 fn ribbon_groups_fit_above_their_labels() {
+    let _lock = crate::i18n::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let app = WordApp::new(Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
     // Wide enough that no tab hides groups behind its scroll arrows.
     let mut h = egui_kittest::Harness::builder().with_size(vec2(2560.0, 900.0)).build_ui_state(
@@ -646,6 +648,7 @@ fn ribbon_groups_fit_above_their_labels() {
 /// in Polish the table tabs were out of reach. They stay on the strip and a click opens them.
 #[test]
 fn table_tabs_stay_clickable_when_the_tab_strip_overflows() {
+    let _lock = crate::i18n::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if !crate::i18n::catalogs_embedded() {
         return;
     }
@@ -676,6 +679,7 @@ fn table_tabs_stay_clickable_when_the_tab_strip_overflows() {
 /// Editing / Share, the tabs stay inside the window, and the buttons keep their room.
 #[test]
 fn tab_strip_never_overlaps_the_right_buttons() {
+    let _lock = crate::i18n::RUNTIME_CATALOG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if !crate::i18n::catalogs_embedded() {
         return;
     }
