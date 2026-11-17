@@ -740,6 +740,15 @@ pub fn view_open_request_prefix(password: Option<&str>, docx_len: usize) -> Resu
 /// Decode a `viewOpen` payload. The bounds are checked on the borrowed frame slices, so an
 /// over-limit request is refused before the file is copied.
 pub fn decode_view_open_request(bytes: &[u8]) -> Result<ViewOpenRequest, ProtoError> {
+    let (password, docx) = view_open_request_parts(bytes)?;
+    Ok(ViewOpenRequest { password, docx: docx.to_vec() })
+}
+
+/// A `viewOpen` payload's password and its `.docx`, the file still inside `bytes`: for a
+/// receiver that only reads it. [`decode_view_open_request`] is the same checks and a copy,
+/// which a 64 MiB file does not need a second time (the frame was copied once already, into
+/// the module).
+pub fn view_open_request_parts(bytes: &[u8]) -> Result<(Option<String>, &[u8]), ProtoError> {
     let parts = unpack_binary(bytes)?;
     let [meta, docx] = parts.as_slice() else {
         return Err(ProtoError::Decode(format!("viewOpen payload has {} parts, expected 2", parts.len())));
@@ -756,7 +765,7 @@ pub fn decode_view_open_request(bytes: &[u8]) -> Result<ViewOpenRequest, ProtoEr
     if docx.is_empty() {
         return Err(ProtoError::Decode("viewOpen payload has an empty .docx".into()));
     }
-    Ok(ViewOpenRequest { password: meta.password, docx: docx.to_vec() })
+    Ok((meta.password, docx))
 }
 
 /// One page's size in points.
@@ -1756,6 +1765,21 @@ mod tests {
             other.v = PROTOCOL_VERSION + 1;
             assert!(matches!(decode_envelope(&encode_envelope(&other).unwrap()), Err(ProtoError::Version { .. })), "{kind:?}");
         }
+    }
+
+    #[test]
+    fn the_borrowed_view_open_parts_are_the_frames_own_bytes() {
+        let req = ViewOpenRequest { password: Some("pw".into()), docx: (0..=255).collect() };
+        let frame = encode_view_open_request(&req).unwrap();
+        let (password, docx) = view_open_request_parts(&frame).unwrap();
+        assert_eq!((password.as_deref(), docx), (Some("pw"), req.docx.as_slice()));
+        let (start, end) = (frame.as_ptr() as usize, frame.as_ptr() as usize + frame.len());
+        assert!((start..end).contains(&(docx.as_ptr() as usize)), "the file is not copied out of the frame");
+        assert_eq!(decode_view_open_request(&frame).unwrap(), req);
+        // The same refusals as the owned decode.
+        assert!(view_open_request_parts(&[]).is_err());
+        let empty = encode_view_open_request(&ViewOpenRequest { password: None, docx: vec![1] }).unwrap();
+        assert!(view_open_request_parts(&empty[..empty.len() - 1]).is_err());
     }
 
     #[test]

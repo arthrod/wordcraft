@@ -81,9 +81,10 @@ impl ViewerWorker {
     /// document takes the old one's place, the open or the reply, leaves the fonts as they were
     /// (the [`wordcraft_viewer::Replacement`] is dropped unkept).
     fn open_answering(&mut self, payload: &[u8], answer: impl FnOnce(&Session) -> Outcome) -> Outcome {
-        let req = proto::decode_view_open_request(payload).map_err(proto_error)?;
+        // The file is read where it lies in the frame: no second copy of up to 64 MiB.
+        let (password, docx) = proto::view_open_request_parts(payload).map_err(proto_error)?;
         let mut replacing = wordcraft_viewer::Replacement::begin(self.session.as_ref());
-        let session = replacing.open(&req.docx, req.password.as_deref()).map_err(viewer_error)?;
+        let session = replacing.open(docx, password.as_deref()).map_err(viewer_error)?;
         let opened = answer(&session)?;
         replacing.keep();
         self.session = Some(session);
