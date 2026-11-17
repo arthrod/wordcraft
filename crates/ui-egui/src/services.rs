@@ -49,6 +49,18 @@ pub struct Services {
     /// under its own name and format, as on the desktop, and a Save or Save As that keeps
     /// everything makes that name the document's file, so the next Save goes to it.
     pub host_save: Option<HostSaveFn>,
+    /// Web: formats the build leaves to a module the host loads on first use (the extra formats,
+    /// PDF). Asked before the engine writes a save or export that becomes a download
+    /// ([`LazyExportFn`]): `None` leaves the format to the engine; `Some` means the host took the
+    /// job and delivers the file itself, later, saying how it went. Such a save is a copy: the
+    /// document keeps its unsaved changes.
+    pub lazy_export: Option<LazyExportFn>,
+    /// Told the id of each command [`crate::WordApp::execute`] runs (the user's, a script's, an
+    /// agent's), before it runs, and the context menu's spelling lookup (`review.suggestions`,
+    /// which the menu runs on the session itself). Web: the proofing worker starts on the first
+    /// proofing command, even on a document nobody edited; most of those commands change nothing
+    /// in the session that would show afterwards.
+    pub on_command: Option<Box<dyn Fn(&str)>>,
     /// Web: told whether the document has unsaved changes after each pass, for the browser's
     /// leave-page guard (`beforeunload` runs between frames and can't ask the app).
     pub on_dirty: Option<Box<dyn Fn(bool)>>,
@@ -119,6 +131,26 @@ pub struct Services {
 
 /// Files delivered asynchronously.
 pub type Inbox = std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>;
+
+/// [`Services::lazy_export`]: `(file name, password, options, docx, faces)`. `docx` writes the document
+/// as an unencrypted Word package, the form the host's module takes; `password` is the
+/// document's, for the formats that are saved with one; `options` are the export options the
+/// command resolved (Print Markup, comments, digits), which a package does not carry, for the
+/// host to apply as the engine's writer would. `docx` already refuses a strict PDF that would
+/// leave something out, with the engine's message. `faces` lists the faces a PDF of the document
+/// draws text in, `(family, style)`, and says when that list was cut
+/// ([`wordcraft_engine::strict::pdf_faces`]), for a host that copies faces to its module and
+/// must choose which: it lays the document out, so ask only when a choice has to be made.
+/// `Some(Err)` is a job that could not start.
+pub type LazyExportFn = Box<
+    dyn Fn(
+        &str,
+        Option<&str>,
+        &wordcraft_engine::io::ExportOptions,
+        &dyn Fn() -> Result<Vec<u8>, String>,
+        &dyn Fn() -> wordcraft_engine::strict::PdfFaces,
+    ) -> Option<Result<(), String>>,
+>;
 
 /// [`Services::host_save`]: `(file name, bytes, save_as)`. An error means the page didn't get
 /// the file, and the save failed.

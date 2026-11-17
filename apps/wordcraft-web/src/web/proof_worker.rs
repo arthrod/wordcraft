@@ -97,7 +97,7 @@ impl ProofWorker {
                 inner.queued.clear();
                 inner.pending.drain().map(|(id, p)| (id, p.sink)).collect::<Vec<_>>()
             };
-            log::warn!("proofing worker failed ({}:{}): {}", event.filename(), event.lineno(), event.message());
+            log::warn!("proofing worker failed: {}", super::worker_error_text(&event));
             fail_pending(pending, "the proofing worker stopped");
         });
         worker.set_onerror(Some(onerror.as_ref().unchecked_ref()));

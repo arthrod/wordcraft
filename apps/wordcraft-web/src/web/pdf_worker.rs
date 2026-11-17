@@ -20,23 +20,44 @@ use wasm_bindgen::JsCast as _;
 use wasm_bindgen::closure::Closure;
 use wordcraft_worker_proto as proto;
 
+use crate::lazy_formats::{LOAD_MS, ReadyGate};
+
 /// The Trunk loader shim file (see the `data-type="worker"` + `data-loader-shim` link in
 /// `index.html`; Trunk names worker artifacts after the binary without a content hash).
 const LOADER_FILE: &str = "wordcraft-worker-pdf_loader.js";
 
+/// A request on its way to the worker.
+struct Queued {
+    id: u32,
+    kind: proto::Kind,
+    payload: Vec<u8>,
+    /// Runs once the request is posted: the job's deadline starts there (`lazy_io`).
+    posted: Option<Box<dyn FnOnce()>>,
+}
+
+/// Post `job` as `[headerJson, payloadBuffer]`, the payload transferred.
+fn post(worker: &web_sys::Worker, job: &Queued) -> Result<(), String> {
+    let env = proto::Envelope::request(job.id, job.kind, 0);
+    let header = proto::encode_envelope(&env).map_err(|e| e.to_string())?;
+    let header = String::from_utf8(header).map_err(|_| "envelope was not UTF-8".to_string())?;
+    let bytes = js_sys::Uint8Array::from(job.payload.as_slice());
+    let msg = js_sys::Array::of2(&wasm_bindgen::JsValue::from_str(&header), &bytes);
+    let transfer = js_sys::Array::of1(&bytes.buffer());
+    worker.post_message_with_transfer(&msg, &transfer).map_err(|e| format!("postMessage failed: {e:?}"))
+}
+
 struct Inner {
     worker: web_sys::Worker,
     ids: proto::RequestIds,
-    /// The worker's `ready` notice arrived.
-    ready: bool,
-    /// The worker failed to start or errored: the feature is unavailable.
+    /// The worker failed to start, errored or never loaded: the feature is unavailable.
     failed: bool,
 
-    /// Jobs posted before the worker's `ready` notice: a module worker still evaluating its
+    /// Jobs sent before the worker's `ready` notice: a module worker still evaluating its
     /// top-level `await init()` silently DROPS transferred messages (measured 2026-11-15: a
     /// renderPdf posted pre-ready never arrives; the same bytes posted after `ready` answer),
-    /// so early posts wait here and flush when `ready` lands.
-    queued: Vec<(u32, proto::Kind, Vec<u8>)>,
+    /// so early jobs wait here and are posted when `ready` lands — and only then does each
+    /// job's deadline start ([`Queued::posted`]).
+    gate: ReadyGate<Queued>,
     pending: HashMap<u32, Box<dyn FnOnce(&proto::Envelope, &[u8])>>,
 }
 
@@ -60,10 +81,9 @@ impl PdfWorker {
         let inner = Rc::new(RefCell::new(Inner {
             worker: worker.clone(),
             ids: proto::RequestIds::new(),
-            ready: false,
             failed: false,
             pending: HashMap::new(),
-            queued: Vec::new(),
+            gate: ReadyGate::new(),
         }));
 
         let handler = inner.clone();
@@ -74,16 +94,20 @@ impl PdfWorker {
 
         let handler = inner.clone();
         let onerror = Closure::<dyn FnMut(web_sys::ErrorEvent)>::new(move |event: web_sys::ErrorEvent| {
-            let pending = {
+            let (pending, ready) = {
                 let mut inner = handler.borrow_mut();
                 inner.failed = true;
-                inner.queued.clear();
-                inner.pending.drain().collect::<Vec<_>>()
+                inner.gate.close();
+                (inner.pending.drain().collect::<Vec<_>>(), inner.gate.is_ready())
             };
-            log::warn!("pdf worker failed ({}:{}): {}", event.filename(), event.lineno(), event.message());
-            fail_pending(pending, "the pdf worker stopped");
+            log::warn!("pdf worker failed: {}", super::worker_error_text(&event));
+            // As the codec client: not loaded before `ready`, stopped while working after it.
+            fail_pending(pending, &super::worker_failure("pdf", ready));
         });
         worker.set_onerror(Some(onerror.as_ref().unchecked_ref()));
+        // A worker that never says it is ready (a fetch that stalls instead of failing) is given
+        // up on after a generous bound of its own; the jobs' deadlines have not started yet.
+        arm_load_bound(Rc::downgrade(&inner));
 
         Ok(PdfWorker { inner, _onmessage: onmessage, _onerror: onerror })
     }
@@ -92,40 +116,41 @@ impl PdfWorker {
     #[allow(dead_code)] // For diagnostics; the export resolves through the same channel.
     pub(crate) fn alive(&self) -> bool {
         let inner = self.inner.borrow();
-        !inner.failed && inner.ready
+        !inner.failed && inner.gate.is_ready()
     }
 
-    /// Post `(kind, payload)`; the request `id` it went out with.
-    fn send(&self, kind: proto::Kind, payload: &[u8]) -> Result<u32, String> {
-        let mut inner = self.inner.borrow_mut();
-        if inner.failed {
-            return Err("pdf worker failed".into());
+    /// Send `(kind, payload)`: posted now to a ready worker, else held until it says it is
+    /// ready; `posted` runs once it is posted. The request `id` it goes out with.
+    fn send(&self, kind: proto::Kind, payload: Vec<u8>, posted: Option<Box<dyn FnOnce()>>) -> Result<u32, String> {
+        let (worker, job) = {
+            let mut inner = self.inner.borrow_mut();
+            if inner.failed {
+                return Err("pdf worker failed".into());
+            }
+            let id = inner.ids.next_id();
+            match inner.gate.submit(Queued { id, kind, payload, posted }) {
+                Some(job) => (inner.worker.clone(), job),
+                None => return Ok(id),
+            }
+        };
+        post(&worker, &job)?;
+        if let Some(posted) = job.posted {
+            posted();
         }
-        let id = inner.ids.next_id();
-        if !inner.ready {
-            inner.queued.push((id, kind, payload.to_vec()));
-            return Ok(id);
-        }
-        let env = proto::Envelope::request(id, kind, 0);
-        let header = proto::encode_envelope(&env).map_err(|e| e.to_string())?;
-        let header = String::from_utf8(header).map_err(|_| "envelope was not UTF-8".to_string())?;
-        let bytes = js_sys::Uint8Array::from(payload);
-        let msg = js_sys::Array::of2(&wasm_bindgen::JsValue::from_str(&header), &bytes);
-        let transfer = js_sys::Array::of1(&bytes.buffer());
-        inner.worker.post_message_with_transfer(&msg, &transfer).map_err(|e| format!("postMessage failed: {e:?}"))?;
-        Ok(id)
+        Ok(job.id)
     }
 
     /// `renderPdf` request; `on_reply` gets the PDF bytes, or the typed error the worker
-    /// answered with. The pending entry is registered after `postMessage` returns — a reply can
-    /// only arrive on a later task turn.
+    /// answered with; `posted` runs when the request reaches a ready worker. The pending entry
+    /// is registered after `postMessage` returns — a reply can only arrive on a later task turn.
     pub(crate) fn render_pdf(
         &self,
         req: &proto::PdfRenderRequest,
+        posted: Box<dyn FnOnce()>,
         on_reply: impl FnOnce(Result<Vec<u8>, proto::ErrorReply>) + 'static,
     ) -> Result<u32, String> {
         let payload = proto::encode_pdf_request(req).map_err(|e| e.to_string())?;
-        let id = self.send(proto::Kind::RenderPdf, &payload)?;
+        let id = self.send(proto::Kind::RenderPdf, payload, Some(posted))?;
         self.inner.borrow_mut().pending.insert(
             id,
             Box::new(move |env: &proto::Envelope, payload: &[u8]| match env.kind {
@@ -141,13 +166,39 @@ impl PdfWorker {
     /// Liveness probe.
     #[allow(dead_code)] // Kept for the wiring that reports worker health.
     pub(crate) fn ping(&self) -> Result<u32, String> {
-        self.send(proto::Kind::Ping, &[])
+        self.send(proto::Kind::Ping, Vec::new(), None)
     }
 
     /// Hard stop — the only way to interrupt a long job (§3.1).
     #[allow(dead_code)] // Kept for a future cancel affordance.
     pub(crate) fn terminate(self) {
         self.inner.borrow().worker.terminate();
+    }
+}
+
+/// After [`LOAD_MS`], fail the jobs of a worker that still has not said it is ready as "could not
+/// be loaded" (the user is told to check the connection) and stop it; the next job starts a
+/// fresh one. A worker that loaded, failed or was dropped meanwhile is left alone.
+fn arm_load_bound(inner: std::rc::Weak<RefCell<Inner>>) {
+    let fire = Closure::once_into_js(move || {
+        let Some(inner) = inner.upgrade() else { return };
+        let (worker, pending) = {
+            let mut i = inner.borrow_mut();
+            if i.failed || i.gate.is_ready() {
+                return;
+            }
+            i.failed = true;
+            i.gate.close();
+            (i.worker.clone(), i.pending.drain().collect::<Vec<_>>())
+        };
+        log::warn!("pdf worker: not ready after {} minutes; it is not loading", LOAD_MS / 60_000);
+        worker.terminate();
+        fail_pending(pending, &super::worker_failure("pdf", false));
+    });
+    let ms = i32::try_from(LOAD_MS).unwrap_or(i32::MAX);
+    let armed = web_sys::window().map(|w| w.set_timeout_with_callback_and_timeout_and_arguments_0(fire.unchecked_ref(), ms));
+    if !matches!(armed, Some(Ok(_))) {
+        log::warn!("pdf worker: no timer for its load bound; it waits for the worker alone");
     }
 }
 
@@ -163,42 +214,39 @@ fn fail_pending(pending: Vec<(u32, Box<dyn FnOnce(&proto::Envelope, &[u8])>)>, m
 }
 
 /// Route one `[headerJson, payloadBuffer]` message from the worker.
-fn on_message(inner: &Rc<RefCell<Inner>>, data: &wasm_bindgen::JsValue) {
-    let arr = js_sys::Array::from(data);
-    let Some(header) = arr.get(0).as_string() else {
-        log::warn!("pdf worker: message without a JSON header");
+fn on_message(inner_rc: &Rc<RefCell<Inner>>, data: &wasm_bindgen::JsValue) {
+    let Some((env, payload)) = super::read_worker_message("pdf", data) else {
         return;
     };
-    let payload = js_sys::Uint8Array::new(&arr.get(1)).to_vec();
-    let env = match proto::decode_envelope(header.as_bytes()) {
-        Ok(env) => env,
-        Err(e) => {
-            log::warn!("pdf worker: undecodable header ({e})");
-            return;
-        }
-    };
     let pending = {
-        let mut inner = inner.borrow_mut();
+        let mut inner = inner_rc.borrow_mut();
         if env.kind == proto::Kind::Ready {
-            inner.ready = true;
-            let queued = std::mem::take(&mut inner.queued);
+            let held = inner.gate.open();
             let worker = inner.worker.clone();
             drop(inner);
-            for (id, kind, payload) in queued {
-                let env = proto::Envelope::request(id, kind, 0);
-                let Ok(header) = proto::encode_envelope(&env)
-                    .map_err(|e| e.to_string())
-                    .and_then(|h| String::from_utf8(h).map_err(|_| "envelope was not UTF-8".to_string()))
-                else {
-                    log::warn!("worker: cannot encode a queued message");
-                    continue;
-                };
-                let bytes = js_sys::Uint8Array::from(payload.as_slice());
-                let msg = js_sys::Array::of2(&wasm_bindgen::JsValue::from_str(&header), &bytes);
-                let transfer = js_sys::Array::of1(&bytes.buffer());
-                if let Err(e) = worker.post_message_with_transfer(&msg, &transfer) {
-                    log::warn!("worker: a queued message failed to send: {e:?}");
+            let mut unsent = Vec::new();
+            for job in held {
+                match post(&worker, &job) {
+                    // Its deadline starts now, not when it was asked for.
+                    Ok(()) => {
+                        if let Some(posted) = job.posted {
+                            posted();
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("worker: a queued message failed to send: {e}");
+                        unsent.push(job.id);
+                    }
                 }
+            }
+            if !unsent.is_empty() {
+                // A request that never went out must not leave its pending entry — and the
+                // caller's promise — hanging: complete it with an error instead.
+                let sinks = {
+                    let mut inner = inner_rc.borrow_mut();
+                    unsent.into_iter().filter_map(|id| inner.pending.remove(&id).map(|p| (id, p))).collect::<Vec<_>>()
+                };
+                fail_pending(sinks, "the pdf worker could not send the queued request");
             }
             return;
         }
@@ -212,12 +260,18 @@ fn on_message(inner: &Rc<RefCell<Inner>>, data: &wasm_bindgen::JsValue) {
 
 impl Drop for PdfWorker {
     fn drop(&mut self) {
-        // Detach first so a message that races the drop can't touch freed state, then stop the
-        // worker itself.
-        let inner = self.inner.borrow();
-        inner.worker.set_onmessage(None);
-        inner.worker.set_onerror(None);
-        inner.worker.terminate();
+        // Complete the outstanding requests (a worker stopped for a deadline must not leave the
+        // jobs behind it waiting forever), detach so a message that races the drop can't touch
+        // freed state, then stop the worker itself.
+        let (worker, pending) = {
+            let mut inner = self.inner.borrow_mut();
+            inner.gate.close();
+            (inner.worker.clone(), inner.pending.drain().collect::<Vec<_>>())
+        };
+        worker.set_onmessage(None);
+        worker.set_onerror(None);
+        worker.terminate();
+        fail_pending(pending, "the pdf worker was stopped");
     }
 }
 
@@ -232,13 +286,14 @@ thread_local! {
 pub(crate) fn ensure(asset_base: &str) -> bool {
     // A worker that errored at runtime is dead weight: drop it (its `Drop` terminates the JS
     // worker) and start fresh below. `WORKER_FAILED` stays reserved for `start` failures.
-    let alive = WORKER.with(|w| {
+    let (alive, dropped) = WORKER.with(|w| {
         let mut slot = w.borrow_mut();
-        if slot.as_ref().is_some_and(|worker| worker.inner.borrow().failed) {
-            *slot = None;
-        }
-        slot.is_some()
+        let dropped = if slot.as_ref().is_some_and(|worker| worker.inner.borrow().failed) { slot.take() } else { None };
+        (slot.is_some(), dropped)
     });
+    // Dropped outside the slot's borrow: its `Drop` completes waiting requests, whose
+    // continuations may ask for the worker again.
+    drop(dropped);
     if alive {
         return true;
     }
@@ -256,6 +311,14 @@ pub(crate) fn ensure(asset_base: &str) -> bool {
             false
         }
     }
+}
+
+/// Stop the shared worker (one stuck past a job's deadline): its waiting requests fail, and the
+/// next [`ensure`] starts a fresh one. Dropped outside the slot's borrow, so a request's
+/// continuation may start the next job.
+pub(crate) fn stop() {
+    let stopped = WORKER.with(|w| w.borrow_mut().take());
+    drop(stopped);
 }
 
 /// Run `f` on the shared worker when it is up (after [`ensure`]).

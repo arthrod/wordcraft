@@ -87,6 +87,12 @@ export async function run(start, createProofWorker) {
     // One font pack through assetBase: resolves once the manifest and the
     // family's .ttf.br files are fetched, decoded and installed.
     result.fonts = await api.installFonts(["JetBrains Mono"]);
+    // The proofing worker starts on the first edit, not on page load (implementation
+    // plan 10.1): make one, so the `?proof-worker` known-bad check drive.mjs waits
+    // for has a worker to run in.
+    // The page starts on File › Home with no document open, so it opens a blank one first.
+    await api.execute("file.new", {});
+    await api.execute("text.insert", { text: "Ths is a tst. " });
     result.exportWorker = await proofWorkerExport(createProofWorker);
     result.phase = "done";
   } catch (error) {

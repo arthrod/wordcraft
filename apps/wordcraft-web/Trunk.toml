@@ -18,6 +18,13 @@ stage = "pre_build"
 command = "cargo"
 command_arguments = ["xtask", "web-assets"]
 
+# Plan 10.3: the page's first module must not preload another target's snippet files (Trunk
+# shares one wasm-bindgen output directory between targets; see xtask/src/web_page.rs).
+[[hooks]]
+stage = "post_build"
+command = "cargo"
+command_arguments = ["xtask", "web-page"]
+
 [[hooks]]
 stage = "post_build"
 command = "sh"

@@ -57,7 +57,9 @@ pub fn handle_message(header: &[u8], payload: &[u8]) -> (Vec<u8>, Vec<u8>) {
         Kind::Cancel => cancel(payload),
         Kind::Convert => convert(payload),
         // This worker converts; it does not proof or render.
-        Kind::Check | Kind::Configure | Kind::RenderPdf => error(ErrorCode::UnknownKind, "`convert` is the only job this worker runs".into()),
+        Kind::Check | Kind::Configure | Kind::RenderPdf | Kind::ViewOpen | Kind::ViewRender | Kind::ViewInstallFont | Kind::ViewMissingFonts => {
+            error(ErrorCode::UnknownKind, "`convert` is the only job this worker runs".into())
+        }
         // Unreachable: `is_request` was checked above.
         other => error(ErrorCode::UnknownKind, format!("`{other:?}` is a reply, not a request")),
     };
@@ -119,7 +121,7 @@ fn run_convert(req: &ConvertRequest) -> Result<Vec<u8>, String> {
     let password = req.password.as_deref();
     match req.direction {
         ConvertDirection::Import => {
-            let mut doc = import_document(&format, &req.input, password)?;
+            let mut doc = import_document(&format, &req.input, password, &page(req.page))?;
             doc.ensure_nonempty();
             let package = wordcraft_docx::write(&doc).map_err(|e| e.to_string())?;
             encrypt_word_package(package, password)
@@ -131,15 +133,22 @@ fn run_convert(req: &ConvertRequest) -> Result<Vec<u8>, String> {
     }
 }
 
-/// The page a file that gives no page size opens on: a new blank document's (the engine opens
-/// such files on the session's paper; a worker has no session, so the default it is).
-fn page() -> wordcraft_doc::SectionProps {
-    wordcraft_doc::SectionProps::default()
+/// The page a file that gives no page size opens on: the one the client sent (the paper of the
+/// user's region, as the engine's `io::region_page` builds it for its session), else a new blank
+/// document's. The request was validated, so the size is within the protocol's bounds.
+fn page(size: Option<proto::PageSize>) -> wordcraft_doc::SectionProps {
+    match size {
+        Some(size) => {
+            let (page_w, page_h) = size.points();
+            wordcraft_doc::SectionProps { page_w, page_h, ..Default::default() }
+        }
+        None => wordcraft_doc::SectionProps::default(),
+    }
 }
 
 /// Read `input` in the format `ext` names (import direction). Password errors carry the
 /// `.docx` reader's texts so the client's `needs_password` / `wrong_password` checks match.
-fn import_document(ext: &str, input: &[u8], password: Option<&str>) -> Result<Document, String> {
+fn import_document(ext: &str, input: &[u8], password: Option<&str>, page: &wordcraft_doc::SectionProps) -> Result<Document, String> {
     // An encrypted Word package under any Word extension (the extension can lie): [MS-OFFCRYPTO]
     // agile or Standard encryption, decrypted before the package parses.
     if matches!(ext, "docx" | "docm" | "dotx" | "dotm" | "doc" | "dot") && wordcraft_docx::is_encrypted(input) {
@@ -159,12 +168,10 @@ fn import_document(ext: &str, input: &[u8], password: Option<&str>) -> Result<Do
         "odt" | "ott" if wordcraft_formats::odt::is_encrypted(input) => {
             let pw = password.ok_or_else(|| format!("ODT: {}", wordcraft_docx::PASSWORD_REQUIRED))?;
             let plain = wordcraft_formats::odt::decrypt(input, pw).map_err(|e| e.to_string())?;
-            wordcraft_formats::odt::import_on(&plain, &page())
+            wordcraft_formats::odt::import_on(&plain, page)
         }
-        // HTML, RTF, ODT, LaTeX…: the format crate's readers, on the default page.
-        other => {
-            wordcraft_formats::import_on(other, input, &page()).unwrap_or_else(|| Err(format!("`.{other}` is not a format this worker converts")))
-        }
+        // HTML, RTF, ODT, LaTeX…: the format crate's readers, on that page.
+        other => wordcraft_formats::import_on(other, input, page).unwrap_or_else(|| Err(format!("`.{other}` is not a format this worker converts"))),
     }
 }
 
@@ -233,9 +240,9 @@ fn serve() {
 /// which `handle_message` answers with a typed `error`: a malformed message must never throw
 /// out of `onmessage` and go unanswered.
 ///
-/// The payload is copied only after its length is checked against the request kind's
-/// [`proto::request_payload_limit`]: an oversized one comes back as `Some((env, got, limit))`
-/// with no copy, and `serve` answers `TooLarge`. A header or payload the handler never reads
+/// The payload is copied, once, into this module only after its length is checked against the
+/// request kind's [`proto::request_payload_limit`]: an oversized one comes back as
+/// `Some((env, got, limit))` with no copy, and `serve` answers `TooLarge`. A header or payload the handler never reads
 /// (an undecodable header, a reply kind sent as a request) is not copied at all.
 #[cfg(target_arch = "wasm32")]
 fn unpack(data: &wasm_bindgen::JsValue) -> (Vec<u8>, Vec<u8>, Option<(Envelope, usize, usize)>) {
@@ -245,15 +252,24 @@ fn unpack(data: &wasm_bindgen::JsValue) -> (Vec<u8>, Vec<u8>, Option<(Envelope, 
         return (Vec::new(), Vec::new(), None);
     }
     let arr = js_sys::Array::from(data);
-    let header_str = arr.get(0).as_string().unwrap_or_default();
+    // The header's length is read from the JS string before it is copied: a string of hundreds
+    // of megabytes must cost one reply, not an allocation this module may not survive.
+    let first = arr.get(0);
+    let header_str = match first.dyn_ref::<js_sys::JsString>() {
+        Some(s) if s.length() as usize <= proto::MAX_PAYLOAD_BYTES => String::from(s),
+        _ => String::new(),
+    };
     // `decode_envelope` applies `MAX_PAYLOAD_BYTES` itself; an over-limit header gets the same
     // `BadRequest` an empty one does, without paying for the copy first.
     let header = if header_str.len() > proto::MAX_PAYLOAD_BYTES { Vec::new() } else { header_str.into_bytes() };
-    let payload = arr.get(1);
-    if !payload.is_instance_of::<js_sys::ArrayBuffer>() && !payload.is_instance_of::<js_sys::Uint8Array>() {
-        return (header, Vec::new(), None);
-    }
-    let view = js_sys::Uint8Array::new(&payload);
+    // A `Uint8Array` (what the page posts) is used as it is: `new Uint8Array(typedArray)` would
+    // copy every byte (ECMA-262 InitializeTypedArrayFromTypedArray clones the buffer), before the
+    // length check. An `ArrayBuffer` gets a view, which copies nothing.
+    let view = match arr.get(1).dyn_into::<js_sys::Uint8Array>() {
+        Ok(view) => view,
+        Err(other) if other.is_instance_of::<js_sys::ArrayBuffer>() => js_sys::Uint8Array::new(&other),
+        Err(_) => return (header, Vec::new(), None),
+    };
     let got = view.length() as usize;
     let Some(env) = proto::decode_envelope(&header).ok().filter(|e| e.kind.is_request()) else {
         return (header, Vec::new(), None);
@@ -319,10 +335,47 @@ mod tests {
         wordcraft_docx::write(&sample_doc()).expect("docx")
     }
 
+    /// Review finding (the page of an opened file): a file that gives no page size opens on the
+    /// page the client sends — the user's region's paper, as the engine opens it in its session
+    /// (`io::open_bytes_in`) — and on a new blank document's page when none is sent. A file with
+    /// its own page size keeps it.
+    #[test]
+    fn import_opens_a_file_without_a_page_size_on_the_page_sent() {
+        let page_of = |input: &[u8], format: &str, page: Option<proto::PageSize>| {
+            let req = ConvertRequest { format: format.into(), direction: ConvertDirection::Import, password: None, input: input.to_vec(), page };
+            let doc = wordcraft_docx::read(&convert_reply(&req).expect("conversion")).expect("the package reads back");
+            let sections = doc.sections();
+            let s = sections.first().map(|(_, p)| (*p).clone()).unwrap_or_default();
+            (s.page_w, s.page_h)
+        };
+        let a4 = proto::PageSize::from_points(595.28, 841.89);
+        let html = b"<html><body><p>No page size here.</p></body></html>";
+        // The worker reads the file on exactly the region's page, as the engine does in process:
+        // the same reader on the same, unrounded page gives the same document.
+        // An A4 region's page as `wordcraft_engine::io::region_page` builds it (the web app's
+        // `an_opened_file_asks_for_the_regions_paper` pins that it sends exactly this).
+        let region = wordcraft_doc::SectionProps { page_w: 595.28, page_h: 841.89, ..Default::default() };
+        let rtf = b"{\\rtf1\\ansi No size.\\par}";
+        for (format, input) in [("html", &html[..]), ("rtf", &rtf[..])] {
+            let engine = wordcraft_formats::import_on(format, input, &region).unwrap().unwrap();
+            let worker = import_document(format, input, None, &page(a4)).unwrap();
+            let first = |d: &Document| d.sections().first().map(|(_, p)| (p.page_w.to_bits(), p.page_h.to_bits()));
+            assert_eq!(first(&worker), first(&engine), "{format}: the worker's page is the engine's, bit for bit");
+        }
+        // The reply is a Word package, whose page sizes are whole twips (ECMA-376 `w:pgSz`): it
+        // reads back as any saved `.docx` does, the engine's own included.
+        assert_eq!(page_of(html, "html", a4), (595.3, 841.9), "an A4 region's HTML opens on A4");
+        let default = wordcraft_doc::SectionProps::default();
+        assert_eq!(page_of(html, "html", None), (default.page_w, default.page_h), "no page sent: the blank page");
+        // A file with a size of its own keeps it.
+        let letter_rtf = b"{\\rtf1\\ansi\\paperw12240\\paperh15840 Letter.\\par}";
+        assert_eq!(page_of(letter_rtf, "rtf", a4), (612.0, 792.0));
+    }
+
     #[test]
     fn import_rtf_answers_a_word_package() {
         let rtf = wordcraft_formats::export("rtf", &sample_doc()).expect("rtf").expect("ok");
-        let req = ConvertRequest { format: "rtf".into(), direction: ConvertDirection::Import, password: None, input: rtf };
+        let req = ConvertRequest { format: "rtf".into(), direction: ConvertDirection::Import, password: None, input: rtf, page: None };
         let out = convert_reply(&req).expect("conversion");
         assert_eq!(&out[..2], b"PK", "import answers a Word package");
         let doc = wordcraft_docx::read_with_password(&out, None).expect("the package reads back");
@@ -332,7 +385,7 @@ mod tests {
     #[test]
     fn export_docx_answers_the_named_format() {
         for (format, needle) in [("md", "bold"), ("rtf", "\\rtf1"), ("html", "<p>")] {
-            let req = ConvertRequest { format: format.into(), direction: ConvertDirection::Export, password: None, input: sample_docx() };
+            let req = ConvertRequest { format: format.into(), direction: ConvertDirection::Export, password: None, input: sample_docx(), page: None };
             let out = convert_reply(&req).unwrap_or_else(|e| panic!("{format}: {e:?}"));
             let text = String::from_utf8_lossy(&out);
             assert!(text.contains(needle), "{format}: {text}");
@@ -344,16 +397,22 @@ mod tests {
         // A password decrypts the input and must not wrap the *output* unless the output is a
         // Word package: RTF bytes come back as RTF, not an encrypted Office package.
         let locked = wordcraft_docx::encrypt(&sample_docx(), "open-sesame").expect("encrypts");
-        let req = ConvertRequest { format: "rtf".into(), direction: ConvertDirection::Export, password: Some("open-sesame".into()), input: locked };
+        let req = ConvertRequest {
+            format: "rtf".into(),
+            direction: ConvertDirection::Export,
+            password: Some("open-sesame".into()),
+            input: locked,
+            page: None,
+        };
         let out = convert_reply(&req).expect("rtf export");
         assert!(out.starts_with(b"{\\rtf1"), "rtf export came back encrypted or garbled: {:?}", &out[..out.len().min(16)]);
     }
 
     #[test]
     fn docx_flavor_change_round_trips() {
-        let req = ConvertRequest { format: "dotm".into(), direction: ConvertDirection::Export, password: None, input: sample_docx() };
+        let req = ConvertRequest { format: "dotm".into(), direction: ConvertDirection::Export, password: None, input: sample_docx(), page: None };
         let flavored = convert_reply(&req).expect("flavor change");
-        let req = ConvertRequest { format: "dotm".into(), direction: ConvertDirection::Import, password: None, input: flavored };
+        let req = ConvertRequest { format: "dotm".into(), direction: ConvertDirection::Import, password: None, input: flavored, page: None };
         let out = convert_reply(&req).expect("flavor restore");
         let doc = wordcraft_docx::read_with_password(&out, None).expect("reads back as docx");
         assert!(String::from_utf8_lossy(&wordcraft_formats::txt::export(&doc)).contains("bold"));
@@ -366,7 +425,7 @@ mod tests {
 
         // Without the password: the .docx reader's missing-password text, so a client's
         // `needs_password` substring check matches.
-        let req = ConvertRequest { format: "docx".into(), direction: ConvertDirection::Import, password: None, input: locked.clone() };
+        let req = ConvertRequest { format: "docx".into(), direction: ConvertDirection::Import, password: None, input: locked.clone(), page: None };
         let err = convert_reply(&req).expect_err("needs a password");
         assert_eq!(err.0, ErrorCode::Internal);
         assert!(err.1.contains(wordcraft_docx::PASSWORD_REQUIRED), "{:?}", err.1);
@@ -378,13 +437,15 @@ mod tests {
             direction: ConvertDirection::Import,
             password: Some("open-sesame".into()),
             input: locked.clone(),
+            page: None,
         };
         let out = convert_reply(&req).expect("converts");
         assert!(wordcraft_docx::is_encrypted(&out), "the output stays encrypted");
         let doc = wordcraft_docx::read_with_password(&out, Some("open-sesame")).expect("reads back");
         assert!(String::from_utf8_lossy(&wordcraft_formats::txt::export(&doc)).contains("bold"));
 
-        let req = ConvertRequest { format: "docx".into(), direction: ConvertDirection::Import, password: Some("nope".into()), input: locked };
+        let req =
+            ConvertRequest { format: "docx".into(), direction: ConvertDirection::Import, password: Some("nope".into()), input: locked, page: None };
         let err = convert_reply(&req).expect_err("wrong password");
         assert!(err.1.contains(wordcraft_docx::WRONG_PASSWORD), "{:?}", err.1);
     }
@@ -392,18 +453,25 @@ mod tests {
     #[test]
     fn unknown_and_broken_requests_answer_typed_errors() {
         // A format no reader handles.
-        let req = ConvertRequest { format: "zzz".into(), direction: ConvertDirection::Import, password: None, input: b"x".to_vec() };
+        let req = ConvertRequest { format: "zzz".into(), direction: ConvertDirection::Import, password: None, input: b"x".to_vec(), page: None };
         let err = convert_reply(&req).expect_err("unknown format");
         assert_eq!(err.0, ErrorCode::Internal);
         assert!(err.1.contains("not a format"), "{:?}", err.1);
 
         // Junk bytes where a Word package should be.
-        let req = ConvertRequest { format: "docx".into(), direction: ConvertDirection::Export, password: None, input: b"not a package".to_vec() };
+        let req = ConvertRequest {
+            format: "docx".into(),
+            direction: ConvertDirection::Export,
+            password: None,
+            input: b"not a package".to_vec(),
+            page: None,
+        };
         let err = convert_reply(&req).expect_err("junk input");
         assert_eq!(err.0, ErrorCode::Internal);
 
         // Bounds: a format name and a password past their limits.
-        let base = ConvertRequest { format: "rtf".into(), direction: ConvertDirection::Import, password: None, input: b"{\\rtf1}".to_vec() };
+        let base =
+            ConvertRequest { format: "rtf".into(), direction: ConvertDirection::Import, password: None, input: b"{\\rtf1}".to_vec(), page: None };
         for req in [
             ConvertRequest { format: "x".repeat(proto::MAX_FORMAT_BYTES + 1), ..base.clone() },
             ConvertRequest { password: Some("p".repeat(proto::MAX_PASSWORD_BYTES + 1)), ..base },

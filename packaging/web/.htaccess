@@ -55,6 +55,26 @@ AddType text/javascript .js
   <FilesMatch "^wordcraft-worker-.*\.(wasm\.br|wasm|js)$">
     Header set Cache-Control "no-cache"
   </FilesMatch>
+  # The editor (wordcraft-web{.js,_loader.js,_bg.wasm}) has un-hashed names too since the
+  # viewer-first page (plan 10.3): the page module fetches it on an edit action, so it must be
+  # named at run time. A year-pinned editor would outlive every deploy: `no-cache`, as in
+  # _headers. (The page module, wordcraft-viewer-web-<hash>, stays immutable above.)
+  <FilesMatch "^wordcraft-web(\.js|_loader\.js|_bg\.wasm|_bg\.wasm\.br)$">
+    Header set Cache-Control "no-cache"
+  </FilesMatch>
+</IfModule>
+
+# By directory, after the by-name rules above so these win (Apache 2.4 `<If>` is merged last).
+# snippets/: wasm-bindgen's `snippets/<crate>-<id>/inlineN.js` names carry the crate's identity,
+# not a hash of the file, so the `\.(wasm|js)$` rule above must not pin them for a year.
+# i18n/ and samples/: un-hashed names, one hour then revalidate, as in _headers.
+<IfModule mod_headers.c>
+  <If "%{REQUEST_URI} =~ m#/snippets/#">
+    Header set Cache-Control "no-cache"
+  </If>
+  <If "%{REQUEST_URI} =~ m#/(i18n|samples)/#">
+    Header set Cache-Control "public, max-age=3600, must-revalidate"
+  </If>
 </IfModule>
 
 <IfModule mod_headers.c>

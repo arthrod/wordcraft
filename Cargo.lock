@@ -1052,6 +1052,11 @@ version = "0.1.0"
 source = "git+https://github.com/arthrod/craft-libs?rev=6ee18f41c60b1f0a4691c3d2857bb6895fc41f64#6ee18f41c60b1f0a4691c3d2857bb6895fc41f64"
 
 [[package]]
+name = "craft-convert"
+version = "0.1.0"
+source = "git+https://github.com/arthrod/craft-libs?rev=8a46e13e2#8a46e13e254210ffe9cd21573fb99d1a475b2d82"
+
+[[package]]
 name = "craft-doc-binary"
 version = "0.1.0"
 source = "git+https://github.com/arthrod/craft-libs?rev=6ee18f41c60b1f0a4691c3d2857bb6895fc41f64#6ee18f41c60b1f0a4691c3d2857bb6895fc41f64"
@@ -7315,9 +7320,8 @@ dependencies = [
  "cfb",
  "craft-doc-binary",
  "craft-wordmodel",
- "serde",
- "serde_json",
  "wordcraft-doc",
+ "wordcraft-model-bridge",
 ]
 
 [[package]]
@@ -7333,10 +7337,10 @@ dependencies = [
  "image",
  "log",
  "proptest",
- "serde",
  "serde_json",
  "wordcraft-doc",
  "wordcraft-geom",
+ "wordcraft-model-bridge",
 ]
 
 [[package]]
@@ -7460,6 +7464,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "wordcraft-model-bridge"
+version = "0.18.1"
+dependencies = [
+ "craft-convert",
+ "craft-docx",
+ "craft-wordmodel",
+ "serde",
+ "serde_json",
+ "wordcraft-doc",
+]
+
+[[package]]
 name = "wordcraft-pdf"
 version = "0.18.1"
 dependencies = [
@@ -7542,6 +7558,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "wordcraft-viewer-web"
+version = "0.18.1"
+dependencies = [
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "wordcraft-worker-proto",
+]
+
+[[package]]
 name = "wordcraft-web"
 version = "0.18.1"
 dependencies = [
@@ -7557,8 +7584,10 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "wordcraft-doc",
+ "wordcraft-docx",
  "wordcraft-engine",
  "wordcraft-fonts",
+ "wordcraft-formats",
  "wordcraft-geom",
  "wordcraft-layout",
  "wordcraft-ui-egui",
@@ -7594,6 +7623,7 @@ dependencies = [
  "web-sys",
  "wordcraft-doc",
  "wordcraft-docx",
+ "wordcraft-engine",
  "wordcraft-fonts",
  "wordcraft-layout",
  "wordcraft-pdf",
@@ -7620,6 +7650,23 @@ version = "0.18.1"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "wordcraft-worker-viewer"
+version = "0.18.1"
+dependencies = [
+ "craft-zip",
+ "getrandom 0.3.4",
+ "js-sys",
+ "serde_json",
+ "wasm-bindgen",
+ "web-sys",
+ "wordcraft-doc",
+ "wordcraft-docx",
+ "wordcraft-fonts",
+ "wordcraft-viewer",
+ "wordcraft-worker-proto",
 ]
 
 [[package]]
@@ -7795,7 +7842,9 @@ dependencies = [
  "rustc-demangle",
  "serde_json",
  "sha2 0.11.1",
+ "wordcraft-docx",
  "wordcraft-fonts",
+ "wordcraft-formats",
 ]
 
 [[package]]

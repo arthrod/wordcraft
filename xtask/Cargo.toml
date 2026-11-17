@@ -18,6 +18,10 @@ brotli = "8"
 rustc-demangle = "0.1"
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+# `web-assets` writes the viewer's built-in sample as a `.docx` (plan 10.3): the Markdown
+# reader and the package writer, without the other codecs.
+wordcraft-formats = { path = "../crates/formats", default-features = false }
+wordcraft-docx = { workspace = true }
 
 [dev-dependencies]
 brotli-decompressor = "5"

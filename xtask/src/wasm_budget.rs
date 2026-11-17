@@ -1,6 +1,6 @@
 //! `cargo xtask wasm-budget`: inspect `dist/web/wordcraft-web*_bg.wasm` and every
 //! `dist/web/wordcraft-worker-*_bg.wasm`, report section sizes and the gzip/Brotli sizes, and
-//! enforce size + symbol ceilings per artifact and for everything loaded together.
+//! enforce size + symbol ceilings per artifact and for the first load (plan 10.5).
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -16,22 +16,33 @@ use sha2::{Digest as _, Sha384};
 /// ratchet (17,749,525 → 17.9 MB); the 2026-11-13 19.5 MB ceiling had measured an artifact
 /// `wasm-opt` had not run on (a plain `trunk build` skips it outside release mode), which the
 /// `name`-section guard below now catches.
-pub const MAX_UNCOMPRESSED_BYTES: usize = 16_500_000;
-pub const MAX_GZIPPED_BYTES: usize = 6_750_000;
+///
+/// Re-set 2026-11-16 (plan 10.5) from 16,500,000 / 6,750,000 to the measured size plus about
+/// 3% raw and 4% gzip: 17,695,535 raw / 7,205,429 gzip on the release build after the merge
+/// of `main` (which is what grew it past the old ceiling) and the typed model bridge. The
+/// editor is no longer on the first-load path (plan 10.3), so this ceiling watches the file a
+/// reader fetches on the first edit action, not the first visit.
+pub const MAX_UNCOMPRESSED_BYTES: usize = 18_227_000;
+pub const MAX_GZIPPED_BYTES: usize = 7_494_000;
 pub const MAX_DATA_SECTION_BYTES: usize = 2_750_000;
 pub const CLOUDFLARE_MAX_FILE_BYTES: usize = 25 * 1024 * 1024;
 
-/// "Everything loaded" ceilings (plan §3.5): the main module plus every dedicated worker a
-/// session may fetch, raw and gzipped. Each worker links its own copy of std, alloc and the
-/// document model, so the total grows as workers land even while the main module shrinks —
-/// this is the row that catches a sum that quietly drifts past the platform's 25 MiB file
-/// limit (still enforced per file by [`check_static_file_sizes`]) or the story the size work
-/// tells. First cut 2026-11-14 from the two-artifact build (18,764,612 raw / 7,610,740 gzip);
-/// with all three workers the measured totals are 26,827,570 raw / 11,599,922 gzip, which
-/// exceeds these ceilings — raising them is a recorded owner decision (the deferred plan's
-/// Waiting on Owner), so they stand until then and the budget reports the failure.
-pub const MAX_TOTAL_UNCOMPRESSED_BYTES: usize = 19_000_000;
-pub const MAX_TOTAL_GZIPPED_BYTES: usize = 7_750_000;
+/// The first-load ceiling (plan 10.5): the wasm a first visit fetches, which is the page
+/// module ([`PAGE_STEM`]) plus the view-only worker ([`VIEWER_WORKER_STEM`]), raw and gzipped. Measured
+/// 2026-11-16 on the release build: 6,051,105 raw / 2,876,521 gzip / 2,364,729 Brotli q11,
+/// ceiling about 3% raw and 4% gzip above. Everything else is fetched on demand and has its
+/// own row: the editor above, the workers in [`WORKER_CEILINGS`].
+///
+/// This replaces the "everything loaded" total (19,000,000 raw / 7,750,000 gzip, first cut
+/// 2026-11-14), which summed the editor and every worker. No session loads them all at once
+/// any more, and the sum had been over its ceiling since the third worker landed. The sum is
+/// still printed, without a ceiling.
+pub const MAX_FIRST_LOAD_UNCOMPRESSED_BYTES: usize = 6_233_000;
+pub const MAX_FIRST_LOAD_GZIPPED_BYTES: usize = 2_992_000;
+
+/// File-name stems the first-load page must not name outside a comment: the editor and the
+/// three on-demand workers. `wordcraft-web` does not occur inside `wordcraft-viewer-web`.
+pub const ON_DEMAND_STEMS: &[&str] = &["wordcraft-web", "wordcraft-worker-proof", "wordcraft-worker-codecs", "wordcraft-worker-pdf"];
 
 /// One dedicated worker's ceilings, at the artifact's measured size plus headroom (plan §3.5:
 /// workers get their own rows, not a shared provisional number). A worker artifact with no
@@ -44,13 +55,20 @@ pub struct WorkerCeiling {
     pub max_gzip: usize,
 }
 
-/// Measured 2026-11-14 on the SIMD release build (`trunk build --release` with
-/// `-C target-feature=+simd128`, plan §4.2), each at its size plus headroom: proof 1,012,294
-/// raw / 636,246 gzip; codecs 4,164,394 / 1,766,120; pdf 5,394,070 / 2,525,902.
+/// Measured 2026-11-16 on the release build (plan 10.5), each at its size plus about 3% raw
+/// and 4% gzip: proof 1,011,227 raw / 635,960 gzip (lowered from 1,100,000 / 700,000); codecs
+/// 4,407,114 / 1,866,280 (from 4,300,000 / 1,850,000); pdf 6,444,918 / 3,000,608 (from
+/// 5,550,000 / 2,625,000). Codecs and pdf grew with the merge of `main`; the typed model
+/// bridge then took 2.3 MB and 1.0 MB raw back off them. All three load on first use, never
+/// on a first visit. The view-only
+/// worker (plan 10.3) re-measured 2026-11-16 after the typed model bridge, on the same kind of
+/// build (no optional inputs): 5,845,030 raw / 2,784,071 gzip / 2,285,910 Brotli q11, ceilings
+/// about 3% raw and 4% gzip above.
 pub const WORKER_CEILINGS: &[WorkerCeiling] = &[
-    WorkerCeiling { name: "wordcraft-worker-proof", max_raw: 1_100_000, max_gzip: 700_000 },
-    WorkerCeiling { name: "wordcraft-worker-codecs", max_raw: 4_300_000, max_gzip: 1_850_000 },
-    WorkerCeiling { name: "wordcraft-worker-pdf", max_raw: 5_550_000, max_gzip: 2_625_000 },
+    WorkerCeiling { name: "wordcraft-worker-proof", max_raw: 1_042_000, max_gzip: 662_000 },
+    WorkerCeiling { name: "wordcraft-worker-codecs", max_raw: 4_540_000, max_gzip: 1_941_000 },
+    WorkerCeiling { name: "wordcraft-worker-pdf", max_raw: 6_639_000, max_gzip: 3_121_000 },
+    WorkerCeiling { name: VIEWER_WORKER_STEM, max_raw: 6_021_000, max_gzip: 2_896_000 },
 ];
 
 /// Offloaded symbols that must not appear in the *main module's* bytes: `krilla` (PDF export
@@ -65,9 +83,55 @@ fn forbidden_symbols_for(worker_stem: &str) -> &[&str] {
     match worker_stem {
         "wordcraft-worker-codecs" => &["krilla::"],
         "wordcraft-worker-pdf" => &["wordcraft_docbin::"],
+        VIEWER_WORKER_STEM => VIEWER_WORKER_FORBIDDEN_SYMBOLS,
         _ => FORBIDDEN_SYMBOLS,
     }
 }
+
+/// The view-only dedicated worker (plan 10.3): the view-only core behind the worker envelope,
+/// fetched on a first visit. Its ceiling is a row in [`WORKER_CEILINGS`] like any worker's.
+pub const VIEWER_WORKER_STEM: &str = "wordcraft-worker-viewer";
+
+/// Crates the view-only worker must never link: it paints pages, so the editor and PDF export
+/// stay out. Unlike the bare core ([`VIEWER_FORBIDDEN_CRATES`]) it is a browser worker and
+/// links `web-sys` for its message port.
+pub const VIEWER_WORKER_FORBIDDEN_CRATES: &[&str] = &["egui", "eframe", "wordcraft-engine", "wordcraft-ui-egui", "krilla"];
+
+/// The byte-scan form of [`VIEWER_WORKER_FORBIDDEN_CRATES`] (supplementary; see
+/// [`FORBIDDEN_SYMBOLS`]).
+pub const VIEWER_WORKER_FORBIDDEN_SYMBOLS: &[&str] = &["egui::", "eframe::", "wordcraft_engine::", "wordcraft_ui_egui::", "krilla::"];
+
+/// The viewer-first page module (plan 10.3): the page's first module, content-hashed by Trunk
+/// (`wordcraft-viewer-web-<hash>_bg.wasm`). What a reader waits for before anything else, so it
+/// has its own row.
+pub const PAGE_STEM: &str = "wordcraft-viewer-web";
+
+/// The page module's ceilings, at measured size plus about 3% raw and 4% gzip (the headroom
+/// the workers got). Re-measured 2026-11-16 on the SIMD release build (`trunk build --release`,
+/// no optional inputs): 212,845 raw / 95,138 gzip -9 / 81,150 Brotli q11. Raised from
+/// 212,300 / 96,200 (measured then: 206,075 / 92,450 / 78,819): the page now reads a document
+/// it fetches as a bounded stream, refuses a cross-origin answer, and puts the document on
+/// screen back when a replacement is refused, which is 6,770 bytes of page code.
+pub const PAGE_CEILING: WorkerCeiling = WorkerCeiling { name: PAGE_STEM, max_raw: 219_200, max_gzip: 98_900 };
+
+/// Crates the page module must never link: it is `web-sys` glue that starts the view-only
+/// worker and loads the editor on an edit action. The editor, PDF export and the whole document
+/// stack (which lives in the worker) stay out.
+pub const PAGE_FORBIDDEN_CRATES: &[&str] = &[
+    "egui",
+    "eframe",
+    "wordcraft-engine",
+    "wordcraft-ui-egui",
+    "krilla",
+    "wordcraft-docx",
+    "wordcraft-layout",
+    "wordcraft-render",
+    "wordcraft-viewer",
+];
+
+/// The byte-scan form of [`PAGE_FORBIDDEN_CRATES`] (supplementary; see [`FORBIDDEN_SYMBOLS`]).
+pub const PAGE_FORBIDDEN_SYMBOLS: &[&str] =
+    &["egui::", "eframe::", "wordcraft_engine::", "wordcraft_ui_egui::", "krilla::", "wordcraft_docx::", "wordcraft_layout::", "wordcraft_render::"];
 
 /// The view-only module's artifact stem (`wordcraft-viewer_bg.wasm`; plan Phase 8). It is not a
 /// dedicated worker and no Trunk link builds it, so it has its own row and its own run
@@ -83,8 +147,13 @@ pub const VIEWER_STEM: &str = "wordcraft-viewer";
 /// built beside an `rlib`, which cargo builds without link-time optimisation; the module is a
 /// bin since. Measured again 2026-11-16 after `wordcraft_docx::read_with_password` stopped
 /// linking the write direction of the model bridge: 6,809,726 raw / 3,106,857 gzip /
-/// 2,486,942 Brotli q11. Ceilings ratchet down; raising one is a recorded decision in the plan.
-pub const VIEWER_CEILING: WorkerCeiling = WorkerCeiling { name: VIEWER_STEM, max_raw: 7_015_000, max_gzip: 3_230_000 };
+/// 2,486,942 Brotli q11. Measured again 2026-11-16 after the model bridge stopped going through
+/// JSON (`wordcraft-model-bridge`): 5,804,744 raw / 2,770,514 gzip / 2,272,553 Brotli q11. The
+/// baseline for that change was a fresh build of the tree just before it, 6,809,172 raw /
+/// 3,106,872 gzip: the same tree as the 6,809,726 / 3,106,857 measurement, built again, and two
+/// builds of one tree differ by a few hundred bytes. Ceilings ratchet down; raising one is a
+/// recorded decision in the plan.
+pub const VIEWER_CEILING: WorkerCeiling = WorkerCeiling { name: VIEWER_STEM, max_raw: 5_980_000, max_gzip: 2_881_000 };
 
 /// Crates the view-only module must never link (plan 8.2): it opens a document and paints its
 /// pages, so the editor (`wordcraft-engine`, `wordcraft-ui-egui`, `egui`, `eframe`), PDF export
@@ -269,16 +338,75 @@ pub fn find_core_wasm(dist_web: &Path) -> Result<PathBuf, String> {
 /// Every `data-type="worker"` artifact in `dist_web` (`wordcraft-worker-*_bg.wasm`; Trunk
 /// keeps worker names un-hashed). The main module's `wordcraft-web*_bg.wasm` is matched by
 /// [`find_core_wasm`] and never returned here.
-pub fn find_worker_wasms(dist_web: &Path) -> Vec<PathBuf> {
-    let mut matches: Vec<PathBuf> = std::fs::read_dir(dist_web)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("wordcraft-worker-") && n.ends_with("_bg.wasm")))
-        .collect();
+/// A folder or an entry that cannot be read is an error, never fewer workers: one behind it
+/// would be left out of the totals, which would then pass with less counted than is shipped.
+pub fn find_worker_wasms(dist_web: &Path) -> Result<Vec<PathBuf>, String> {
+    let entries = std::fs::read_dir(dist_web).map_err(|e| format!("{}: {e}", dist_web.display()))?.map(|e| e.map(|e| e.path()));
+    worker_wasms_in(dist_web, entries)
+}
+
+/// [`find_worker_wasms`] over the listing `entries` of `dist_web`.
+fn worker_wasms_in(dist_web: &Path, entries: impl Iterator<Item = std::io::Result<PathBuf>>) -> Result<Vec<PathBuf>, String> {
+    let mut matches = Vec::new();
+    for entry in entries {
+        let path = entry.map_err(|e| format!("{}: {e}", dist_web.display()))?;
+        if path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("wordcraft-worker-") && n.ends_with("_bg.wasm")) {
+            matches.push(path);
+        }
+    }
     matches.sort();
-    matches
+    Ok(matches)
+}
+
+/// The page module's `wordcraft-viewer-web-<hash>_bg.wasm` in `dist_web`: exactly one, or an
+/// error (a page built from `apps/wordcraft-web/index.html` always has it).
+pub fn find_page_wasm(dist_web: &Path) -> Result<PathBuf, String> {
+    let entries = std::fs::read_dir(dist_web).map_err(|e| format!("{}: {e}", dist_web.display()))?.map(|e| e.map(|e| e.path()));
+    unique_page_wasm(dist_web, entries)
+}
+
+/// [`find_page_wasm`] over the listing `entries` of `dist_web`. An entry that cannot be read is
+/// an error: a second page module may be behind it, so "exactly one" would not be known.
+fn unique_page_wasm(dist_web: &Path, entries: impl Iterator<Item = std::io::Result<PathBuf>>) -> Result<PathBuf, String> {
+    let prefix = format!("{PAGE_STEM}-");
+    let mut matches = Vec::new();
+    for entry in entries {
+        let path = entry.map_err(|e| format!("{}: {e}", dist_web.display()))?;
+        if path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(&prefix) && n.ends_with("_bg.wasm")) {
+            matches.push(path);
+        }
+    }
+    matches.sort();
+    match matches.as_slice() {
+        [one] => Ok(one.clone()),
+        [] => Err(format!("no {PAGE_STEM}-*_bg.wasm (the viewer-first page module) in {}", dist_web.display())),
+        many => Err(format!(
+            "ambiguous: {} {PAGE_STEM}-*_bg.wasm files in {} ({}); clean the directory and rebuild",
+            many.len(),
+            dist_web.display(),
+            many.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+        )),
+    }
+}
+
+/// The page module's budget errors: its ceilings, the `name`-section guard and the byte scan.
+fn check_page_budget(r: &WasmReport) -> Vec<String> {
+    let mut errs = Vec::new();
+    if r.has_name_section {
+        errs.push(format!(
+            "{PAGE_STEM} carries a `name` custom section: `wasm-opt` did not run (build with `trunk build --release`), so this artifact is unoptimized and cannot be measured or shipped"
+        ));
+    }
+    if r.total_bytes > PAGE_CEILING.max_raw {
+        errs.push(format!("{PAGE_STEM} uncompressed {} bytes > ceiling {} bytes", r.total_bytes, PAGE_CEILING.max_raw));
+    }
+    if r.gzip_bytes > PAGE_CEILING.max_gzip {
+        errs.push(format!("{PAGE_STEM} gzipped {} bytes > ceiling {} bytes", r.gzip_bytes, PAGE_CEILING.max_gzip));
+    }
+    if !r.found_forbidden.is_empty() {
+        errs.push(format!("forbidden symbols found in {PAGE_STEM}: {}", r.found_forbidden.join(", ")));
+    }
+    errs
 }
 
 /// The `wordcraft-worker-<name>_bg.wasm` stem a [`WorkerCeiling`] is looked up by.
@@ -325,19 +453,75 @@ fn check_worker_budget(r: &WasmReport) -> Vec<String> {
     errs
 }
 
-/// The "everything loaded" totals (plan §3.5): the main module plus every worker, raw and
-/// gzipped, against [`MAX_TOTAL_UNCOMPRESSED_BYTES`] / [`MAX_TOTAL_GZIPPED_BYTES`].
-fn check_total_budget(main: &WasmReport, workers: &[WasmReport]) -> Vec<String> {
-    let raw: usize = std::iter::once(main.total_bytes).chain(workers.iter().map(|w| w.total_bytes)).fold(0usize, usize::saturating_add);
-    let gzip: usize = std::iter::once(main.gzip_bytes).chain(workers.iter().map(|w| w.gzip_bytes)).fold(0usize, usize::saturating_add);
+/// The first-load total (plan 10.5): the page module plus the view-only worker, raw and
+/// gzipped, against [`MAX_FIRST_LOAD_UNCOMPRESSED_BYTES`] / [`MAX_FIRST_LOAD_GZIPPED_BYTES`].
+/// A build without the view-only worker is an error: the page cannot show a document.
+fn check_first_load_budget(page: &WasmReport, viewer_worker: Option<&WasmReport>) -> Vec<String> {
+    let Some(worker) = viewer_worker else {
+        return vec![format!("first load: no {VIEWER_WORKER_STEM}_bg.wasm beside the page module")];
+    };
+    let raw = page.total_bytes.saturating_add(worker.total_bytes);
+    let gzip = page.gzip_bytes.saturating_add(worker.gzip_bytes);
     let mut errs = Vec::new();
-    if raw > MAX_TOTAL_UNCOMPRESSED_BYTES {
-        errs.push(format!("everything loaded: {raw} uncompressed bytes (main + workers) > ceiling {MAX_TOTAL_UNCOMPRESSED_BYTES}"));
+    if raw > MAX_FIRST_LOAD_UNCOMPRESSED_BYTES {
+        errs.push(format!("first load: {raw} uncompressed bytes (page module + view-only worker) > ceiling {MAX_FIRST_LOAD_UNCOMPRESSED_BYTES}"));
     }
-    if gzip > MAX_TOTAL_GZIPPED_BYTES {
-        errs.push(format!("everything loaded: {gzip} gzipped bytes (main + workers) > ceiling {MAX_TOTAL_GZIPPED_BYTES}"));
+    if gzip > MAX_FIRST_LOAD_GZIPPED_BYTES {
+        errs.push(format!("first load: {gzip} gzipped bytes (page module + view-only worker) > ceiling {MAX_FIRST_LOAD_GZIPPED_BYTES}"));
     }
     errs
+}
+
+/// The [`ON_DEMAND_STEMS`] the first-load page names outside a comment. Any hit means a first
+/// visit fetches, preloads or at least points at a file that should load on demand: the page
+/// module names those files at run time, from its own code, never from the page.
+///
+/// Only HTML comments are set aside. A name inside a `<script>` or `<style>` block counts even
+/// in a `//` or `/* */` comment there: telling such a comment from a string or a URL takes a
+/// script parser, and a check that guards the first load should fail on a doubtful page, not
+/// pass it. Notes about the lazy files belong in HTML comments, where the page keeps them.
+pub fn on_demand_files_named_by_page(html: &str) -> Vec<&'static str> {
+    let live = crate::web_page::without_comments(html);
+    ON_DEMAND_STEMS.iter().copied().filter(|stem| live.contains(stem)).collect()
+}
+
+/// The local files `html` names in `href`, `src` or a quoted `./` path of its inline module
+/// script, comments excluded, sorted and without duplicates.
+pub fn files_named_by_page(html: &str) -> Vec<String> {
+    let live = crate::web_page::without_comments(html);
+    let mut names: Vec<String> = Vec::new();
+    for (i, _) in live.match_indices("./") {
+        let tail = live.get(i.saturating_add(2)..).unwrap_or_default();
+        let end = tail.find(['"', '\'', ' ', '>', ')']).unwrap_or(tail.len());
+        // The name on disk ends where a query or a fragment begins.
+        let name = tail.get(..end).unwrap_or_default().split(['?', '#']).next().unwrap_or_default();
+        if !name.is_empty() && !name.contains("..") {
+            names.push(name.to_string());
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// The first-load file list for the report: `index.html`, the files it names, and the
+/// view-only worker's three files, each with its size on disk; then the page's on-demand
+/// names, which must be none.
+fn first_load_files(dist_web: &Path) -> Result<(Vec<(String, u64)>, Vec<&'static str>), String> {
+    let index = dist_web.join("index.html");
+    let html = std::fs::read_to_string(&index).map_err(|e| format!("{}: {e}", index.display()))?;
+    let mut names = vec!["index.html".to_string()];
+    names.extend(files_named_by_page(&html));
+    for suffix in ["_loader.js", ".js", "_bg.wasm"] {
+        names.push(format!("{VIEWER_WORKER_STEM}{suffix}"));
+    }
+    let mut files = Vec::new();
+    for name in names {
+        let path = dist_web.join(&name);
+        let len = std::fs::metadata(&path).map_err(|e| format!("first-load file {}: {e}", path.display()))?.len();
+        files.push((name, len));
+    }
+    Ok((files, on_demand_files_named_by_page(&html)))
 }
 
 /// Crates that must not be in the web target's dependency graph. The byte scan for
@@ -570,7 +754,7 @@ pub fn run(root: &Path, report_only: bool) -> Result<(), String> {
 
     // Per-artifact rows for the dedicated workers (plan §3.5). A dist built without the
     // worker link simply reports none.
-    let worker_wasms = find_worker_wasms(&dist_web);
+    let worker_wasms = find_worker_wasms(&dist_web)?;
     let mut worker_reports = Vec::new();
     for path in &worker_wasms {
         let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -587,9 +771,54 @@ pub fn run(root: &Path, report_only: bool) -> Result<(), String> {
     let total_raw: usize =
         std::iter::once(report.total_bytes).chain(worker_reports.iter().map(|w| w.total_bytes)).fold(0usize, usize::saturating_add);
     let total_gz: usize = std::iter::once(report.gzip_bytes).chain(worker_reports.iter().map(|w| w.gzip_bytes)).fold(0usize, usize::saturating_add);
-    println!(
-        "  everything loaded: {total_raw:>10} bytes raw (budget {MAX_TOTAL_UNCOMPRESSED_BYTES:>10}), {total_gz:>10} gzip (budget {MAX_TOTAL_GZIPPED_BYTES:>10})"
-    );
+    println!("  editor + every worker: {total_raw:>10} bytes raw, {total_gz:>10} gzip (reported; no session loads them all, so no ceiling)");
+
+    // The viewer-first page module (plan 10.3), and the first-load modules: it and the
+    // view-only worker, against the first-load ceiling (plan 10.5).
+    let page_report = match find_page_wasm(&dist_web) {
+        Ok(path) => {
+            let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let gz = gzip_size(&path, &bytes)?;
+            let br = brotli_size(&path, &bytes)?;
+            Ok(analyze_wasm_bytes_with(path, &bytes, gz, PAGE_FORBIDDEN_SYMBOLS)?.with_brotli(br))
+        }
+        Err(e) => Err(e),
+    };
+    match &page_report {
+        Ok(r) => {
+            println!(
+                "  page {PAGE_STEM}: uncompressed {:>10} bytes (budget {:>10}), gzip -9 {:>10} bytes (budget {:>10}), brotli q11 {:>10} bytes",
+                r.total_bytes, PAGE_CEILING.max_raw, r.gzip_bytes, PAGE_CEILING.max_gzip, r.brotli_bytes
+            );
+            let viewer_worker = worker_reports.iter().find(|w| worker_stem(&w.path) == VIEWER_WORKER_STEM);
+            let first = std::iter::once(r).chain(viewer_worker);
+            let (raw, gz, br) = first.fold((0usize, 0usize, 0usize), |(a, b, c), w| {
+                (a.saturating_add(w.total_bytes), b.saturating_add(w.gzip_bytes), c.saturating_add(w.brotli_bytes))
+            });
+            println!(
+                "  first load (wasm: {PAGE_STEM} + {}): {raw:>10} bytes raw (budget {MAX_FIRST_LOAD_UNCOMPRESSED_BYTES:>10}), {gz:>10} gzip (budget {MAX_FIRST_LOAD_GZIPPED_BYTES:>10}), {br:>10} brotli q11",
+                if viewer_worker.is_some() { VIEWER_WORKER_STEM } else { "NO VIEWER WORKER" }
+            );
+        }
+        Err(e) => println!("  page {PAGE_STEM}: ERROR ({e})"),
+    }
+
+    let first_load_res = first_load_files(&dist_web);
+    match &first_load_res {
+        Ok((files, on_demand)) => {
+            let sum = files.iter().map(|(_, len)| *len).fold(0u64, u64::saturating_add);
+            println!("  first-load files: {} files, {sum} bytes raw", files.len());
+            for (name, len) in files {
+                println!("    {len:>10}  {name}");
+            }
+            if on_demand.is_empty() {
+                println!("  first-load page names none of: {}", ON_DEMAND_STEMS.join(", "));
+            } else {
+                println!("  first-load page names on-demand files: {}", on_demand.join(", "));
+            }
+        }
+        Err(e) => println!("  first-load files: ERROR ({e})"),
+    }
 
     let sri_res = verify_sri_digests(&dist_web);
     match &sri_res {
@@ -608,6 +837,16 @@ pub fn run(root: &Path, report_only: bool) -> Result<(), String> {
     if !forbidden_crates.is_empty() {
         println!("  forbidden crates in wasm dependency graph: {}", forbidden_crates.join(", "));
     }
+    let mut graph_errs = Vec::new();
+    for (package, forbidden) in [(PAGE_STEM, PAGE_FORBIDDEN_CRATES), (VIEWER_WORKER_STEM, VIEWER_WORKER_FORBIDDEN_CRATES)] {
+        let found = crates_in_tree(&wasm_dependency_tree_of(root, package)?, forbidden);
+        if found.is_empty() {
+            println!("  {package}: none of {} in its wasm32 dependency graph", forbidden.join(", "));
+        } else {
+            println!("  {package}: forbidden crates in its wasm32 dependency graph: {}", found.join(", "));
+            graph_errs.push(format!("forbidden crates in the {package} wasm32 dependency graph: {}", found.join(", ")));
+        }
+    }
 
     if report_only {
         return Ok(());
@@ -616,7 +855,19 @@ pub fn run(root: &Path, report_only: bool) -> Result<(), String> {
     for r in &worker_reports {
         errs.extend(check_worker_budget(r));
     }
-    errs.extend(check_total_budget(&report, &worker_reports));
+    match &page_report {
+        Ok(r) => {
+            errs.extend(check_page_budget(r));
+            errs.extend(check_first_load_budget(r, worker_reports.iter().find(|w| worker_stem(&w.path) == VIEWER_WORKER_STEM)));
+        }
+        Err(e) => errs.push(e.clone()),
+    }
+    errs.extend(graph_errs);
+    match first_load_res {
+        Ok((_, on_demand)) if on_demand.is_empty() => {}
+        Ok((_, on_demand)) => errs.push(format!("the first-load page names on-demand files outside a comment: {}", on_demand.join(", "))),
+        Err(e) => errs.push(e),
+    }
     if let Err(e) = sri_res {
         errs.push(e);
     }
@@ -801,10 +1052,98 @@ mod tests {
         std::fs::write(dir.join("wordcraft-worker-proof_bg.wasm"), b"b").unwrap();
         std::fs::write(dir.join("wordcraft-worker-codecs_bg.wasm"), b"c").unwrap();
         std::fs::write(dir.join("wordcraft-worker-proof.js"), b"d").unwrap();
-        let found = find_worker_wasms(&dir);
+        let found = find_worker_wasms(&dir).unwrap();
         let names: Vec<String> = found.iter().filter_map(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).collect();
         assert_eq!(names, vec!["wordcraft-worker-codecs_bg.wasm", "wordcraft-worker-proof_bg.wasm"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_page_module_and_the_un_hashed_editor_are_told_apart() {
+        let dir = std::env::temp_dir().join(format!("wc_wasm_page_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(find_page_wasm(&dir).unwrap_err().contains("no wordcraft-viewer-web"));
+        // The viewer-first build: the hashed page module, the editor un-hashed, the workers.
+        let page = dir.join("wordcraft-viewer-web-4a1d7206a6ed210d_bg.wasm");
+        let editor = dir.join("wordcraft-web_bg.wasm");
+        for p in [&page, &editor, &dir.join("wordcraft-worker-viewer_bg.wasm"), &dir.join("wordcraft-viewer-web-8adef863fe79cba4.js")] {
+            std::fs::write(p, b"x").unwrap();
+        }
+        assert_eq!(find_page_wasm(&dir).unwrap(), page);
+        assert_eq!(find_core_wasm(&dir).unwrap(), editor, "the page module is not the editor");
+        let workers: Vec<String> = find_worker_wasms(&dir).unwrap().iter().map(|p| worker_stem(p)).collect();
+        assert_eq!(workers, vec![VIEWER_WORKER_STEM]);
+        std::fs::write(dir.join("wordcraft-viewer-web-0000000000000000_bg.wasm"), b"y").unwrap();
+        assert!(find_page_wasm(&dir).unwrap_err().contains("ambiguous"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_listing_that_fails_part_way_is_an_error_not_a_unique_page_module() {
+        // One page module read, then the listing fails: a second one may be behind the failure,
+        // so "exactly one" is not known.
+        let dir = Path::new("dist/web");
+        let page = dir.join("wordcraft-viewer-web-4a1d7206a6ed210d_bg.wasm");
+        let failed = || std::io::Error::other("the listing failed");
+        let err = unique_page_wasm(dir, [Ok(page.clone()), Err(failed())].into_iter()).unwrap_err();
+        assert!(err.contains("the listing failed") && err.contains("dist/web"), "{err}");
+        let err = unique_page_wasm(dir, [Err(failed()), Ok(page.clone())].into_iter()).unwrap_err();
+        assert!(err.contains("the listing failed"), "{err}");
+        assert_eq!(unique_page_wasm(dir, [Ok(page.clone()), Ok(dir.join("wordcraft-web_bg.wasm"))].into_iter()).unwrap(), page);
+    }
+
+    #[test]
+    fn a_worker_listing_that_fails_part_way_is_an_error_not_fewer_workers() {
+        // A worker behind the failure would be left out of the budget, which would then pass
+        // with less counted than is shipped.
+        let dir = Path::new("dist/web");
+        let viewer = dir.join("wordcraft-worker-viewer_bg.wasm");
+        let failed = || std::io::Error::other("the listing failed");
+        let err = worker_wasms_in(dir, [Ok(viewer.clone()), Err(failed())].into_iter()).unwrap_err();
+        assert!(err.contains("the listing failed") && err.contains("dist/web"), "{err}");
+        assert!(worker_wasms_in(dir, [Err(failed())].into_iter()).is_err());
+        let found = worker_wasms_in(
+            dir,
+            [Ok(dir.join("wordcraft-worker-pdf_bg.wasm")), Ok(viewer.clone()), Ok(dir.join("wordcraft-web_bg.wasm"))].into_iter(),
+        )
+        .unwrap();
+        assert_eq!(found, vec![dir.join("wordcraft-worker-pdf_bg.wasm"), viewer]);
+        // A folder that cannot be listed at all is an error too, not "no workers".
+        assert!(find_worker_wasms(Path::new("/nonexistent/wordcraft/dist/web")).is_err());
+    }
+
+    #[test]
+    fn page_budget_flags_over_limit_forbidden_and_unoptimized() {
+        let path = || PathBuf::from("wordcraft-viewer-web-4a1d7206a6ed210d_bg.wasm");
+        let ok = analyze_wasm_bytes_with(path(), &minimal_wasm(1024, 512, b"safe"), 400, PAGE_FORBIDDEN_SYMBOLS).unwrap();
+        assert!(check_page_budget(&ok).is_empty(), "{:?}", check_page_budget(&ok));
+        let linked = analyze_wasm_bytes_with(path(), &minimal_wasm(1024, 512, b"wordcraft_layout::Layout"), 400, PAGE_FORBIDDEN_SYMBOLS).unwrap();
+        assert!(check_page_budget(&linked).iter().any(|e| e.contains("forbidden symbols")));
+        let big =
+            analyze_wasm_bytes_with(path(), &minimal_wasm(PAGE_CEILING.max_raw + 1, 512, b"safe"), PAGE_CEILING.max_gzip + 1, PAGE_FORBIDDEN_SYMBOLS)
+                .unwrap();
+        let errs = check_page_budget(&big);
+        assert!(errs.iter().any(|e| e.contains("uncompressed")) && errs.iter().any(|e| e.contains("gzipped")), "{errs:?}");
+        let named = analyze_wasm_bytes_with(path(), &minimal_wasm(1024, 512, &named_custom_section("name")), 400, PAGE_FORBIDDEN_SYMBOLS).unwrap();
+        assert!(named.has_name_section, "the fixture carries a `name` section");
+        assert!(check_page_budget(&named).iter().any(|e| e.contains("`name` custom section")));
+    }
+
+    #[test]
+    fn page_and_viewer_worker_forbidden_crates_detected_in_dependency_tree() {
+        let page = "wordcraft-viewer-web v0.18.1 (/x)\nwordcraft-worker-proto v0.18.1 (/x)\nweb-sys v0.3.0\nserde v1.0.0\n";
+        assert!(crates_in_tree(page, PAGE_FORBIDDEN_CRATES).is_empty());
+        let heavy = "wordcraft-viewer-web v0.18.1 (/x)\nwordcraft-layout v0.18.1 (/x)\nwordcraft-docx v0.18.1 (/x)\nwordcraft-render v0.18.1 (/x)\negui v0.37.0\n";
+        assert_eq!(crates_in_tree(heavy, PAGE_FORBIDDEN_CRATES), vec!["wordcraft-layout", "wordcraft-docx", "wordcraft-render", "egui"]);
+        // The worker hosts the document stack and a message port; only the editor and PDF are out.
+        let worker = "wordcraft-worker-viewer v0.18.1 (/x)\nwordcraft-viewer v0.18.1 (/x)\nwordcraft-layout v0.18.1 (/x)\nweb-sys v0.3.0\n";
+        assert!(crates_in_tree(worker, VIEWER_WORKER_FORBIDDEN_CRATES).is_empty());
+        let dirty = "wordcraft-worker-viewer v0.18.1 (/x)\nkrilla v0.4.0\nwordcraft-engine v0.18.1 (/x)\n";
+        assert_eq!(crates_in_tree(dirty, VIEWER_WORKER_FORBIDDEN_CRATES), vec!["krilla", "wordcraft-engine"]);
+        // And it has a measured row like every worker.
+        assert!(WORKER_CEILINGS.iter().any(|c| c.name == VIEWER_WORKER_STEM));
+        assert_eq!(forbidden_symbols_for(VIEWER_WORKER_STEM), VIEWER_WORKER_FORBIDDEN_SYMBOLS);
     }
 
     #[test]
@@ -824,21 +1163,102 @@ mod tests {
     }
 
     #[test]
-    fn unregistered_worker_and_totals_flag() {
+    fn unregistered_worker_flags() {
         // A worker with no measured ceiling row is an error, not a pass: guessed or shared
         // numbers hide growth.
         let rep = analyze_wasm_bytes(PathBuf::from("wordcraft-worker-future_bg.wasm"), &minimal_wasm(1024, 512, b"safe_symbol"), 400).unwrap();
         let errs = check_worker_budget(&rep);
         assert!(errs.iter().any(|e| e.contains("no ceiling") && e.contains("wordcraft-worker-future")), "{errs:?}");
+    }
 
-        // The everything-loaded total: main + workers against the total ceilings.
-        let main = analyze_wasm_bytes(PathBuf::from("m.wasm"), &minimal_wasm(1000, 100, b"x"), 500).unwrap();
-        let w = analyze_wasm_bytes(PathBuf::from("wordcraft-worker-proof_bg.wasm"), &minimal_wasm(1000, 100, b"x"), 500).unwrap();
-        assert!(check_total_budget(&main, std::slice::from_ref(&w)).is_empty());
-        let huge_main = WasmReport { total_bytes: MAX_TOTAL_UNCOMPRESSED_BYTES, gzip_bytes: MAX_TOTAL_GZIPPED_BYTES, ..main.clone() };
-        let worker = WasmReport { total_bytes: 1, gzip_bytes: 1, ..w };
-        let errs = check_total_budget(&huge_main, &[worker]);
-        assert!(errs.iter().any(|e| e.contains("uncompressed")) && errs.iter().any(|e| e.contains("gzipped")), "{errs:?}");
+    #[test]
+    fn first_load_total_is_the_page_plus_the_view_only_worker() {
+        let page = analyze_wasm_bytes(PathBuf::from("wordcraft-viewer-web-abc_bg.wasm"), &minimal_wasm(1000, 100, b"x"), 500).unwrap();
+        let worker = analyze_wasm_bytes(PathBuf::from("wordcraft-worker-viewer_bg.wasm"), &minimal_wasm(1000, 100, b"x"), 500).unwrap();
+        assert!(check_first_load_budget(&page, Some(&worker)).is_empty());
+
+        // One byte over either ceiling fails that ceiling and only that one.
+        let at_raw = WasmReport { total_bytes: MAX_FIRST_LOAD_UNCOMPRESSED_BYTES, gzip_bytes: 0, ..worker.clone() };
+        let one = WasmReport { total_bytes: 1, gzip_bytes: 0, ..page.clone() };
+        let errs = check_first_load_budget(&one, Some(&at_raw));
+        assert!(errs.len() == 1 && errs[0].contains("uncompressed"), "{errs:?}");
+        let at_gzip = WasmReport { total_bytes: 0, gzip_bytes: MAX_FIRST_LOAD_GZIPPED_BYTES, ..worker.clone() };
+        let one = WasmReport { total_bytes: 0, gzip_bytes: 1, ..page.clone() };
+        let errs = check_first_load_budget(&one, Some(&at_gzip));
+        assert!(errs.len() == 1 && errs[0].contains("gzipped"), "{errs:?}");
+        // Exactly at the ceilings passes.
+        let zero = WasmReport { total_bytes: 0, gzip_bytes: 0, ..page.clone() };
+        let at_both = WasmReport { total_bytes: MAX_FIRST_LOAD_UNCOMPRESSED_BYTES, gzip_bytes: MAX_FIRST_LOAD_GZIPPED_BYTES, ..worker };
+        assert!(check_first_load_budget(&zero, Some(&at_both)).is_empty());
+
+        // No view-only worker: the page cannot show a document.
+        let errs = check_first_load_budget(&page, None);
+        assert!(errs.iter().any(|e| e.contains("wordcraft-worker-viewer")), "{errs:?}");
+    }
+
+    #[test]
+    fn the_first_load_ceiling_is_no_looser_than_its_parts() {
+        let viewer_worker = WORKER_CEILINGS.iter().find(|c| c.name == VIEWER_WORKER_STEM).expect("the view-only worker is registered");
+        assert!(MAX_FIRST_LOAD_UNCOMPRESSED_BYTES <= PAGE_CEILING.max_raw + viewer_worker.max_raw);
+        assert!(MAX_FIRST_LOAD_GZIPPED_BYTES <= PAGE_CEILING.max_gzip + viewer_worker.max_gzip);
+    }
+
+    #[test]
+    fn a_first_load_page_that_names_an_on_demand_file_is_caught() {
+        let clean = r#"<head><!-- the editor: wordcraft-web_loader.js, and wordcraft-worker-pdf -->
+<script type="module">import init from './wordcraft-viewer-web-8a80.js';
+await init({ module_or_path: './wordcraft-viewer-web-7858_bg.wasm' });</script>
+<link rel="icon" href="./wordcraft-fa59.ico"/></head>"#;
+        assert!(on_demand_files_named_by_page(clean).is_empty(), "comments and the page module's own names are fine");
+        assert_eq!(files_named_by_page(clean), ["wordcraft-fa59.ico", "wordcraft-viewer-web-7858_bg.wasm", "wordcraft-viewer-web-8a80.js"]);
+
+        for (tag, stem) in [
+            (r#"<link rel="modulepreload" href="./wordcraft-web.js">"#, "wordcraft-web"),
+            (r#"<link rel="preload" href="./wordcraft-web_bg.wasm" as="fetch">"#, "wordcraft-web"),
+            (r#"<script type="module" src="wordcraft-web_loader.js"></script>"#, "wordcraft-web"),
+            (r#"<link rel="prefetch" href="/wordcraft-worker-proof_bg.wasm">"#, "wordcraft-worker-proof"),
+            (r#"<script>new Worker("wordcraft-worker-codecs_loader.js")</script>"#, "wordcraft-worker-codecs"),
+            (r#"<link rel="preload" href="wordcraft-worker-pdf.js">"#, "wordcraft-worker-pdf"),
+        ] {
+            let html = format!("{clean}{tag}");
+            assert_eq!(on_demand_files_named_by_page(&html), [stem], "{tag}");
+        }
+        // A script or style comment is not set aside: the check fails closed on those.
+        assert_eq!(on_demand_files_named_by_page("<script>// see wordcraft-worker-pdf_loader.js\n</script>"), ["wordcraft-worker-pdf"]);
+        assert_eq!(on_demand_files_named_by_page("<style>/* wordcraft-web.js */</style>"), ["wordcraft-web"]);
+        // A comment that never closes hides nothing before it and cannot panic.
+        assert_eq!(on_demand_files_named_by_page(r#"<script src="wordcraft-web.js"></script><!-- open"#), ["wordcraft-web"]);
+        assert!(on_demand_files_named_by_page("<!-- wordcraft-web.js").is_empty());
+        assert!(files_named_by_page("./").is_empty() && files_named_by_page("<!--").is_empty());
+        // A query or a fragment is not part of the file's name on disk.
+        assert_eq!(files_named_by_page(r#"<script src="./p-1.js?v=1"></script><link href="./q.css#top"><a href="./?x">"#), ["p-1.js", "q.css"]);
+    }
+
+    #[test]
+    fn the_first_load_file_list_reads_a_built_page() {
+        let dir = std::env::temp_dir().join(format!("wc-first-load-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, body: &[u8]| std::fs::write(dir.join(name), body).unwrap();
+        write("p-1.js", b"12345");
+        write("wordcraft-worker-viewer_loader.js", b"1");
+        write("wordcraft-worker-viewer.js", b"12");
+        write("wordcraft-worker-viewer_bg.wasm", b"123");
+        write("index.html", br#"<script type="module">import './p-1.js';</script>"#);
+        let (files, on_demand) = first_load_files(&dir).unwrap();
+        assert!(on_demand.is_empty());
+        let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            ["index.html", "p-1.js", "wordcraft-worker-viewer_loader.js", "wordcraft-worker-viewer.js", "wordcraft-worker-viewer_bg.wasm"]
+        );
+        assert_eq!(files.iter().map(|(_, l)| *l).skip(1).collect::<Vec<_>>(), [5, 1, 2, 3]);
+
+        // A page that names the editor is reported; a named file that is missing is an error.
+        write("index.html", br#"<script type="module" src="./wordcraft-web_loader.js"></script>"#);
+        assert!(first_load_files(&dir).is_err(), "the named file does not exist");
+        write("wordcraft-web_loader.js", b"x");
+        assert_eq!(first_load_files(&dir).unwrap().1, ["wordcraft-web"]);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

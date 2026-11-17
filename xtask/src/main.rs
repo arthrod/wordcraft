@@ -14,6 +14,7 @@ mod visual_diff;
 mod wasm_attr;
 mod wasm_budget;
 mod web_assets;
+mod web_page;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
@@ -39,6 +40,9 @@ commands:
   brotli <input> <output>
                   Brotli-compress one file at quality 11 (packaging/web emits .wasm.br sidecars)
   web-assets      stage runtime i18n TSVs and demo samples into apps/wordcraft-web/target-assets
+  web-page [<dir>]
+                  Trunk post_build step (TRUNK_STAGING_DIR): drop the page's preloads of snippet
+                  files its main module does not import (another target's, e.g. the editor's)
   test            workspace tests (cargo nextest when installed, else cargo test), the interface
                   audit with its missing-translation report, then doctests
   i18n-report     the interface audit: fails on text that skips the catalog, and prints the
@@ -73,6 +77,7 @@ fn main() -> ExitCode {
         Some("wasm-attr") => wasm_attr::run(&root(), &rest),
         Some("brotli") => brotli::run(&rest),
         Some("web-assets") => web_assets::run(&root()),
+        Some("web-page") => web_page::run(&rest),
         Some("test") => cmd_test().and_then(|()| cmd_i18n_report()).and_then(|()| cmd_doctest()),
         Some("i18n-report") => cmd_i18n_report(),
         Some("language") => cmd_language(),
@@ -162,16 +167,20 @@ fn cmd_layers() -> Result<(), String> {
 /// exist to be wasm modules: their `cfg(target_arch = "wasm32")` code compiles nowhere else).
 fn wasm_set() -> Result<Vec<String>, String> {
     let crates = layers::from_metadata(&metadata()?)?;
-    Ok(crates
-        .into_iter()
-        .filter(|c| match layers::classify(&c.name) {
-            Some(layers::Class::Layer(l)) => l <= 5 || layers::short_name(&c.name) == "ui-egui",
-            Some(layers::Class::Standalone) => true,
-            Some(layers::Class::Exempt) => layers::short_name(&c.name) == "viewer" || layers::short_name(&c.name).starts_with("worker-"),
-            _ => false,
-        })
-        .map(|c| c.name)
-        .collect())
+    Ok(crates.into_iter().filter(|c| wasm_checked(&c.name)).map(|c| c.name).collect())
+}
+
+/// Whether `cargo xtask wasm`'s unified pass checks workspace package `name`: the layered crates
+/// up to L5 and `ui-egui`, the standalone ones, and the apps that only run as wasm (the
+/// view-only module, the viewer-first page module and the workers).
+fn wasm_checked(name: &str) -> bool {
+    let short = layers::short_name(name);
+    match layers::classify(name) {
+        Some(layers::Class::Layer(l)) => l <= 5 || short == "ui-egui",
+        Some(layers::Class::Standalone) => true,
+        Some(layers::Class::Exempt) => matches!(short, "viewer" | "viewer-web") || short.starts_with("worker-"),
+        _ => false,
+    }
 }
 
 /// Configurations checked for wasm32 on their own, after the unified pass: the arguments that
@@ -353,6 +362,25 @@ Tests that use a corpus skip cleanly when it is absent.
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wasm_checks_every_wasm_only_app_but_not_the_native_ones() {
+        for pkg in [
+            "wordcraft-viewer",
+            "wordcraft-viewer-web",
+            "wordcraft-worker-viewer",
+            "wordcraft-worker-proof",
+            "wordcraft-worker-proto",
+            "wordcraft-engine",
+            "wordcraft-ui-egui",
+        ] {
+            assert!(wasm_checked(pkg), "{pkg}");
+        }
+        // `wordcraft-web` is checked alone (SLIM_WASM_CHECKS); the native apps never.
+        for pkg in ["wordcraft-web", "wordcraft", "wordcraft-cli", "xtask"] {
+            assert!(!wasm_checked(pkg), "{pkg}");
+        }
+    }
 
     #[test]
     fn wasm_checks_the_slim_web_configuration_on_its_own() {
