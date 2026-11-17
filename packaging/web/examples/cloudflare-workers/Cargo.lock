@@ -304,6 +304,11 @@ version = "0.1.0"
 source = "git+https://github.com/arthrod/craft-libs?rev=6ee18f41c60b1f0a4691c3d2857bb6895fc41f64#6ee18f41c60b1f0a4691c3d2857bb6895fc41f64"
 
 [[package]]
+name = "craft-convert"
+version = "0.1.0"
+source = "git+https://github.com/arthrod/craft-libs?rev=8a46e13e2#8a46e13e254210ffe9cd21573fb99d1a475b2d82"
+
+[[package]]
 name = "craft-docx"
 version = "0.1.0"
 source = "git+https://github.com/arthrod/craft-libs?rev=6ee18f41c60b1f0a4691c3d2857bb6895fc41f64#6ee18f41c60b1f0a4691c3d2857bb6895fc41f64"
@@ -2096,9 +2101,9 @@ dependencies = [
  "craft-docx",
  "craft-wordmodel",
  "craft-xml",
- "serde",
  "serde_json",
  "wordcraft-doc",
+ "wordcraft-model-bridge",
 ]
 
 [[package]]
@@ -2170,6 +2175,15 @@ dependencies = [
  "wordcraft-doc",
  "wordcraft-fonts",
  "wordcraft-geom",
+]
+
+[[package]]
+name = "wordcraft-model-bridge"
+version = "0.18.1"
+dependencies = [
+ "craft-convert",
+ "craft-wordmodel",
+ "wordcraft-doc",
 ]
 
 [[package]]
