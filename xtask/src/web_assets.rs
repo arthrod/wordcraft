@@ -297,13 +297,8 @@ fn emit_font_packs(root: &Path, out_dir: &Path) -> Result<(), String> {
     // Keep only this run's files plus the manifest: a file whose stem still matches a spec but
     // whose hash is stale (the TTF changed since the last staging) must not ship either —
     // deployed static-file limits count every file left behind.
-    for entry in std::fs::read_dir(&fonts_out).map_err(|e| format!("{}: {e}", fonts_out.display()))?.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name != "manifest.json" && !written.contains(&name) {
-            std::fs::remove_file(entry.path()).map_err(|e| format!("{}: {e}", entry.path().display()))?;
-        }
-    }
-    Ok(())
+    let entries = std::fs::read_dir(&fonts_out).map_err(|e| format!("{}: {e}", fonts_out.display()))?;
+    remove_stale_pack_files(&fonts_out, entries.map(|entry| entry.map(|e| e.file_name().to_string_lossy().to_string())), &written)
 }
 
 pub fn run(root: &Path) -> Result<(), String> {
@@ -312,6 +307,24 @@ pub fn run(root: &Path) -> Result<(), String> {
     let required = std::env::var("CRAFT_I18N_REQUIRED").is_ok_and(|v| v.trim() == "1");
     let count = emit_web_assets(root, &out_dir, i18n_dir.as_deref(), required)?;
     println!("web-assets: staged {count} locale catalog directories + samples into {}", out_dir.display());
+    Ok(())
+}
+
+/// Removes every file of `dir` named by `names` that this run did not write (`manifest.json`
+/// stays). A name the directory could not give is an error, not a file to skip: a listing that
+/// stops early would leave stale pack files in the output and still report success.
+fn remove_stale_pack_files(
+    dir: &Path,
+    names: impl Iterator<Item = std::io::Result<String>>,
+    written: &std::collections::BTreeSet<String>,
+) -> Result<(), String> {
+    for name in names {
+        let name = name.map_err(|e| format!("{}: {e}", dir.display()))?;
+        if name != "manifest.json" && !written.contains(&name) {
+            let path = dir.join(&name);
+            std::fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+    }
     Ok(())
 }
 
@@ -458,5 +471,22 @@ mod tests {
         assert!(!out.join("fonts/SourceSans3-Bold.deadbeef.ttf.br").exists());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A directory entry that cannot be read stops the cleanup with an error; it is not skipped.
+    #[test]
+    fn stale_pack_cleanup_reports_an_unreadable_entry() {
+        let dir = std::env::temp_dir().join(format!("wordcraft-xtask-stale-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("old.ttf.br"), b"x").unwrap();
+        std::fs::write(dir.join("kept.ttf.br"), b"x").unwrap();
+        let written = std::collections::BTreeSet::from(["kept.ttf.br".to_string()]);
+        let names = vec![Ok("kept.ttf.br".to_string()), Err(std::io::Error::other("unreadable entry")), Ok("old.ttf.br".to_string())];
+        let err = remove_stale_pack_files(&dir, names.into_iter(), &written).unwrap_err();
+        assert!(err.contains("unreadable entry"), "{err}");
+        let names = vec![Ok("kept.ttf.br".to_string()), Ok("manifest.json".to_string()), Ok("old.ttf.br".to_string())];
+        remove_stale_pack_files(&dir, names.into_iter(), &written).unwrap();
+        assert!(dir.join("kept.ttf.br").exists() && !dir.join("old.ttf.br").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

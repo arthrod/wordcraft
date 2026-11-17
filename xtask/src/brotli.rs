@@ -48,22 +48,19 @@ fn canonicalish(path: &Path) -> PathBuf {
 }
 
 /// Whether two file metadata records describe the same file (hard links included): device and
-/// inode on Unix, volume serial and file index on Windows.
+/// inode on Unix; not known on other systems.
 fn same_file(a: &Metadata, b: &Metadata) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         a.dev() == b.dev() && a.ino() == b.ino()
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        a.volume_serial_number().is_some()
-            && a.volume_serial_number() == b.volume_serial_number()
-            && a.file_index().is_some()
-            && a.file_index() == b.file_index()
-    }
-    #[cfg(not(any(unix, windows)))]
+    // Elsewhere the path comparison in `run` is the whole check. Windows has file identity only
+    // behind the unstable `windows_by_handle` methods (`volume_serial_number`, `file_index`),
+    // which a stable toolchain refuses, and that would stop every `cargo xtask` command there.
+    // Nothing is lost: the output is written to a temporary file and renamed, so a hard link to
+    // the input has its own directory entry replaced and the input keeps its bytes.
+    #[cfg(not(unix))]
     {
         let _ = (a, b);
         false
@@ -170,8 +167,14 @@ mod tests {
         assert!(run(&[input_s.as_str(), input_s.as_str()]).is_err());
         // A hard link is a different path to the same file.
         let link = dir.join("link.bin");
+        // Refused where the link can be told from a copy (Unix); elsewhere the run goes ahead,
+        // replaces the link's own entry and leaves the input as it was.
         if std::fs::hard_link(&input, &link).is_ok() {
-            assert!(run(&[input_s.as_str(), link.to_str().unwrap()]).is_err());
+            let ran = run(&[input_s.as_str(), link.to_str().unwrap()]);
+            #[cfg(unix)]
+            assert!(ran.is_err());
+            #[cfg(not(unix))]
+            let _ = ran;
         }
         assert_eq!(std::fs::read(&input).unwrap(), b"payload", "the input must survive a rejected run");
         std::fs::remove_dir_all(&dir).unwrap();
