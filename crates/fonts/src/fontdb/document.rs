@@ -233,9 +233,13 @@ impl FontDb {
 
     /// Take a document's faces out of the font list: lookups no longer find them, and fallback
     /// choices made while they were there are forgotten. Faces not in the list are skipped.
-    /// Layouts made with them keep drawing with them.
+    /// Layouts made with them keep drawing with them. A face another open document holds too
+    /// ([`FontDb::add_document_fonts_scoped`] counts the holders) stays: it is that document's
+    /// as much as this one's, and it leaves when the last holder is released.
     pub fn withdraw_document_fonts(&self, faces: &DocumentFaces) {
-        let ids: HashSet<u32> = faces.faces.iter().map(|f| f.id).collect();
+        let kept = self.document_files.lock().unwrap_or_else(PoisonError::into_inner);
+        let ids: HashSet<u32> = faces.faces.iter().map(|f| f.id).filter(|id| kept.held.get(id).is_none_or(|held| *held <= 1)).collect();
+        drop(kept);
         let mut list = self.faces.write().unwrap_or_else(PoisonError::into_inner);
         let before = list.len();
         list.retain(|f| !ids.contains(&f.id));

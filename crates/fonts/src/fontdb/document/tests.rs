@@ -129,7 +129,10 @@ fn files_of_one_length_and_name_are_told_apart_by_their_bytes() {
         let again = db.add_document_fonts_scoped(vec![(data.clone(), "Same Name".to_string())], 0);
         assert_eq!((again.len(), again.new_bytes()), (1, 0), "the same file again");
         assert_eq!(again.faces[0].id, earlier.faces[0].id, "brings back the faces made for it");
-        db.withdraw_document_fonts(&again);
+        // This document closes; the earlier one that holds the face too was withdrawn above,
+        // so its face goes out of the list again.
+        db.release_document_fonts(&again);
+        db.withdraw_document_fonts(earlier);
     }
 }
 
@@ -192,4 +195,25 @@ fn a_documents_faces_leave_when_the_last_document_holding_them_is_released() {
     let again = db.add_document_fonts_scoped(vec![(font, "Held Sans Abc".to_string())], 0);
     assert_eq!((again.len(), again.new_bytes()), (1, 0));
     assert_eq!(db.styles("Held Sans Abc"), ["Regular"]);
+}
+
+/// Withdrawing one document's faces leaves a face another open document holds too: a host with
+/// two documents open (two sessions embedding the same font) replaces one without taking the
+/// font from under the other.
+#[test]
+fn a_withdrawal_leaves_a_face_another_open_document_holds() {
+    let db = FontDb::with_font_dirs(vec![]);
+    let bold = include_bytes!("../../../../../assets/fonts/SourceSans3-Bold.ttf").to_vec();
+    let first = db.add_document_fonts_scoped(vec![(bold.clone(), "Contract Bold".to_string())], usize::MAX);
+    let second = db.add_document_fonts_scoped(vec![(bold, "Contract Bold".to_string())], usize::MAX);
+    assert_eq!((first.len(), second.len()), (1, 1), "both hold the one face");
+    db.withdraw_document_fonts(&first);
+    assert!(db.has_family("Contract Bold"), "the second document still draws with it");
+    db.reinstate_document_fonts(&first);
+    assert_eq!(db.runtime_faces().len(), 1);
+    // Held by one document only, it leaves as before.
+    db.release_document_fonts(&second);
+    assert!(db.has_family("Contract Bold"), "the first still holds it");
+    db.withdraw_document_fonts(&first);
+    assert!(!db.has_family("Contract Bold"));
 }
