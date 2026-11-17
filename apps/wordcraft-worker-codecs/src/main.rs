@@ -128,7 +128,7 @@ fn run_convert(req: &ConvertRequest) -> Result<Vec<u8>, String> {
         }
         ConvertDirection::Export => {
             let doc = wordcraft_docx::read_with_password(&req.input, password).map_err(|e| e.to_string())?;
-            export_document(&format, &doc, password)
+            export_document(&format, &doc, password, req.comments)
         }
     }
 }
@@ -176,8 +176,10 @@ fn import_document(ext: &str, input: &[u8], password: Option<&str>, page: &wordc
 }
 
 /// Write `doc` in the format `ext` names (export direction), encrypting where the format
-/// supports it and a password is given.
-fn export_document(ext: &str, doc: &Document, password: Option<&str>) -> Result<Vec<u8>, String> {
+/// supports it and a password is given. `comments` ends an HTML, Markdown or text copy with the
+/// document's comments (Print Markup with comments shown); the other formats keep them their
+/// own way.
+fn export_document(ext: &str, doc: &Document, password: Option<&str>, comments: bool) -> Result<Vec<u8>, String> {
     // ODT encrypts as it is packaged; the other formats below write plain bytes.
     if matches!(ext, "odt" | "ott") {
         let plain = if ext == "odt" { wordcraft_formats::odt::export(doc) } else { wordcraft_formats::odt::export_template(doc) }?;
@@ -198,7 +200,7 @@ fn export_document(ext: &str, doc: &Document, password: Option<&str>) -> Result<
         // Flat OPC (the engine's `xml` without the Word 2003 option, which the protocol
         // carries no option for).
         "xml" => wordcraft_docx::write_flat(doc).map_err(|e| e.to_string()),
-        other => wordcraft_formats::export_with(other, doc, &wordcraft_formats::ExportOptions::default())
+        other => wordcraft_formats::export_with(other, doc, &wordcraft_formats::ExportOptions { comments })
             .unwrap_or_else(|| Err(format!("`.{other}` is not a format this worker converts"))),
     }
 }
@@ -331,6 +333,31 @@ mod tests {
         wordcraft_formats::import("md", md).expect("md").expect("valid md")
     }
 
+    /// An export that asks for the comments ends with them, as the engine's own HTML, Markdown
+    /// and text writers do under Print Markup; one that does not ask leaves them out.
+    #[test]
+    fn export_ends_with_the_comments_when_asked() {
+        let mut session = wordcraft_engine::Session::new(sample_doc());
+        session.run("select.text", &serde_json::json!({"text": "bold"})).expect("select");
+        session.run("review.newComment", &serde_json::json!({"text": "check this wording"})).expect("comment");
+        let docx = wordcraft_docx::write(&session.doc).expect("docx");
+        for format in ["html", "md"] {
+            let export = |comments: bool| {
+                let req = ConvertRequest {
+                    format: format.into(),
+                    direction: ConvertDirection::Export,
+                    password: None,
+                    input: docx.clone(),
+                    page: None,
+                    comments,
+                };
+                String::from_utf8(convert_reply(&req).expect("export")).expect("text")
+            };
+            assert!(export(true).contains("check this wording"), "{format}: the comments are written");
+            assert!(!export(false).contains("check this wording"), "{format}: not without the option");
+        }
+    }
+
     fn sample_docx() -> Vec<u8> {
         wordcraft_docx::write(&sample_doc()).expect("docx")
     }
@@ -342,7 +369,14 @@ mod tests {
     #[test]
     fn import_opens_a_file_without_a_page_size_on_the_page_sent() {
         let page_of = |input: &[u8], format: &str, page: Option<proto::PageSize>| {
-            let req = ConvertRequest { format: format.into(), direction: ConvertDirection::Import, password: None, input: input.to_vec(), page };
+            let req = ConvertRequest {
+                format: format.into(),
+                direction: ConvertDirection::Import,
+                password: None,
+                input: input.to_vec(),
+                page,
+                comments: false,
+            };
             let doc = wordcraft_docx::read(&convert_reply(&req).expect("conversion")).expect("the package reads back");
             let sections = doc.sections();
             let s = sections.first().map(|(_, p)| (*p).clone()).unwrap_or_default();
@@ -375,7 +409,8 @@ mod tests {
     #[test]
     fn import_rtf_answers_a_word_package() {
         let rtf = wordcraft_formats::export("rtf", &sample_doc()).expect("rtf").expect("ok");
-        let req = ConvertRequest { format: "rtf".into(), direction: ConvertDirection::Import, password: None, input: rtf, page: None };
+        let req =
+            ConvertRequest { format: "rtf".into(), direction: ConvertDirection::Import, password: None, input: rtf, page: None, comments: false };
         let out = convert_reply(&req).expect("conversion");
         assert_eq!(&out[..2], b"PK", "import answers a Word package");
         let doc = wordcraft_docx::read_with_password(&out, None).expect("the package reads back");
@@ -385,7 +420,14 @@ mod tests {
     #[test]
     fn export_docx_answers_the_named_format() {
         for (format, needle) in [("md", "bold"), ("rtf", "\\rtf1"), ("html", "<p>")] {
-            let req = ConvertRequest { format: format.into(), direction: ConvertDirection::Export, password: None, input: sample_docx(), page: None };
+            let req = ConvertRequest {
+                format: format.into(),
+                direction: ConvertDirection::Export,
+                password: None,
+                input: sample_docx(),
+                page: None,
+                comments: false,
+            };
             let out = convert_reply(&req).unwrap_or_else(|e| panic!("{format}: {e:?}"));
             let text = String::from_utf8_lossy(&out);
             assert!(text.contains(needle), "{format}: {text}");
@@ -403,6 +445,7 @@ mod tests {
             password: Some("open-sesame".into()),
             input: locked,
             page: None,
+            comments: false,
         };
         let out = convert_reply(&req).expect("rtf export");
         assert!(out.starts_with(b"{\\rtf1"), "rtf export came back encrypted or garbled: {:?}", &out[..out.len().min(16)]);
@@ -410,9 +453,23 @@ mod tests {
 
     #[test]
     fn docx_flavor_change_round_trips() {
-        let req = ConvertRequest { format: "dotm".into(), direction: ConvertDirection::Export, password: None, input: sample_docx(), page: None };
+        let req = ConvertRequest {
+            format: "dotm".into(),
+            direction: ConvertDirection::Export,
+            password: None,
+            input: sample_docx(),
+            page: None,
+            comments: false,
+        };
         let flavored = convert_reply(&req).expect("flavor change");
-        let req = ConvertRequest { format: "dotm".into(), direction: ConvertDirection::Import, password: None, input: flavored, page: None };
+        let req = ConvertRequest {
+            format: "dotm".into(),
+            direction: ConvertDirection::Import,
+            password: None,
+            input: flavored,
+            page: None,
+            comments: false,
+        };
         let out = convert_reply(&req).expect("flavor restore");
         let doc = wordcraft_docx::read_with_password(&out, None).expect("reads back as docx");
         assert!(String::from_utf8_lossy(&wordcraft_formats::txt::export(&doc)).contains("bold"));
@@ -425,7 +482,14 @@ mod tests {
 
         // Without the password: the .docx reader's missing-password text, so a client's
         // `needs_password` substring check matches.
-        let req = ConvertRequest { format: "docx".into(), direction: ConvertDirection::Import, password: None, input: locked.clone(), page: None };
+        let req = ConvertRequest {
+            format: "docx".into(),
+            direction: ConvertDirection::Import,
+            password: None,
+            input: locked.clone(),
+            page: None,
+            comments: false,
+        };
         let err = convert_reply(&req).expect_err("needs a password");
         assert_eq!(err.0, ErrorCode::Internal);
         assert!(err.1.contains(wordcraft_docx::PASSWORD_REQUIRED), "{:?}", err.1);
@@ -438,14 +502,21 @@ mod tests {
             password: Some("open-sesame".into()),
             input: locked.clone(),
             page: None,
+            comments: false,
         };
         let out = convert_reply(&req).expect("converts");
         assert!(wordcraft_docx::is_encrypted(&out), "the output stays encrypted");
         let doc = wordcraft_docx::read_with_password(&out, Some("open-sesame")).expect("reads back");
         assert!(String::from_utf8_lossy(&wordcraft_formats::txt::export(&doc)).contains("bold"));
 
-        let req =
-            ConvertRequest { format: "docx".into(), direction: ConvertDirection::Import, password: Some("nope".into()), input: locked, page: None };
+        let req = ConvertRequest {
+            format: "docx".into(),
+            direction: ConvertDirection::Import,
+            password: Some("nope".into()),
+            input: locked,
+            page: None,
+            comments: false,
+        };
         let err = convert_reply(&req).expect_err("wrong password");
         assert!(err.1.contains(wordcraft_docx::WRONG_PASSWORD), "{:?}", err.1);
     }
@@ -453,7 +524,14 @@ mod tests {
     #[test]
     fn unknown_and_broken_requests_answer_typed_errors() {
         // A format no reader handles.
-        let req = ConvertRequest { format: "zzz".into(), direction: ConvertDirection::Import, password: None, input: b"x".to_vec(), page: None };
+        let req = ConvertRequest {
+            format: "zzz".into(),
+            direction: ConvertDirection::Import,
+            password: None,
+            input: b"x".to_vec(),
+            page: None,
+            comments: false,
+        };
         let err = convert_reply(&req).expect_err("unknown format");
         assert_eq!(err.0, ErrorCode::Internal);
         assert!(err.1.contains("not a format"), "{:?}", err.1);
@@ -465,13 +543,20 @@ mod tests {
             password: None,
             input: b"not a package".to_vec(),
             page: None,
+            comments: false,
         };
         let err = convert_reply(&req).expect_err("junk input");
         assert_eq!(err.0, ErrorCode::Internal);
 
         // Bounds: a format name and a password past their limits.
-        let base =
-            ConvertRequest { format: "rtf".into(), direction: ConvertDirection::Import, password: None, input: b"{\\rtf1}".to_vec(), page: None };
+        let base = ConvertRequest {
+            format: "rtf".into(),
+            direction: ConvertDirection::Import,
+            password: None,
+            input: b"{\\rtf1}".to_vec(),
+            page: None,
+            comments: false,
+        };
         for req in [
             ConvertRequest { format: "x".repeat(proto::MAX_FORMAT_BYTES + 1), ..base.clone() },
             ConvertRequest { password: Some("p".repeat(proto::MAX_PASSWORD_BYTES + 1)), ..base },

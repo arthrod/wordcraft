@@ -7608,6 +7608,7 @@ dependencies = [
  "wordcraft-doc",
  "wordcraft-docbin",
  "wordcraft-docx",
+ "wordcraft-engine",
  "wordcraft-formats",
  "wordcraft-worker-proto",
 ]

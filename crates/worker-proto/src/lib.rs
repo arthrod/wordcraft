@@ -379,6 +379,10 @@ pub struct ConvertRequest {
     /// the user's region, as the engine opens such a file in its session. `None` (also what a
     /// client that predates the field sends) is a new blank document's page.
     pub page: Option<PageSize>,
+    /// Export only: the copy ends with the document's comments (Print Markup with comments
+    /// shown), in the formats that write them that way (HTML, Markdown, text). `false` is also
+    /// what a client that predates the field sends.
+    pub comments: bool,
 }
 
 /// A page size in points, exactly as the client's document model holds it (an `f32` crosses
@@ -503,6 +507,9 @@ struct ConvertMeta {
     /// Absent from an older client's request: the default page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     page: Option<PageSize>,
+    /// Absent from an older client's request, and from a request that does not ask for them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    comments: bool,
 }
 
 /// The JSON part of a `renderPdf` payload: the fonts' names, in `fonts` order, and the job's
@@ -592,7 +599,13 @@ pub fn unpack_binary(bytes: &[u8]) -> Result<Vec<&[u8]>, ProtoError> {
 
 /// Encode a `convert` payload: a two-part [`pack_binary`] frame, JSON metadata then `input`.
 pub fn encode_convert_request(req: &ConvertRequest) -> Result<Vec<u8>, ProtoError> {
-    let meta = encode_payload(&ConvertMeta { format: req.format.clone(), direction: req.direction, password: req.password.clone(), page: req.page })?;
+    let meta = encode_payload(&ConvertMeta {
+        format: req.format.clone(),
+        direction: req.direction,
+        password: req.password.clone(),
+        page: req.page,
+        comments: req.comments,
+    })?;
     pack_binary(&[&meta, &req.input])
 }
 
@@ -622,7 +635,14 @@ pub fn decode_convert_request(bytes: &[u8]) -> Result<ConvertRequest, ProtoError
     if meta.page.is_some_and(|p| !p.is_valid()) {
         return Err(ProtoError::Decode(format!("convert payload has a page size outside {MIN_PAGE_POINTS}..={MAX_PAGE_POINTS} points")));
     }
-    Ok(ConvertRequest { format: meta.format, direction: meta.direction, password: meta.password, input: input.to_vec(), page: meta.page })
+    Ok(ConvertRequest {
+        format: meta.format,
+        direction: meta.direction,
+        password: meta.password,
+        input: input.to_vec(),
+        page: meta.page,
+        comments: meta.comments,
+    })
 }
 
 /// Encode a `renderPdf` payload: `[metaJson, docx, font0, font1, …]`.
@@ -1340,6 +1360,7 @@ mod tests {
             password: Some("open-sesame".into()),
             input: b"{\\rtf1 hi}".to_vec(),
             page: Some(PageSize { width: 595.28, height: 841.89 }),
+            comments: false,
         }
     }
 
@@ -1765,6 +1786,17 @@ mod tests {
             other.v = PROTOCOL_VERSION + 1;
             assert!(matches!(decode_envelope(&encode_envelope(&other).unwrap()), Err(ProtoError::Version { .. })), "{kind:?}");
         }
+    }
+
+    #[test]
+    fn the_convert_comments_flag_round_trips_and_defaults_off() {
+        let asked = ConvertRequest { comments: true, ..sample_convert() };
+        assert_eq!(decode_convert_request(&encode_convert_request(&asked).unwrap()).unwrap(), asked);
+        // A request that does not ask writes no field, which is what an older client sends.
+        let plain = encode_convert_request(&sample_convert()).unwrap();
+        let meta = String::from_utf8(unpack_binary(&plain).unwrap()[0].to_vec()).unwrap();
+        assert!(!meta.contains("comments"), "{meta}");
+        assert!(!decode_convert_request(&plain).unwrap().comments);
     }
 
     #[test]

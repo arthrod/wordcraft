@@ -324,6 +324,8 @@ impl Exporter {
                     password: password.map(str::to_string),
                     input: docx,
                     page: None,
+                    // Print Markup with comments shown, as the engine's own writers read it.
+                    comments: opts.markup && opts.comments,
                 };
                 convert(&self.asset_base, &req, done);
             }

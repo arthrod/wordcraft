@@ -22,6 +22,10 @@ wordcraft-worker-proto = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+[dev-dependencies]
+# Tests only: makes a document with a comment through the review commands.
+wordcraft-engine = { workspace = true }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # std HashMap/HashSet random seeds (the format tables') need a JS entropy source in the browser.
 getrandom = { workspace = true, features = ["wasm_js"] }

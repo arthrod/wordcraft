@@ -492,6 +492,7 @@ pub(crate) fn open_request(format: String, input: Vec<u8>, region: &wordcraft_en
         password: None,
         input,
         page: wordcraft_worker_proto::PageSize::from_points(page.page_w, page.page_h),
+        comments: false,
     }
 }
 
