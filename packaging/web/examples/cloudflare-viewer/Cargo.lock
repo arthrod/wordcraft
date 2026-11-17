@@ -267,7 +267,7 @@ dependencies = [
 [[package]]
 name = "craft-cfb"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=41fb227542efb8a7748caa1c659f271d8605303c#41fb227542efb8a7748caa1c659f271d8605303c"
+source = "git+https://github.com/arthrod/craft-libs?rev=6ee18f41c60b1f0a4691c3d2857bb6895fc41f64#6ee18f41c60b1f0a4691c3d2857bb6895fc41f64"
 
 [[package]]
 name = "craft-convert"
@@ -277,7 +277,7 @@ source = "git+https://github.com/arthrod/craft-libs?rev=8a46e13e2#8a46e13e254210
 [[package]]
 name = "craft-docx"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=41fb227542efb8a7748caa1c659f271d8605303c#41fb227542efb8a7748caa1c659f271d8605303c"
+source = "git+https://github.com/arthrod/craft-libs?rev=6ee18f41c60b1f0a4691c3d2857bb6895fc41f64#6ee18f41c60b1f0a4691c3d2857bb6895fc41f64"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -297,7 +297,7 @@ dependencies = [
 [[package]]
 name = "craft-drawingml"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=41fb227542efb8a7748caa1c659f271d8605303c#41fb227542efb8a7748caa1c659f271d8605303c"
+source = "git+https://github.com/arthrod/craft-libs?rev=6ee18f41c60b1f0a4691c3d2857bb6895fc41f64#6ee18f41c60b1f0a4691c3d2857bb6895fc41f64"
 dependencies = [
  "craft-xml",
  "kurbo",
@@ -308,7 +308,7 @@ dependencies = [
 [[package]]
 name = "craft-image-codecs"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=41fb227542efb8a7748caa1c659f271d8605303c#41fb227542efb8a7748caa1c659f271d8605303c"
+source = "git+https://github.com/arthrod/craft-libs?rev=6ee18f41c60b1f0a4691c3d2857bb6895fc41f64#6ee18f41c60b1f0a4691c3d2857bb6895fc41f64"
 dependencies = [
  "craft-jpeg",
  "craft-metadata",
@@ -331,7 +331,7 @@ dependencies = [
 [[package]]
 name = "craft-jpeg"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=41fb227542efb8a7748caa1c659f271d8605303c#41fb227542efb8a7748caa1c659f271d8605303c"
+source = "git+https://github.com/arthrod/craft-libs?rev=6ee18f41c60b1f0a4691c3d2857bb6895fc41f64#6ee18f41c60b1f0a4691c3d2857bb6895fc41f64"
 dependencies = [
  "thiserror",
 ]
@@ -339,7 +339,7 @@ dependencies = [
 [[package]]
 name = "craft-math"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=41fb227542efb8a7748caa1c659f271d8605303c#41fb227542efb8a7748caa1c659f271d8605303c"
+source = "git+https://github.com/arthrod/craft-libs?rev=6ee18f41c60b1f0a4691c3d2857bb6895fc41f64#6ee18f41c60b1f0a4691c3d2857bb6895fc41f64"
 dependencies = [
  "craft-xml",
  "serde",
@@ -348,7 +348,7 @@ dependencies = [
 [[package]]
 name = "craft-metadata"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=41fb227542efb8a7748caa1c659f271d8605303c#41fb227542efb8a7748caa1c659f271d8605303c"
+source = "git+https://github.com/arthrod/craft-libs?rev=6ee18f41c60b1f0a4691c3d2857bb6895fc41f64#6ee18f41c60b1f0a4691c3d2857bb6895fc41f64"
 dependencies = [
  "brotli-decompressor 6.3.2",
  "chrono",
@@ -360,7 +360,7 @@ dependencies = [
 [[package]]
 name = "craft-metafile"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=41fb227542efb8a7748caa1c659f271d8605303c#41fb227542efb8a7748caa1c659f271d8605303c"
+source = "git+https://github.com/arthrod/craft-libs?rev=6ee18f41c60b1f0a4691c3d2857bb6895fc41f64#6ee18f41c60b1f0a4691c3d2857bb6895fc41f64"
 dependencies = [
  "encoding_rs",
  "image",
@@ -371,7 +371,7 @@ dependencies = [
 [[package]]
 name = "craft-offcrypto"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=41fb227542efb8a7748caa1c659f271d8605303c#41fb227542efb8a7748caa1c659f271d8605303c"
+source = "git+https://github.com/arthrod/craft-libs?rev=6ee18f41c60b1f0a4691c3d2857bb6895fc41f64#6ee18f41c60b1f0a4691c3d2857bb6895fc41f64"
 dependencies = [
  "aes",
  "base64 0.23.1",
@@ -388,7 +388,7 @@ dependencies = [
 [[package]]
 name = "craft-opc"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=41fb227542efb8a7748caa1c659f271d8605303c#41fb227542efb8a7748caa1c659f271d8605303c"
+source = "git+https://github.com/arthrod/craft-libs?rev=6ee18f41c60b1f0a4691c3d2857bb6895fc41f64#6ee18f41c60b1f0a4691c3d2857bb6895fc41f64"
 dependencies = [
  "craft-xml",
  "craft-zip",
@@ -399,7 +399,7 @@ dependencies = [
 [[package]]
 name = "craft-tiff"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=41fb227542efb8a7748caa1c659f271d8605303c#41fb227542efb8a7748caa1c659f271d8605303c"
+source = "git+https://github.com/arthrod/craft-libs?rev=6ee18f41c60b1f0a4691c3d2857bb6895fc41f64#6ee18f41c60b1f0a4691c3d2857bb6895fc41f64"
 dependencies = [
  "serde",
  "thiserror",
@@ -408,7 +408,7 @@ dependencies = [
 [[package]]
 name = "craft-wordmodel"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=41fb227542efb8a7748caa1c659f271d8605303c#41fb227542efb8a7748caa1c659f271d8605303c"
+source = "git+https://github.com/arthrod/craft-libs?rev=6ee18f41c60b1f0a4691c3d2857bb6895fc41f64#6ee18f41c60b1f0a4691c3d2857bb6895fc41f64"
 dependencies = [
  "base64 0.23.1",
  "craft-math",
@@ -422,7 +422,7 @@ dependencies = [
 [[package]]
 name = "craft-xml"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=41fb227542efb8a7748caa1c659f271d8605303c#41fb227542efb8a7748caa1c659f271d8605303c"
+source = "git+https://github.com/arthrod/craft-libs?rev=6ee18f41c60b1f0a4691c3d2857bb6895fc41f64#6ee18f41c60b1f0a4691c3d2857bb6895fc41f64"
 dependencies = [
  "quick-xml",
  "thiserror",
@@ -431,7 +431,7 @@ dependencies = [
 [[package]]
 name = "craft-zip"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=41fb227542efb8a7748caa1c659f271d8605303c#41fb227542efb8a7748caa1c659f271d8605303c"
+source = "git+https://github.com/arthrod/craft-libs?rev=6ee18f41c60b1f0a4691c3d2857bb6895fc41f64#6ee18f41c60b1f0a4691c3d2857bb6895fc41f64"
 dependencies = [
  "flate2",
  "thiserror",

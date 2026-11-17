@@ -32,8 +32,8 @@ wordcraft-viewer = { path = "../../../../apps/wordcraft-viewer" }
 wordcraft-fonts = { path = "../../../../crates/fonts" }
 # The zip reader and the decryption the `.docx` reader already uses (same revision as the root
 # workspace's lock), called directly so an upload's inflated size is checked before reading.
-craft-zip = { git = "https://github.com/storytold/craft-libs", rev = "41fb227542efb8a7748caa1c659f271d8605303c" }
-craft-offcrypto = { git = "https://github.com/storytold/craft-libs", rev = "41fb227542efb8a7748caa1c659f271d8605303c" }
+craft-zip = { git = "https://github.com/arthrod/craft-libs", rev = "6ee18f41c60b1f0a4691c3d2857bb6895fc41f64" }
+craft-offcrypto = { git = "https://github.com/arthrod/craft-libs", rev = "6ee18f41c60b1f0a4691c3d2857bb6895fc41f64" }
 # PNG encoder already linked by `wordcraft-render` (through `craft-image-codecs`): used directly
 # for grey and palette images, which are several times smaller than RGBA for a text page.
 png = "0.18"
