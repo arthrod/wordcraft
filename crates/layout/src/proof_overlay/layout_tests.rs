@@ -44,21 +44,27 @@ fn worker_overlays_draw_squiggles_where_inline_issues_would() {
     crate::proof_overlay::set_overlays([(StoryRef::Body, Path::top(0), vec![(100, 200, false)])]);
     assert!(marks(&l).iter().filter(|m| is_mark(crate::display::Stroke::Wave)(m)).count() == 0);
 
-    // With inline proofing on, the paragraph was checked inline: overlays must not add marks to
-    // one that has issues of its own (stale by design where both could run).
-    wordcraft_proof::pl::install_dictionary("SET UTF-8\nSFX B Y 1\nSFX B y ego y\n", "2\nżeka\n").unwrap();
-    let mut c2 = LayoutCache::new();
-    let inline = layout(&d, &mut c2, &LayoutOptions { proofing: true, ..LayoutOptions::default() });
-    let para =
-        inline.pages[0].items.iter().find_map(|i| if let Placed::Lines { para, .. } = i { Some(para.clone()) } else { None }).expect("a paragraph");
-    if !para.issues.is_empty() {
-        crate::proof_overlay::set_overlays([(StoryRef::Body, Path::top(0), vec![(0, 4, false), (5, 9, true)])]);
-        let drawn = marks(&inline);
-        let waves = drawn.iter().filter(|m| is_mark(crate::display::Stroke::Wave)(m)).count();
-        let doubles = drawn.iter().filter(|m| is_mark(crate::display::Stroke::Double)(m)).count();
-        let inline_spelling = para.issues.iter().filter(|i| !i.2).count();
-        let inline_grammar = para.issues.iter().filter(|i| i.2).count();
-        assert_eq!((waves, doubles), (inline_spelling, inline_grammar), "overlays must not add marks to an inline-checked paragraph");
+    #[cfg(feature = "inline-proof")]
+    {
+        // With inline proofing on, the paragraph was checked inline: overlays must not add marks to
+        // one that has issues of its own (stale by design where both could run).
+        wordcraft_proof::pl::install_dictionary("SET UTF-8\nSFX B Y 1\nSFX B y ego y\n", "2\nżeka\n").unwrap();
+        let mut c2 = LayoutCache::new();
+        let inline = layout(&d, &mut c2, &LayoutOptions { proofing: true, ..LayoutOptions::default() });
+        let para = inline.pages[0]
+            .items
+            .iter()
+            .find_map(|i| if let Placed::Lines { para, .. } = i { Some(para.clone()) } else { None })
+            .expect("a paragraph");
+        if !para.issues.is_empty() {
+            crate::proof_overlay::set_overlays([(StoryRef::Body, Path::top(0), vec![(0, 4, false), (5, 9, true)])]);
+            let drawn = marks(&inline);
+            let waves = drawn.iter().filter(|m| is_mark(crate::display::Stroke::Wave)(m)).count();
+            let doubles = drawn.iter().filter(|m| is_mark(crate::display::Stroke::Double)(m)).count();
+            let inline_spelling = para.issues.iter().filter(|i| !i.2).count();
+            let inline_grammar = para.issues.iter().filter(|i| i.2).count();
+            assert_eq!((waves, doubles), (inline_spelling, inline_grammar), "overlays must not add marks to an inline-checked paragraph");
+        }
     }
     crate::proof_overlay::clear_overlays();
 }
@@ -81,4 +87,17 @@ fn layout_runs_without_inline_proof() {
     assert!(!para.lines.is_empty());
     #[cfg(not(feature = "inline-proof"))]
     assert!(para.issues.is_empty(), "without inline-proof, layout emits no proofing squiggles");
+}
+
+/// A reloaded language pack can change where a word hyphenates, so the cache key that keeps
+/// measured paragraphs follows the pack generation in a build with hyphenation and no inline
+/// proofing too (the web editor's build).
+#[cfg(feature = "hyphenation")]
+#[test]
+fn a_reloaded_language_pack_changes_the_layout_cache_key() {
+    let doc = Document::from_text("Zusammenarbeit");
+    let opts = LayoutOptions::default();
+    let before = crate::cache::env_hash(&doc, &opts);
+    wordcraft_proof::packs::reload();
+    assert_ne!(before, crate::cache::env_hash(&doc, &opts));
 }
