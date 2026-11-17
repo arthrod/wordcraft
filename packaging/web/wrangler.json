@@ -1,0 +1,53 @@
+{
+  "name": "wordcraft-web",
+  "compatibility_date": "2026-11-13",
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true,
+      "head_sampling_rate": 1
+    }
+  },
+  "env": {
+    "light": {
+      "name": "wordcraft-light-demo",
+      "workers_dev": true,
+      "routes": [{ "pattern": "wordcraft-light-demo.benchmarks.law", "custom_domain": true }],
+      "build": { "command": "./package.sh --static --skip-build" },
+      "assets": { "directory": "../../dist/web" }
+    },
+    "server": {
+      "name": "wordcraft-server-viewer",
+      "main": "examples/cloudflare-viewer/build/worker/shim.mjs",
+      "workers_dev": true,
+      "routes": [{ "pattern": "wordcraft-server.benchmarks.law", "custom_domain": true }],
+      "build": {
+        "command": "cargo install -q worker-build --locked && worker-build --release",
+        "cwd": "examples/cloudflare-viewer"
+      },
+      "assets": {
+        "directory": "../../dist/web",
+        "binding": "ASSETS",
+        "run_worker_first": ["/view", "/view/*"]
+      },
+      "limits": { "cpu_ms": 5000 }
+    },
+    "editor": {
+      "name": "wordcraft-web-worker",
+      "main": "examples/cloudflare-workers/build/worker/shim.mjs",
+      "workers_dev": true,
+      "routes": [{ "pattern": "wordcraft-web-worker.benchmarks.law", "custom_domain": true }],
+      "build": {
+        "command": "cargo install -q worker-build && worker-build --release",
+        "cwd": "examples/cloudflare-workers"
+      },
+      "assets": {
+        "directory": "../../dist/web",
+        "binding": "ASSETS",
+        "run_worker_first": ["/api/*", "/*.wasm"]
+      }
+    }
+  }
+}

@@ -114,6 +114,33 @@ Two ready-to-deploy examples live in this directory (with `.assetsignore` exclud
 - **Hybrid Edge deployment (Cloudflare Workers + `workers-rs`):** <https://wordcraft-web-worker.cicero-im.workers.dev/?sample&demo=1> ([`examples/cloudflare-workers/`](examples/cloudflare-workers/README.md)) — serves the same browser-first static assets via `ASSETS` (`4.87 MB` Brotli sidecar / `6.35 MB` Zstd / `6.69 MB` Gzip wasm transfer, measured live 2026-11-15) plus `GET /api/health` and an unlogged `POST /api/convert` endpoint bounded to `4 MiB` (`Cache-Control: no-store`).
 - **Server-rendered viewer (Cloudflare Workers + `workers-rs`, not deployed):** [`examples/cloudflare-viewer/`](examples/cloudflare-viewer/README.md) — the Worker opens a `.docx` with the view-only core and sends the reader a small HTML page and PNG pages, no wasm and no script (`/view?doc=samples/welcome.docx`, or upload at `/view`; page 1 of the sample is about 50 KB in all).
 
+#### One configuration, three deployments (`wrangler.json`)
+
+[`wrangler.json`](wrangler.json) in this directory describes the three ways to put the site on
+Cloudflare Workers as Wrangler environments. Pick one with `--env`; there is no default, so a
+deploy without `--env` stops instead of publishing the wrong thing.
+
+| `--env` | Worker | What is deployed |
+|---|---|---|
+| `light` | `wordcraft-light-demo` | The static site only (`dist/web` and `_headers`): the viewer-first page, no Worker code. |
+| `server` | `wordcraft-server-viewer` | The static site plus [`examples/cloudflare-viewer/`](examples/cloudflare-viewer/README.md): pages rendered on the server at `/view`. |
+| `editor` | `wordcraft-web-worker` | The static site plus [`examples/cloudflare-workers/`](examples/cloudflare-workers/README.md): Brotli sidecars and `/api/*`. |
+
+```sh
+(cd apps/wordcraft-web && trunk build --release)        # dist/web
+cd packaging/web
+pnpm dlx wrangler deploy --env light                    # or server, editor
+```
+
+Each environment's build step stages what it needs: `light` runs `package.sh --static
+--skip-build` (the `_headers` file with the page's script hash, `.assetsignore`, the Brotli
+sidecars), the other two build their Worker. Workers Logs are on for all three
+(`observability`, every request, with invocation logs): read them in the dashboard under the
+Worker's Observability tab, or follow them with `pnpm dlx wrangler tail --env <name>`. Each
+environment names its custom domain in `routes`; change the three host names to deploy to
+another zone. The examples' own `wrangler.toml` files are unchanged and still deploy from
+their directories.
+
 ### Headless conversion benchmark (`wordcraft-cli`, Step 5.2a)
 
 Measured locally via `cargo build --release -p wordcraft-cli` with `/usr/bin/time -l` to size Cloudflare Workers' 128 MB isolate RAM budget:
